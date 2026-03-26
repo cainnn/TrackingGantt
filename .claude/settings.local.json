@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(taskkill /F /PID 36208)",
+      "Bash(rm -f .next/dev/lock)",
+      "Bash(npm ls:*)",
+      "Bash(find app/api -name *.ts)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :3000)",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 36208 -Force\")",
+      "Bash(taskkill /F /PID 35952)",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 35952 -Force -ErrorAction SilentlyContinue\")",
+      "Bash(powershell.exe -Command \"Get-Process | Where-Object {$_ProcessName -eq ''node''} | Stop-Process -Force -ErrorAction SilentlyContinue\")",
+      "Bash(findstr LISTENING)",
+      "Bash(findstr :3005)",
+      "Bash(taskkill /F /PID 23616)",
+      "Bash(taskkill /F /PID 33868)",
+      "Bash(taskkill:*)",
+      "Bash(PORT=3000 npm run dev)",
+      "Bash(psql:*)"
+    ]
+  }
+}
