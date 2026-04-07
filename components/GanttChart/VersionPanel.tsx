@@ -19,9 +19,10 @@ interface Props {
   projectId: string
   open: boolean
   onClose: () => void
+  readOnly?: boolean
 }
 
-export default function VersionPanel({ projectId, open, onClose }: Props) {
+export default function VersionPanel({ projectId, open, onClose, readOnly }: Props) {
   const dispatch = useAppDispatch()
   const { versions } = useAppSelector(s => s.versions)
   const { tasks, dependencies, comparison, diffFilter } = useAppSelector(s => s.tasks)
@@ -423,6 +424,7 @@ export default function VersionPanel({ projectId, open, onClose }: Props) {
                         >
                           差异
                         </button>
+                        {!readOnly && (
                         <button
                           onClick={() => handleRestore(v)}
                           title="恢复到此版本"
@@ -430,6 +432,8 @@ export default function VersionPanel({ projectId, open, onClose }: Props) {
                         >
                           恢复
                         </button>
+                        )}
+                        {!readOnly && (
                         <button
                           onClick={() => { setEditingId(v.id); setEditName(v.name); setEditDesc(v.description ?? '') }}
                           title="编辑"
@@ -437,6 +441,8 @@ export default function VersionPanel({ projectId, open, onClose }: Props) {
                         >
                           编辑
                         </button>
+                        )}
+                        {!readOnly && (
                         <button
                           onClick={() => handleDelete(v)}
                           title="删除"
@@ -444,6 +450,7 @@ export default function VersionPanel({ projectId, open, onClose }: Props) {
                         >
                           删除
                         </button>
+                        )}
                       </div>
                     </div>
                   </div>

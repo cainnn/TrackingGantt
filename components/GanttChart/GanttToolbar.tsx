@@ -5,7 +5,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
   setSelectedIds, setTasks, saveSnapshot, undo, redo,
-  markDirty, clearDirty, clearComparison, clearDiffFilter,
+  markDirty, clearDirty, setComparison, clearComparison, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
@@ -295,6 +295,17 @@ export default function GanttToolbar({
         // Update project lines if returned
         if (data.value.project_lines) {
           dispatch(setProjectLines(data.value.project_lines))
+        }
+        // 导入后刷新版本列表 + 自动加载对比基线
+        if (data.value.version) {
+          authFetch(`/api/versions/${projectId}?list=1`)
+            .then(r => r.json())
+            .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
+            .catch(() => {})
+          dispatch(setComparison({
+            tasks: data.value.tasks.map((t: Task) => ({ ...t })),
+            versionName: data.value.version.name ?? '导入版本',
+          }))
         }
         alert(`导入成功！${data.value.message}`)
       } else {
@@ -662,10 +673,10 @@ export default function GanttToolbar({
   const [statusDateSaving, setStatusDateSaving] = useState(false)
 
   // 自由移动状态日期（仅更新 Redux + 后端，不创建版本）
-  const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleStatusDatePick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value || null
     dispatch(setStatusDate({ projectId, statusDate: val }))
-    authFetch(`/api/projects/${projectId}`, {
+    await authFetch(`/api/projects/${projectId}`, {
       method: 'PUT',
       headers: authFetchHeaders(true),
       body: JSON.stringify({ status_date: val }),
@@ -734,6 +745,9 @@ export default function GanttToolbar({
     setStatusDateSaving(false)
 
     if (snapshotData.ok) {
+      // 自动将当前状态设为对比基线，后续编辑可立即看到计划偏差
+      dispatch(setComparison({ tasks: tasks.map(t => ({ ...t })), versionName: sd }))
+
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
@@ -755,8 +769,16 @@ export default function GanttToolbar({
   const [savingChanges, setSavingChanges] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
+  const saveAbortRef = useRef<AbortController | null>(null)
   const handleSaveChanges = useCallback(async () => {
     if (dirtyIds.length === 0) return
+    // Abort any in-flight save to prevent stacking
+    saveAbortRef.current?.abort()
+    const abort = new AbortController()
+    saveAbortRef.current = abort
+    // 30s timeout
+    const timer = setTimeout(() => abort.abort(), 30000)
+
     setSavingChanges(true)
     setSaveError(null)
     const dirtyTasks = tasks.filter(t => dirtyIds.includes(t.id))
@@ -771,6 +793,7 @@ export default function GanttToolbar({
         method: 'PUT',
         headers: authFetchHeaders(true),
         body: JSON.stringify(payload),
+        signal: abort.signal,
       })
       let data: { ok?: boolean; value?: unknown; error?: string; errors?: Array<{ taskId?: string; field?: string; message?: string }> }
       try {
@@ -791,8 +814,13 @@ export default function GanttToolbar({
         setSaveError(data.error ?? '保存失败，请重试')
       }
     } catch (err) {
-      setSaveError(`网络错误: ${err instanceof Error ? err.message : '请检查网络连接'}`)
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setSaveError('保存超时，请重试')
+      } else {
+        setSaveError(`网络错误: ${err instanceof Error ? err.message : '请检查网络连接'}`)
+      }
     } finally {
+      clearTimeout(timer)
       setSavingChanges(false)
     }
   }, [dispatch, projectId, tasks, dirtyIds])
@@ -801,6 +829,7 @@ export default function GanttToolbar({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return
+      if (readOnly) return
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); dispatch(undo()) }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); dispatch(redo()) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') handleCopy()
@@ -809,7 +838,7 @@ export default function GanttToolbar({
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [dispatch, handleCopy, handlePaste, handleSaveChanges])
+  }, [dispatch, handleCopy, handlePaste, handleSaveChanges, readOnly])
 
   const sep = <div className="w-px h-6 bg-gray-200 mx-1" />
 
@@ -982,6 +1011,7 @@ export default function GanttToolbar({
             projectId={projectId}
             open={versionPanelOpen}
             onClose={() => setVersionPanelOpen(false)}
+            readOnly={readOnly}
           />
         </div>
 
@@ -1114,7 +1144,21 @@ export default function GanttToolbar({
             </Ic>
             {colSettingsOpen && (
               <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[140px]">
-                <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold">显示列</div>
+                <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold flex items-center justify-between gap-2">
+                <span>显示列</span>
+                <span className="flex gap-1">
+                  {[
+                    { label: '全选', action: () => onVisibleColsChange(OPTIONAL_COL_META.map(c => c.key)) },
+                    { label: '全不选', action: () => onVisibleColsChange([]) },
+                    { label: '反选', action: () => onVisibleColsChange(OPTIONAL_COL_META.filter(c => !visibleCols.includes(c.key)).map(c => c.key)) },
+                  ].map(b => (
+                    <button key={b.label} onClick={b.action}
+                            className="px-1.5 py-0.5 text-[10px] text-blue-600 hover:bg-blue-100 rounded">
+                      {b.label}
+                    </button>
+                  ))}
+                </span>
+              </div>
                 {OPTIONAL_COL_META.map(col => (
                   <label key={col.key}
                          className="flex items-center gap-2 px-3 py-1.5 text-[12px] cursor-pointer hover:bg-blue-50">

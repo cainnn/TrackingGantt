@@ -292,6 +292,52 @@ export async function POST(req: NextRequest, { params }: Params) {
 }
 
 // ── PUT ───────────────────────────────────────────────────────────────────
+
+const normalizeDate = (date: unknown): string | null => {
+  if (!date) return null
+  if (typeof date === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date
+    if (date.includes('T')) return date.split('T')[0]
+    return date
+  }
+  if (date instanceof Date) {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+  return null
+}
+
+// Batch insert lifecycle events in one query
+async function addLifecycleBatch(
+  client: PoolClient,
+  events: Array<{
+    taskId: string; taskCode: string; projectId: string; userId: string
+    event_type: string; field_name?: string | null
+    old_value?: string | null; new_value?: string | null
+    description: string
+  }>
+) {
+  if (events.length === 0) return
+  const values: unknown[] = []
+  const rows: string[] = []
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i]
+    const off = i * 9
+    rows.push(`($${off+1},$${off+2},$${off+3},$${off+4},$${off+5},$${off+6},$${off+7},$${off+8},$${off+9})`)
+    values.push(e.taskId, e.taskCode, e.projectId, e.event_type,
+                e.field_name ?? null, e.old_value ?? null, e.new_value ?? null,
+                e.description, e.userId)
+  }
+  await client.query(
+    `INSERT INTO task_lifecycle
+       (task_id, task_code, project_id, event_type, field_name, old_value, new_value, description, created_by)
+     VALUES ${rows.join(',')}`,
+    values
+  )
+}
+
 export async function PUT(req: NextRequest, { params }: Params) {
   const auth = getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
@@ -327,37 +373,38 @@ export async function PUT(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
 
+    // ── Batch fetch all old tasks in one query ────────────────────────────
+    const inputIds = taskInputs.map((t: Record<string, unknown>) => t.id as string).filter(Boolean)
+    const oldMap = new Map<string, Record<string, unknown>>()
+    if (inputIds.length > 0) {
+      const ph = inputIds.map((_: string, i: number) => `$${i + 2}`).join(',')
+      const prevRes = await client.query(
+        `SELECT * FROM tasks WHERE project_id = $1 AND id IN (${ph}) AND is_deleted = false`,
+        [projectId, ...inputIds]
+      )
+      for (const row of prevRes.rows) oldMap.set(row.id, row)
+    }
+
+    // Collect lifecycle events for batch insert at the end
+    const lifecycleEvents: Array<{
+      taskId: string; taskCode: string; projectId: string; userId: string
+      event_type: string; field_name?: string | null
+      old_value?: string | null; new_value?: string | null
+      description: string
+    }> = []
+
+    // Collect parent IDs that need name lookups for lifecycle descriptions
+    const parentLookupIds = new Set<string>()
+
     for (const task of taskInputs) {
       const { id } = task as { id: string }
       if (!id) continue
 
-      // Fetch current state for diff
-      const prev = await client.query(
-        'SELECT * FROM tasks WHERE id = $1 AND project_id = $2 AND is_deleted = false',
-        [id, projectId]
-      )
-      if (!prev.rows.length) continue
-      const old = prev.rows[0]
+      const old = oldMap.get(id)
+      if (!old) continue
 
       const hasParentKey = 'parent_id' in task
       const hasAssigneeKey = 'assignee' in task
-
-      // 确保日期格式正确
-      const normalizeDate = (date: unknown): string | null => {
-        if (!date) return null
-        if (typeof date === 'string') {
-          if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date
-          if (date.includes('T')) return date.split('T')[0]
-          return date
-        }
-        if (date instanceof Date) {
-          const year = date.getFullYear()
-          const month = String(date.getMonth() + 1).padStart(2, '0')
-          const day = String(date.getDate()).padStart(2, '0')
-          return `${year}-${month}-${day}`
-        }
-        return null
-      }
 
       // ── 里程碑强制约束：工期=0, end_date=start_date, percent_done=100 ──
       const taskRec = task as Record<string, unknown>
@@ -365,29 +412,27 @@ export async function PUT(req: NextRequest, { params }: Params) {
       if (isMilestone) {
         taskRec.duration = 0
         taskRec.percent_done = 100
-        const sd = normalizeDate(taskRec.start_date) ?? toDateStr(old.start_date)
+        const sd = normalizeDate(taskRec.start_date) ?? toDateStr(old.start_date as string)
         if (sd) taskRec.end_date = sd
       }
-
-      // 项目开始日期仅用于新建任务的默认值，不再限制任务拖动范围
 
       // ── 校验字段合法性 ──────────────────────────────────────────────────
       {
         const errors: Array<{ taskId: string; field: string; message: string }> = []
-        const tName = (taskRec.name as string | undefined) ?? old.name
+        const tName = (taskRec.name as string | undefined) ?? old.name as string
         if (typeof tName === 'string' && tName.trim() === '') {
           errors.push({ taskId: id, field: 'name', message: '任务名称不能为空' })
         }
-        const tDur = (taskRec.duration as number | undefined) ?? old.duration
+        const tDur = (taskRec.duration as number | undefined) ?? old.duration as number
         if (tDur != null && tDur < 0) {
           errors.push({ taskId: id, field: 'duration', message: '工期不能为负数' })
         }
-        const tPct = (taskRec.percent_done as number | undefined) ?? old.percent_done
+        const tPct = (taskRec.percent_done as number | undefined) ?? old.percent_done as number
         if (tPct != null && (tPct < 0 || tPct > 100)) {
           errors.push({ taskId: id, field: 'percent_done', message: '完成度必须在 0~100 之间' })
         }
-        const tStart = normalizeDate(taskRec.start_date) ?? toDateStr(old.start_date)
-        const tEnd   = normalizeDate(taskRec.end_date)   ?? toDateStr(old.end_date)
+        const tStart = normalizeDate(taskRec.start_date) ?? toDateStr(old.start_date as string)
+        const tEnd   = normalizeDate(taskRec.end_date)   ?? toDateStr(old.end_date as string)
         if (tStart && tEnd && tStart > tEnd) {
           errors.push({ taskId: id, field: 'start_date', message: '开始日期不能晚于结束日期' })
         }
@@ -444,36 +489,21 @@ export async function PUT(req: NextRequest, { params }: Params) {
                          && old.order_index !== cur.order_index
 
       if (parentChanged || orderChanged) {
-        let desc: string
-        if (parentChanged && cur.parent_id === null) {
-          desc = `任务「${cur.name}」（${code}）升级为顶级任务`
-        } else if (parentChanged) {
-          // look up new parent name
-          const parentRes = await client.query('SELECT name, task_code FROM tasks WHERE id = $1', [cur.parent_id])
-          const pName = parentRes.rows[0]?.name ?? cur.parent_id
-          const pCode = parentRes.rows[0]?.task_code ?? ''
-          desc = `任务「${cur.name}」（${code}）移至子任务，父级：「${pName}」（${pCode}）`
-        } else {
-          const dir = cur.order_index < old.order_index ? '上移' : '下移'
-          desc = `任务「${cur.name}」（${code}）${dir}（排序 ${old.order_index} → ${cur.order_index}）`
+        if (parentChanged && cur.parent_id) {
+          parentLookupIds.add(cur.parent_id)
         }
-        await addLifecycle(client, {
-          taskId: id, taskCode: code, projectId, userId: auth.value.userId,
-          event_type: 'moved',
-          field_name: parentChanged ? 'parent_id' : 'order_index',
-          old_value: parentChanged ? String(old.parent_id ?? '顶级') : String(old.order_index),
-          new_value: parentChanged ? String(cur.parent_id ?? '顶级') : String(cur.order_index),
-          description: desc,
-        })
+        // Defer lifecycle event — parent name lookup done later in batch
+        // Store move info for post-processing
+        (cur as Record<string, unknown>)._moveInfo = {
+          parentChanged, orderChanged, old, code,
+        }
 
         // ── When parent_id changes, update both old and new parent task dates ────────
         if (parentChanged) {
           const collected: TaskLike[] = []
-          // Update old parent (lost a child)
           if (old.parent_id) {
-            await updateSummaryTaskDateRecursive(client, old.parent_id, collected)
+            await updateSummaryTaskDateRecursive(client, old.parent_id as string, collected)
           }
-          // Update new parent (gained a child)
           if (cur.parent_id) {
             await updateSummaryTaskDateRecursive(client, cur.parent_id, collected)
           }
@@ -483,8 +513,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
         }
       }
 
-      // ── Detect field updates ────────────────────────────────────────────
+      // ── Detect field updates (collect for batch lifecycle insert) ───────
       const COMPARE_FIELDS = ['name','start_date','end_date','duration','assignee','is_milestone','note']
+      let dateChanged = false
       for (const f of COMPARE_FIELDS) {
         if (!(f in task)) continue
         const norm = (v: unknown) => {
@@ -508,24 +539,73 @@ export async function PUT(req: NextRequest, { params }: Params) {
         } else {
           desc = `任务「${cur.name}」（${code}）${label}：${ovStr} → ${nvStr}`
         }
-        await addLifecycle(client, {
+        lifecycleEvents.push({
           taskId: id, taskCode: code, projectId, userId: auth.value.userId,
           event_type: 'updated', field_name: f,
           old_value: ovStr, new_value: nvStr, description: desc,
         })
 
-        // ── When task date changes, update parent summary task dates ────────────
-        if (f === 'start_date' || f === 'end_date') {
-          if (cur.parent_id) {
-            const collected: TaskLike[] = []
-            await updateSummaryTaskDateRecursive(client, cur.parent_id, collected)
-            for (const u of collected) {
-              if (!updated.some((x: TaskLike) => x.id === u.id)) updated.push(u)
-            }
-          }
+        if (f === 'start_date' || f === 'end_date') dateChanged = true
+      }
+
+      // ── When task date changes, update parent summary task dates (once) ─
+      if (dateChanged && cur.parent_id) {
+        const collected: TaskLike[] = []
+        await updateSummaryTaskDateRecursive(client, cur.parent_id, collected)
+        for (const u of collected) {
+          if (!updated.some((x: TaskLike) => x.id === u.id)) updated.push(u)
         }
       }
     }
+
+    // ── Batch lookup parent names for move lifecycle events ───────────────
+    const parentNameMap = new Map<string, { name: string; task_code: string }>()
+    if (parentLookupIds.size > 0) {
+      const lookupArr = [...parentLookupIds]
+      const ph = lookupArr.map((_: string, i: number) => `$${i + 1}`).join(',')
+      const parentRes = await client.query(
+        `SELECT id, name, task_code FROM tasks WHERE id IN (${ph})`,
+        lookupArr
+      )
+      for (const r of parentRes.rows) parentNameMap.set(r.id, { name: r.name, task_code: r.task_code })
+    }
+
+    // ── Generate move lifecycle events with resolved parent names ─────────
+    for (const cur of updated) {
+      const moveInfo = (cur as Record<string, unknown>)._moveInfo as {
+        parentChanged: boolean; orderChanged: boolean
+        old: Record<string, unknown>; code: string
+      } | undefined
+      if (!moveInfo) continue
+      delete (cur as Record<string, unknown>)._moveInfo
+
+      const { parentChanged, old, code } = moveInfo
+      let desc: string
+      if (parentChanged && cur.parent_id === null) {
+        desc = `任务「${(cur as Record<string, unknown>).name}」（${code}）升级为顶级任务`
+      } else if (parentChanged) {
+        const pInfo = parentNameMap.get(cur.parent_id as string)
+        const pName = pInfo?.name ?? cur.parent_id
+        const pCode = pInfo?.task_code ?? ''
+        desc = `任务「${(cur as Record<string, unknown>).name}」（${code}）移至子任务，父级：「${pName}」（${pCode}）`
+      } else {
+        const curRec = cur as Record<string, unknown>
+        const dir = Number(curRec.order_index) < Number(old.order_index) ? '上移' : '下移'
+        desc = `任务「${curRec.name}」（${code}）${dir}（排序 ${old.order_index} → ${curRec.order_index}）`
+      }
+      const curRec = cur as Record<string, unknown>
+      lifecycleEvents.push({
+        taskId: cur.id, taskCode: code, projectId, userId: auth.value.userId,
+        event_type: 'moved',
+        field_name: parentChanged ? 'parent_id' : 'order_index',
+        old_value: parentChanged ? String(old.parent_id ?? '顶级') : String(old.order_index),
+        new_value: parentChanged ? String(curRec.parent_id ?? '顶级') : String(curRec.order_index),
+        description: desc,
+      })
+    }
+
+    // ── Batch insert all lifecycle events ─────────────────────────────────
+    await addLifecycleBatch(client, lifecycleEvents)
 
     // FS 依赖自动级联：确保后继任务开始日期 >= 前置任务结束日期 + lag
     const cascadedIds = await cascadeDependencies(client, projectId)

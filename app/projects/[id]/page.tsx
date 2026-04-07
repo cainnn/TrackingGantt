@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -47,7 +47,21 @@ export default function ProjectPage() {
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
   const [showProjectLines,  setShowProjectLines]  = useState(false)
   const [showComparison,    setShowComparison]    = useState(true)
-  const [visibleCols,       setVisibleCols]       = useState<OptionalCol[]>(DEFAULT_VISIBLE_COLS)
+  const [visibleCols, setVisibleCols] = useState<OptionalCol[]>(() => {
+    if (typeof window === 'undefined') return DEFAULT_VISIBLE_COLS
+    try {
+      const saved = localStorage.getItem(`gantt-cols-${projectId}`)
+      if (saved) {
+        const parsed = JSON.parse(saved) as OptionalCol[]
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_VISIBLE_COLS
+  })
+  const handleVisibleColsChange = useCallback((cols: OptionalCol[]) => {
+    setVisibleCols(cols)
+    try { localStorage.setItem(`gantt-cols-${projectId}`, JSON.stringify(cols)) } catch { /* ignore */ }
+  }, [projectId])
 
   useEffect(() => {
     if (!user) { router.push('/login'); return }
@@ -144,7 +158,7 @@ export default function ProjectPage() {
         showComparison={showComparison}
         onToggleComparison={() => setShowComparison(v => !v)}
         visibleCols={visibleCols}
-        onVisibleColsChange={setVisibleCols}
+        onVisibleColsChange={handleVisibleColsChange}
       />
 
       {showProjectLines && (

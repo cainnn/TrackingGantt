@@ -91,6 +91,132 @@ function getDownstreamIds(taskId: string, deps: Dependency[]): string[] {
   return result
 }
 
+/**
+ * 客户端即时级联：给定一个已变更的任务，计算所有下游依赖任务和摘要任务的新日期。
+ * 返回所有需要更新的任务（不含触发任务本身）。
+ */
+function cascadeLocal(
+  changedTask: Task,
+  allTasks: Task[],
+  deps: Dependency[],
+): Task[] {
+  const downstreamIds = getDownstreamIds(changedTask.id, deps)
+  if (downstreamIds.length === 0) return []
+
+  const localStart = new Map<string, Date>()
+  const localEnd   = new Map<string, Date>()
+
+  // 初始化所有任务日期
+  allTasks.forEach(t => {
+    if (t.start_date) localStart.set(t.id, sod(new Date(t.start_date)))
+    if (t.end_date)   localEnd.set(t.id, sod(new Date(t.end_date)))
+  })
+  // 覆盖已变更任务的日期
+  if (changedTask.start_date) localStart.set(changedTask.id, sod(new Date(changedTask.start_date)))
+  if (changedTask.end_date)   localEnd.set(changedTask.id, sod(new Date(changedTask.end_date)))
+
+  const result: Record<string, Task> = {}
+
+  // 迭代式级联
+  let changed = true, iter = 0
+  while (changed && iter++ < downstreamIds.length + 1) {
+    changed = false
+    for (const toId of downstreamIds) {
+      const t = allTasks.find(x => x.id === toId)
+      if (!t || !t.start_date || !t.end_date) continue
+
+      const incoming = deps.filter(d => d.to_task_id === toId)
+      if (incoming.length === 0 && t.auto_schedule === false) continue
+      let maxRequiredStart: Date | null = null
+
+      for (const dep of incoming) {
+        const predStart = localStart.get(dep.from_task_id)
+        const predEnd   = localEnd.get(dep.from_task_id)
+        if (!predStart || !predEnd) continue
+        const lag = dep.lag ?? 0
+        const depType = dep.type ?? 2
+
+        let requiredStart: Date
+        if (depType === 2) {
+          requiredStart = addDays(predEnd, lag)
+        } else if (depType === 0) {
+          requiredStart = addDays(predStart, lag)
+        } else if (depType === 3) {
+          const curS = localStart.get(toId)!
+          const curE = localEnd.get(toId)!
+          const dur = diffDays(curS, curE)
+          requiredStart = addDays(predEnd, lag - dur)
+        } else {
+          const curS = localStart.get(toId)!
+          const curE = localEnd.get(toId)!
+          const dur = diffDays(curS, curE)
+          requiredStart = addDays(predStart, lag - dur)
+        }
+
+        if (!maxRequiredStart || requiredStart > maxRequiredStart) {
+          maxRequiredStart = requiredStart
+        }
+      }
+
+      if (!maxRequiredStart) continue
+      const curStart = localStart.get(toId)!
+      if (curStart.getTime() === maxRequiredStart.getTime()) continue
+
+      const shift = diffDays(curStart, maxRequiredStart)
+      const s = addDays(curStart, shift)
+      let e = addDays(localEnd.get(toId)!, shift)
+      if (t.is_milestone) e = s
+      if (e < s) e = s
+      localStart.set(toId, s)
+      localEnd.set(toId, e)
+      result[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+      changed = true
+    }
+  }
+
+  // 更新摘要任务（父任务）日期范围
+  const affectedParents = new Set<string>()
+  for (const id of Object.keys(result)) {
+    const tk = allTasks.find(x => x.id === id)
+    if (tk?.parent_id) affectedParents.add(tk.parent_id)
+  }
+  // 也检查直接变更任务的父级
+  if (changedTask.parent_id) affectedParents.add(changedTask.parent_id)
+
+  for (const pid of affectedParents) {
+    let curPid: string | null = pid
+    const seen = new Set<string>()
+    while (curPid && !seen.has(curPid)) {
+      seen.add(curPid)
+      const children = allTasks.filter(c => c.parent_id === curPid)
+      if (children.length === 0) break
+      let minS: string | null = null
+      let maxE: string | null = null
+      for (const c of children) {
+        const ct = result[c.id] ?? (c.id === changedTask.id ? changedTask : c)
+        const s = ct.start_date?.split('T')[0] ?? null
+        const e2 = ct.end_date?.split('T')[0] ?? null
+        if (s && (!minS || s < minS)) minS = s
+        if (e2 && (!maxE || e2 > maxE)) maxE = e2
+      }
+      if (minS && maxE) {
+        const parent = allTasks.find(x => x.id === curPid)
+        if (parent) {
+          result[curPid] = {
+            ...parent,
+            start_date: minS,
+            end_date: maxE,
+            duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))),
+          }
+        }
+      }
+      curPid = allTasks.find(x => x.id === curPid)?.parent_id ?? null
+    }
+  }
+
+  return Object.values(result)
+}
+
 /** 递归收集某任务的所有后代 ID（子、孙…） */
 function getDescendantIds(taskId: string, tasks: Task[]): string[] {
   const result: string[] = []
@@ -187,7 +313,10 @@ export default function GanttChart({
   const [editId, setEditId]     = useState<string|null>(null)
   const [editName, setEditName] = useState('')
   const nameInputRef            = useRef<HTMLInputElement>(null)
-  useEffect(() => { if (editId) nameInputRef.current?.select() }, [editId])
+  const nameCommittedRef        = useRef(false)
+  const editNameRef             = useRef(editName)
+  editNameRef.current = editName  // always keep ref in sync
+  useEffect(() => { if (editId) { nameCommittedRef.current = false; nameInputRef.current?.select() } }, [editId])
 
   // ── Drag state ─────────────────────────────────────────────────────────
   const [drag, setDrag]           = useState<DragState|null>(null)
@@ -235,6 +364,7 @@ export default function GanttChart({
   // ── Panel resize / collapse ─────────────────────────────────────────────
   const [panelW, setPanelW]           = useState(INIT_LEFT_W)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
   const [splitterDrag, setSplitterDrag] = useState<{ startX: number; startW: number } | null>(null)
   const prevPanelW = useRef(INIT_LEFT_W)
 
@@ -320,6 +450,18 @@ export default function GanttChart({
   const rightRef       = useRef<HTMLDivElement>(null)
   const rightHeaderRef = useRef<HTMLDivElement>(null)
   const scrollHLock    = useRef(false)
+
+  // 测量右侧面板水平滚动条高度，用于左侧面板底部补偿
+  const [hScrollbarH, setHScrollbarH] = useState(0)
+  useEffect(() => {
+    const el = rightRef.current
+    if (!el) return
+    const measure = () => setHScrollbarH(el.offsetHeight - el.clientHeight)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   const syncTimelineScrollLeft = useCallback((sl: number) => {
     scrollHLock.current = true
@@ -871,13 +1013,20 @@ export default function GanttChart({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [drag, connect])
 
-  // ── 节流函数：限制setState频率，提高性能 ───────────────────────────────
+  // ── 节流函数：限制setState频率，trailing 确保最后一帧一定生效 ──────────
   const throttleTimer = useRef<NodeJS.Timeout | null>(null)
+  const pendingPreview = useRef<Record<string, Task> | null>(null)
   const throttledSetPreview = useCallback((map: Record<string, Task>) => {
+    pendingPreview.current = map
     if (throttleTimer.current) return
     setPreviewMap(map)
     throttleTimer.current = setTimeout(() => {
       throttleTimer.current = null
+      // flush latest pending value so the last frame is never dropped
+      if (pendingPreview.current) {
+        setPreviewMap(pendingPreview.current)
+        pendingPreview.current = null
+      }
     }, 16) // 60fps
   }, [])
 
@@ -1192,24 +1341,29 @@ export default function GanttChart({
           clearTimeout(throttleTimer.current)
           throttleTimer.current = null
         }
+        pendingPreview.current = null
 
-        let updatedList = drag.dragging ? Object.values(previewMap) : []
+        // Use pendingPreview if previewMap is stale (throttle dropped the last frame)
+        const finalPreview = drag.dragging ? Object.values(previewMap) : []
         setDrag(null)
         setPreviewMap({})
 
         const isSummaryDrag = summarySet.has(drag.taskId)
 
-        // 保留完整列表用于乐观UI更新（包含摘要任务）
-        const allUpdated = [...updatedList]
+        // 保留完整列表用于乐观UI更新（包含级联下游 + 摘要任务）
+        const allUpdated = [...finalPreview]
 
-        if (updatedList.length > 0 && isSummaryDrag) {
+        // dirtyList: 只标记需要服务端保存的任务（服务端自动级联 + 重算摘要）
+        let dirtyList: Task[] = []
+
+        if (finalPreview.length > 0 && isSummaryDrag) {
           // ── 摘要任务拖动提交：只提交非摘要后代 + 外部级联任务（服务端自动重算摘要日期）
-          updatedList = updatedList.filter(t => !summarySet.has(t.id))
-        } else if (updatedList.length > 0 && !isSummaryDrag) {
-          // ── 普通叶子任务拖动提交（原有逻辑）
+          dirtyList = finalPreview.filter(t => !summarySet.has(t.id))
+        } else if (finalPreview.length > 0 && !isSummaryDrag) {
+          // ── 普通叶子任务拖动：只标记被拖任务为脏（服务端自动级联下游）
           const draggedTask = tasks.find(t => t.id === drag.taskId)
           if (draggedTask && draggedTask.auto_schedule !== false) {
-            const dragged = updatedList.find(t => t.id === drag.taskId)
+            const dragged = finalPreview.find(t => t.id === drag.taskId)
             const incoming = deps.filter(d => d.to_task_id === drag.taskId)
             const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
 
@@ -1217,7 +1371,7 @@ export default function GanttChart({
               const fixedEnd = draggedTask.end_date!
               const newStart = dragged?.start_date ?? draggedTask.start_date
               const newDur = newStart ? diffDays(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
-              updatedList = [{
+              dirtyList = [{
                 ...draggedTask,
                 start_date: newStart,
                 end_date: fixedEnd,
@@ -1228,22 +1382,25 @@ export default function GanttChart({
               const fixedStart = hasIncoming ? draggedTask.start_date! : (dragged?.start_date ?? draggedTask.start_date!)
               const newEnd = dragged?.end_date ?? draggedTask.end_date
               const newDur = newEnd ? diffDays(new Date(fixedStart), new Date(newEnd)) : (draggedTask.duration ?? 0)
-              updatedList = [{
+              dirtyList = [{
                 ...draggedTask,
                 start_date: fixedStart,
                 end_date: newEnd,
                 duration: Math.max(newDur, 1),
               }]
             }
+          } else if (draggedTask) {
+            const dragged = finalPreview.find(t => t.id === drag.taskId)
+            dirtyList = [dragged ?? draggedTask]
           }
         }
 
-        if (updatedList.length > 0) {
+        if (dirtyList.length > 0 || allUpdated.length > 0) {
           dispatch(saveSnapshot())
-          // 乐观更新UI：包含摘要任务（保持界面一致），但只标记非摘要任务为脏（服务端自动重算摘要日期）
-          const optimistic = isSummaryDrag ? allUpdated : updatedList
-          dispatch(updateTasks(optimistic))
-          dispatch(markDirty(updatedList.map(t => t.id)))
+          // 乐观更新UI：包含级联下游 + 摘要任务，界面立即反映关联变更
+          dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
+          // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
+          dispatch(markDirty(dirtyList.map(t => t.id)))
         }
       }
 
@@ -1356,15 +1513,20 @@ export default function GanttChart({
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
-    if (!editId || !editName.trim()) { setEditId(null); return }
+    if (nameCommittedRef.current) return          // prevent double commit (Enter+blur)
+    nameCommittedRef.current = true
+    const name = editNameRef.current.trim()       // always use latest value via ref
+    if (!editId || !name) { setEditId(null); return }
     const orig = tasks.find(t=>t.id===editId)
     if (!orig) { setEditId(null); return }
-    const updated = { ...orig, name: editName.trim() }
-    dispatch(saveSnapshot())
-    dispatch(updateTasks([updated]))
-    dispatch(markDirty([editId]))
+    if (orig.name !== name) {
+      const updated = { ...orig, name }
+      dispatch(saveSnapshot())
+      dispatch(updateTasks([updated]))
+      dispatch(markDirty([editId]))
+    }
     setEditId(null)
-  }, [editId, editName, tasks, dispatch, projectId])
+  }, [editId, tasks, dispatch])
 
   // ── Commit inline cell edit ─────────────────────────────────────────────
   const commitCellEdit = useCallback(async () => {
@@ -1416,10 +1578,13 @@ export default function GanttChart({
     if (Object.keys(patch).length === 0) { setCellEdit(null); return }
     const updated = { ...orig, ...patch } as typeof orig
     dispatch(saveSnapshot())
-    dispatch(updateTasks([updated]))
-    dispatch(markDirty([orig.id]))
+
+    // 客户端即时级联下游依赖任务
+    const cascaded = cascadeLocal(updated, tasks, deps)
+    dispatch(updateTasks([updated, ...cascaded]))
+    dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
     setCellEdit(null)
-  }, [cellEdit, tasks, dispatch])
+  }, [cellEdit, tasks, deps, dispatch])
 
   // ── 自动排程开关 ────────────────────────────────────────────────────────
   const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
@@ -2264,7 +2429,7 @@ export default function GanttChart({
                                onBlur={commitName}
                                onKeyDown={e => {
                                  if (e.key === 'Enter') commitName()
-                                 if (e.key === 'Escape') setEditId(null)
+                                 if (e.key === 'Escape') { nameCommittedRef.current = true; setEditId(null) }
                                }}
                                onClick={e => e.stopPropagation()} />
                       : <span className={`truncate text-[12px] flex-1 min-w-0 ${row.hasChildren
@@ -2473,12 +2638,14 @@ export default function GanttChart({
           {rowDrag?.dragging && dropIdx === flatRows.length && (
             <div style={{ height: 2, background: '#3b82f6' }} />
           )}
+          {/* 补偿右侧水平滚动条高度，使左右面板底部对齐 */}
+          {hScrollbarH > 0 && <div style={{ height: hScrollbarH, flexShrink: 0 }} />}
         </div>
       </div>
 
       {/* ── Splitter ─────────────────────────────────────────────────── */}
       <div
-        className="flex-none relative flex flex-col items-center justify-center select-none"
+        className="flex-none relative flex flex-col items-center justify-center select-none gap-2"
         style={{
           width: 8,
           background: splitterDrag ? '#dbeafe' : '#f3f4f6',
@@ -2492,10 +2659,11 @@ export default function GanttChart({
           setSplitterDrag({ startX: e.clientX, startW: panelCollapsed ? 0 : panelW })
         }}
       >
+        {/* Collapse / expand left panel */}
         <button
-          title={panelCollapsed ? '展开面板' : '折叠面板'}
+          title={panelCollapsed ? '展开左面板' : '折叠左面板'}
           style={{
-            width: 16, height: 36, background: '#e5e7eb',
+            width: 16, height: 32, background: '#e5e7eb',
             border: '1px solid #d1d5db', borderRadius: 4,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'pointer', fontSize: 11, color: '#6b7280',
@@ -2514,10 +2682,29 @@ export default function GanttChart({
         >
           {panelCollapsed ? '›' : '‹'}
         </button>
+        {/* Collapse / expand right panel (timeline) */}
+        <button
+          title={rightCollapsed ? '展开时间轴' : '折叠时间轴'}
+          style={{
+            width: 16, height: 32, background: rightCollapsed ? '#dbeafe' : '#e5e7eb',
+            border: `1px solid ${rightCollapsed ? '#93c5fd' : '#d1d5db'}`, borderRadius: 4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', fontSize: 11, color: rightCollapsed ? '#2563eb' : '#6b7280',
+          }}
+          onClick={e => {
+            e.stopPropagation()
+            setRightCollapsed(v => !v)
+          }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          {rightCollapsed ? '‹' : '›'}
+        </button>
       </div>
 
       {/* ── Right timeline（上：日期头冻结；上下同步横向滚动，仅下方纵向滚动）──── */}
-      <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-white">
+      <div className="flex flex-col min-h-0 bg-white"
+           style={{ flex: rightCollapsed ? '0 0 0px' : '1 1 0%', overflow: 'hidden',
+                    transition: splitterDrag ? undefined : 'flex 0.2s ease' }}>
         <div
           ref={rightHeaderRef}
           onScroll={onRightHeaderScroll}
@@ -2767,7 +2954,7 @@ export default function GanttChart({
                    style={{ cursor:'pointer', opacity: isDragging?0.7:1 }}
                    onMouseEnter={()=>setHoveredBar(t.id)}
                    onMouseLeave={()=>setHoveredBar(null)}
-                   onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
+                   onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e=>{
                      if (e.button!==0) return
                      e.stopPropagation()
@@ -2800,7 +2987,7 @@ export default function GanttChart({
               const sDoneW = w * Math.max(0, Math.min(1, sPct / 100))
               return (
                 <g key={t.id}
-                   onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
+                   onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e=>{ if(e.button!==0)return; onBarMouseDown(e,t) }}
                    style={{ cursor:'grab', opacity: isDragging?0.7:1 }}>
                   <text x={x-4} y={y+BAR_H/2+4} fontSize={11} textAnchor="end" fill="#6b7280" fontWeight="600" style={{ pointerEvents:'none' }}>{t.name}</text>
@@ -2828,7 +3015,7 @@ export default function GanttChart({
               <g key={t.id} style={{ opacity: isDragging?0.65:1 }}
                  onMouseEnter={()=>setHoveredBar(t.id)}
                  onMouseLeave={()=>setHoveredBar(null)}
-                 onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
+                 onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                  onMouseMove={(e) => {
                    // 动态更新光标样式
                    const mouseX = getSvgX(e.clientX)

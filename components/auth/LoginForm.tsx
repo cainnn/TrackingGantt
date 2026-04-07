@@ -92,6 +92,15 @@ export default function LoginForm() {
       >
         {loading ? '登录中...' : '登录'}
       </button>
+      <div className="mt-3 pt-3 border-t border-gray-100 text-center">
+        <button
+          type="button"
+          onClick={() => { setLogin('view'); setPassword('view123') }}
+          className="text-xs text-gray-400 hover:text-blue-500 transition-colors"
+        >
+          试用账号：view / view123（只读，可体验AI功能）
+        </button>
+      </div>
     </form>
   )
 }
