@@ -18,6 +18,7 @@ import { parseExcelFile, validateImportData, type ImportTask } from '@/lib/clien
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { OPTIONAL_COL_META, type OptionalCol } from './GanttChart'
 import VersionPanel from './VersionPanel'
+import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 
 // ── Flat tree order ───────────────────────────────────────────────────────
 function getFlatOrder(tasks: Task[]): Task[] {
@@ -190,6 +191,24 @@ export default function GanttToolbar({
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
 
+  // 上一版本的快照任务（用于检测是否有变更）
+  const [lastSnapshotTasks, setLastSnapshotTasks] = useState<SnapshotTask[] | null>(null)
+
+  // 检测当前任务相对于上一版本快照是否有变更
+  const hasChanges = React.useMemo(() => {
+    // 没有上一版本 → 首次确认，总是允许
+    if (!lastSnapshotTasks) return versions.length === 0
+    const currentSnap: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
+      id: t.id, task_code: t.task_code, name: t.name,
+      start_date: t.start_date, end_date: t.end_date,
+      duration: t.duration, assignee: t.assignee,
+      percent_done: t.percent_done, is_milestone: t.is_milestone,
+      parent_id: t.parent_id,
+    }))
+    const diffs = diffSnapshots(lastSnapshotTasks, currentSnap)
+    return diffs.length > 0
+  }, [lastSnapshotTasks, tasks, versions.length])
+
   // 初始加载时，拉取版本列表
   useEffect(() => {
     authFetch(`/api/versions/${projectId}?list=1`)
@@ -197,6 +216,20 @@ export default function GanttToolbar({
       .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
       .catch(() => {})
   }, [projectId, dispatch])
+
+  // 版本列表变化时，拉取最新版本的快照用于变更检测
+  useEffect(() => {
+    if (!versions.length) { setLastSnapshotTasks(null); return }
+    const latestId = versions[0].id
+    authFetch(`/api/versions/${projectId}?id=${latestId}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok && d.value?.snapshot?.tasks) {
+          setLastSnapshotTasks(d.value.snapshot.tasks)
+        }
+      })
+      .catch(() => {})
+  }, [versions, projectId])
 
 
   // ── Export ─────────────────────────────────────────────────────────────
@@ -745,6 +778,16 @@ export default function GanttToolbar({
     setStatusDateSaving(false)
 
     if (snapshotData.ok) {
+      // 更新快照基线，使确认变更按钮立即置灰
+      const currentSnap: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
+        id: t.id, task_code: t.task_code, name: t.name,
+        start_date: t.start_date, end_date: t.end_date,
+        duration: t.duration, assignee: t.assignee,
+        percent_done: t.percent_done, is_milestone: t.is_milestone,
+        parent_id: t.parent_id,
+      }))
+      setLastSnapshotTasks(currentSnap)
+
       // 自动将当前状态设为对比基线，后续编辑可立即看到计划偏差
       dispatch(setComparison({ tasks: tasks.map(t => ({ ...t })), versionName: sd }))
 
@@ -939,10 +982,10 @@ export default function GanttToolbar({
               />
               <button
                 onClick={handleConfirmChanges}
-                disabled={!currentProject?.status_date || statusDateSaving}
-                title="确认变更：保存所有改动并创建版本快照"
+                disabled={!currentProject?.status_date || statusDateSaving || !hasChanges}
+                title={!hasChanges ? '没有任务变更，无需确认' : '确认变更：保存所有改动并创建版本快照'}
                 className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
-                  ${currentProject?.status_date && !statusDateSaving
+                  ${currentProject?.status_date && !statusDateSaving && hasChanges
                     ? 'border-green-500 text-green-700 bg-green-50 hover:bg-green-100 cursor-pointer'
                     : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
               >
