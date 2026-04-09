@@ -13,6 +13,12 @@ function timeBasedRatio(task: Task, sd: Date | null): number {
   return (s.getTime() - start.getTime()) / (end.getTime() - start.getTime())
 }
 
+/** 计算单个任务基于状态日期的完成百分比 (0-100 整数) */
+export function computeTimeBasedPercent(task: Task, statusDate?: string | null): number {
+  const sd = statusDate ? sod(new Date(statusDate)) : null
+  return Math.round(timeBasedRatio(task, sd) * 100)
+}
+
 /** SUM(工期×完成比例) / SUM(工期)，仅统计叶子任务，与后端 SQL 保持一致 */
 export function computeProjectProgressPercent(tasks: Task[], statusDate?: string | null): number {
   if (tasks.length === 0) return 0

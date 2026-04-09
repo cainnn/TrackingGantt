@@ -1,4 +1,5 @@
 import type { Task, Dependency } from '@/types'
+import { computeTimeBasedPercent } from '@/lib/projectProgress'
 
 // ── OpenAI tool definitions ────────────────────────────────────────────────
 export const AI_TOOLS = [
@@ -167,10 +168,11 @@ export function buildSystemPrompt(
 
   const taskRows = tasks.slice(0, 200).map(t => {
     const parentCode = t.parent_id ? (codeById.get(t.parent_id) ?? '') : ''
+    const pct = computeTimeBasedPercent(t, statusDate)
     return [
       t.task_code, t.name,
       t.start_date?.split('T')[0] ?? '', t.end_date?.split('T')[0] ?? '',
-      t.duration ?? '', t.assignee ?? '', t.percent_done,
+      t.duration ?? '', t.assignee ?? '', pct,
       parentCode, t.is_milestone ? 'Y' : '',
     ].join(' | ')
   })

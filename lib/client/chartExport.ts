@@ -190,16 +190,22 @@ function selectKeyTasks(flatRows: FlatRow[], statusDate: string | null, maxRows:
 function prepareChartData(
   tasks: Task[], dependencies: Dependency[], projectName: string,
   statusDate?: string | null, projectLines?: ProjectLine[],
+  fullExport = false,
 ): ChartData {
   const activeTasks = tasks.filter(t => !t.is_deleted)
   const allRows = flattenForExport(activeTasks)
   const { origin, totalDays } = computeTimeline(activeTasks)
   const colW = CONTENT_W / totalDays
 
-  // Calculate max rows that fit on one A4 page
-  const pageBodyH = A4H - MARGIN * 2 - TITLE_H - HDR_H
-  const maxRows = Math.max(Math.floor(pageBodyH / ROW_H), 6)
-  const rows = selectKeyTasks(allRows, statusDate ?? null, maxRows)
+  let rows: ExportRow[]
+  if (fullExport) {
+    rows = allRows.map(r => ({ ...r, isEllipsis: false as const }))
+  } else {
+    // Calculate max rows that fit on one A4 page
+    const pageBodyH = A4H - MARGIN * 2 - TITLE_H - HDR_H
+    const maxRows = Math.max(Math.floor(pageBodyH / ROW_H), 6)
+    rows = selectKeyTasks(allRows, statusDate ?? null, maxRows)
+  }
 
   const months: { label: string; startD: number; endD: number }[] = []
   let mStart = 0, mLabel = ''
@@ -421,21 +427,55 @@ export async function exportToJpeg(
   a.click()
 }
 
-// ── Export as PDF (single A4 page with key tasks) ──────────────────────
+// ── Build one page SVG for multi-page export ──────────────────────────
+function buildPageSvg(cd: ChartData, fromIdx: number, toIdx: number, pageNum: number, totalPages: number): string {
+  const rowCount = toIdx - fromIdx
+  const bodyY = TITLE_H + HDR_H
+  const bodyH = rowCount * ROW_H
+  const pageBottomY = bodyY + bodyH
+
+  const parts: string[] = []
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${A4W}" height="${A4H}" viewBox="0 0 ${A4W} ${A4H}" style="font-family:system-ui,-apple-system,sans-serif">`)
+  parts.push(`<rect width="${A4W}" height="${A4H}" fill="white"/>`)
+  parts.push(`<g transform="translate(${MARGIN},${MARGIN})">`)
+  parts.push(renderHeader(cd))
+  parts.push(renderRows(cd, fromIdx, toIdx, bodyY))
+  parts.push(renderDeps(cd, fromIdx, toIdx, bodyY))
+  parts.push(renderVerticalLines(cd, TITLE_H, pageBottomY))
+  // Page number
+  if (totalPages > 1) {
+    parts.push(`<text x="${CONTENT_W}" y="${A4H - MARGIN * 2 - 4}" text-anchor="end" font-size="8" fill="#9ca3af">${pageNum} / ${totalPages}</text>`)
+  }
+  parts.push('</g></svg>')
+  return parts.join('\n')
+}
+
+// ── Export as PDF (multi-page, all tasks) ─────────────────────────────
 export async function exportToPdf(
   tasks: Task[], dependencies: Dependency[], projectName: string,
   statusDate?: string | null, projectLines?: ProjectLine[],
 ) {
-  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines)
-  const { svg } = buildSinglePageSvg(cd)
+  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines, true)
   const dpi = 3
+
+  // Calculate rows per page
+  const pageBodyH = A4H - MARGIN * 2 - TITLE_H - HDR_H
+  const rowsPerPage = Math.max(Math.floor(pageBodyH / ROW_H), 6)
+  const totalRows = cd.rows.length
+  const totalPages = Math.max(Math.ceil(totalRows / rowsPerPage), 1)
 
   const { jsPDF } = await import('jspdf')
   const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' })
 
-  const canvas = await svgToCanvas(svg, A4W, A4H, dpi)
-  const imgData = canvas.toDataURL('image/jpeg', 0.92)
-  pdf.addImage(imgData, 'JPEG', 0, 0, A4W, A4H)
+  for (let p = 0; p < totalPages; p++) {
+    if (p > 0) pdf.addPage()
+    const fromIdx = p * rowsPerPage
+    const toIdx = Math.min(fromIdx + rowsPerPage, totalRows)
+    const svg = buildPageSvg(cd, fromIdx, toIdx, p + 1, totalPages)
+    const canvas = await svgToCanvas(svg, A4W, A4H, dpi)
+    const imgData = canvas.toDataURL('image/jpeg', 0.92)
+    pdf.addImage(imgData, 'JPEG', 0, 0, A4W, A4H)
+  }
 
   pdf.save(`${projectName || '甘特图'}_${new Date().toISOString().split('T')[0]}.pdf`)
 }

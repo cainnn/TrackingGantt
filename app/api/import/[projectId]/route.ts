@@ -4,6 +4,11 @@ import { PoolClient } from 'pg'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
+import {
+  cascadeDependencies,
+  updateSummaryTasksDates,
+} from '@/lib/scheduling'
+import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -379,14 +384,22 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
     }
 
+    // ── 依赖级联 + 摘要任务日期更新 ─────────────────────────────────
+    await cascadeDependencies(client, projectId)
+    await updateSummaryTasksDates(client, projectId)
+
     await client.query('COMMIT')
 
+    // ── 读取最终数据 ─────────────────────────────────────────────────
     const tasksRes = await pool.query(
       'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index',
       [projectId]
     )
     const depsRes = await pool.query(
-      'SELECT * FROM dependencies WHERE project_id = $1',
+      `SELECT d.* FROM dependencies d
+       JOIN tasks ft ON ft.id = d.from_task_id AND ft.is_deleted = false
+       JOIN tasks tt ON tt.id = d.to_task_id   AND tt.is_deleted = false
+       WHERE d.project_id = $1`,
       [projectId]
     )
 
@@ -401,12 +414,61 @@ export async function POST(req: NextRequest, { params }: Params) {
       [projectId],
     )
 
+    // ── 创建版本快照 ─────────────────────────────────────────────────
+    let versionInfo = null
+    {
+      const snapshotTasks = tasksRes.rows
+      const snapshotDeps = depsRes.rows
+      const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps }
+
+      const effectiveStatusDate = updatedStatusDate ?? null
+
+      // 计算与上一版本的差异
+      const lastRes = await pool.query(
+        `SELECT id, version_number, status_date, snapshot FROM project_versions
+         WHERE project_id = $1 ORDER BY version_number DESC LIMIT 1`,
+        [projectId],
+      )
+      const lastVersion = lastRes.rows[0] ?? null
+      let changes = null
+      if (lastVersion) {
+        const prevTasks: SnapshotTask[] = lastVersion.snapshot?.tasks ?? []
+        const diffs = diffSnapshots(prevTasks, snapshotTasks)
+        changes = {
+          diffs,
+          stats: {
+            added: diffs.filter((d: { type: string }) => d.type === 'added').length,
+            removed: diffs.filter((d: { type: string }) => d.type === 'removed').length,
+            changed: diffs.filter((d: { type: string }) => d.type === 'changed').length,
+          },
+        }
+      }
+
+      const maxRes = await pool.query(
+        'SELECT COALESCE(MAX(version_number), 0) AS mx FROM project_versions WHERE project_id = $1',
+        [projectId],
+      )
+      const nextVersion = (maxRes.rows[0].mx as number) + 1
+      const versionName = `导入 #${nextVersion}`
+
+      const insRes = await pool.query(
+        `INSERT INTO project_versions (project_id, version_number, name, description, snapshot, changes, status_date, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, version_number, name, status_date, created_at`,
+        [projectId, nextVersion, versionName, `Excel ${mode === 'merge' ? '合并' : '替换'}导入`,
+         JSON.stringify(snapshot), changes ? JSON.stringify(changes) : null,
+         effectiveStatusDate, auth.value.userId],
+      )
+      versionInfo = { ...insRes.rows[0], task_count: snapshotTasks.length, changes }
+    }
+
     return NextResponse.json(success({
       tasks: tasksRes.rows,
       dependencies: depsRes.rows,
       message,
       status_date: updatedStatusDate,
       project_lines: plRes.rows,
+      version: versionInfo,
     }))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
