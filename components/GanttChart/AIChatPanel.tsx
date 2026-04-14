@@ -551,7 +551,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   ]
 
   return (
-    <div className="flex flex-col h-full border-l border-gray-200 bg-white" style={{ width: 400 }}>
+    <div className="relative z-10 flex flex-col h-full border-l border-gray-200 bg-white" style={{ width: 400 }}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-2">
