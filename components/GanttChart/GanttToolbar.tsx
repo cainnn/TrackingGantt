@@ -1028,7 +1028,7 @@ export default function GanttToolbar({
 
   return (
     <>
-      <div className="flex items-center gap-1.5 px-3 py-2 bg-white border-b border-gray-200 flex-wrap">
+      <div className="relative z-20 flex items-center gap-1.5 px-3 py-2 bg-white border-b border-gray-200 flex-wrap">
 
         {readOnly && (
           <span className="text-[11px] text-orange-600 bg-orange-50 border border-orange-200 rounded px-2 py-1 font-medium whitespace-nowrap">
@@ -1038,18 +1038,28 @@ export default function GanttToolbar({
 
         {!readOnly && (
           <>
-            {/* Group 1: Create + Edit + Refresh */}
-            <LabelIc icon={<IcoPlus />}   label="创建任务" variant="green" onClick={handleAddTask} />
-            <LabelIc icon={<IcoRefresh />} label="放弃更改" variant="default" disabled={!hasChanges} onClick={handleRefresh} />
-            <LabelIc icon={<IcoPencil />} label="EDIT"   variant="blue"
-                     disabled={selectedIds.length !== 1}
-                     onClick={() => selectedIds.length === 1 && setEditModalOpen(true)} />
+            {/* Group 1: Create + Edit */}
+            <Ic title="创建任务" onClick={handleAddTask}><IcoPlus /></Ic>
+            <Ic title="编辑任务" disabled={selectedIds.length !== 1}
+                     onClick={() => selectedIds.length === 1 && setEditModalOpen(true)}>
+              <IcoPencil />
+            </Ic>
 
             {sep}
 
             {/* Group 2: Undo / Redo */}
-            <Ic title="撤销 (Ctrl+Z)" disabled={!canUndo} onClick={() => dispatch(undo())}><IcoUndo /></Ic>
-            <Ic title="重做 (Ctrl+Y)" disabled={!canRedo} onClick={() => dispatch(redo())}><IcoRedo /></Ic>
+            <Ic title="撤销 (Ctrl+Z)" disabled={!canUndo} onClick={() => dispatch(undo())}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 7v6h6"/>
+                <path d="M3 13a9 9 0 1 0 3-7.7L3 8"/>
+              </svg>
+            </Ic>
+            <Ic title="重做 (Ctrl+Y)" disabled={!canRedo} onClick={() => dispatch(redo())}>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 7v6h-6"/>
+                <path d="M21 13A9 9 0 1 1 18 5.3L21 8"/>
+              </svg>
+            </Ic>
 
             {sep}
           </>
@@ -1156,6 +1166,20 @@ export default function GanttToolbar({
                   </button>
                 )
               })()}
+              {!readOnly && (
+                <button
+                  onClick={handleRefresh}
+                  disabled={!hasChanges}
+                  title="放弃所有未保存的更改"
+                  className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
+                    ${hasChanges
+                      ? 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer'
+                      : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
+                >
+                  <IcoRefresh />
+                  放弃更改
+                </button>
+              )}
               <button
                 onClick={handleToggleCompareLock}
                 title={comparison ? `退出对比模式（当前对比：${comparison.versionName}）` : '进入对比模式，默认对比最近一次快照；可在历史版本面板切换对比目标'}
