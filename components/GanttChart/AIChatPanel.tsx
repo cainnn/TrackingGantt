@@ -33,6 +33,8 @@ interface ChatMsg {
 interface Props {
   projectId: string
   onClose: () => void
+  autoMessage?: string | null
+  onAutoMessageConsumed?: () => void
 }
 
 // ── Helper: resolve task_code → id ───────────────────────────────────────────
@@ -40,7 +42,7 @@ function codeToId(tasks: Task[], code: string): string | null {
   return tasks.find(t => t.task_code === code)?.id ?? null
 }
 
-export default function AIChatPanel({ projectId, onClose }: Props) {
+export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMessageConsumed }: Props) {
   const dispatch = useAppDispatch()
   const { tasks, dependencies, diffFilter, comparison } = useAppSelector(s => s.tasks)
   const { versions } = useAppSelector(s => s.versions)
@@ -483,6 +485,16 @@ export default function AIChatPanel({ projectId, onClose }: Props) {
       sendMessage()
     }
   }
+
+  // ── Auto-send message from parent (confirm changes) ────────────────────
+  const autoMsgProcessedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!autoMessage || loading) return
+    if (autoMsgProcessedRef.current === autoMessage) return
+    autoMsgProcessedRef.current = autoMessage
+    sendMessage(autoMessage)
+    onAutoMessageConsumed?.()
+  }, [autoMessage, loading, sendMessage, onAutoMessageConsumed])
 
   // ── Auto-send diff analysis when diffFilter is active ────────────────────
   useEffect(() => {

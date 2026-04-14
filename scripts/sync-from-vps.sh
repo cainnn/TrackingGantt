@@ -16,14 +16,14 @@ VPS_HOST="${1:-${VPS_HOST:-your-vps-ip}}"
 VPS_PORT="${VPS_PORT:-5432}"
 VPS_DB="${VPS_DB:-gantt_app}"
 VPS_USER="${VPS_USER:-postgres}"
-VPS_PASSWORD="${VPS_PASSWORD:-changeme}"
+VPS_PASSWORD="${VPS_PASSWORD:11111a}"
 
 # ---------- 本地数据库配置 ----------
 LOCAL_HOST="${LOCAL_HOST:-localhost}"
 LOCAL_PORT="${LOCAL_PORT:-5432}"
 LOCAL_DB="${LOCAL_DB:-gantt_app}"
 LOCAL_USER="${LOCAL_USER:-postgres}"
-LOCAL_PASSWORD="${LOCAL_PASSWORD:-changeme}"
+LOCAL_PASSWORD="${LOCAL_PASSWORD:11111a}"
 
 # ---------- 临时文件 ----------
 DUMP_FILE="/tmp/gantt_vps_dump_$(date +%Y%m%d_%H%M%S).sql"

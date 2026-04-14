@@ -5,6 +5,17 @@ import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine } from '@/types'
 
 const DEP_TYPE_LABELS: Record<number, string> = { 0: 'SS', 1: 'SF', 2: 'FS', 3: 'FF' }
+const CTYPE_LABELS: Record<string, string> = {
+  none: '无',
+  asap: '尽早',
+  alap: '尽晚',
+  muststarton: '必须于…开始',
+  mustfinishon: '必须于…结束',
+  startnoearlierthan: '不早于…开始',
+  finishnoearlierthan: '不早于…结束',
+  startnolaterthan: '不迟于…开始',
+  finishnolaterthan: '不迟于…结束',
+}
 
 interface FlatTask { task: Task; level: number }
 
@@ -62,6 +73,15 @@ const COLUMNS: Partial<ExcelJS.Column>[] = [
   { header: '自动排程', key: 'auto_schedule', width: 9 },
   { header: '前置依赖', key: 'predecessors', width: 22 },
   { header: '延迟',     key: 'lag',       width: 7 },
+  { header: '完成度',   key: 'percent_done', width: 7 },
+  { header: '限制类型', key: 'constraint_type', width: 12 },
+  { header: '限制日期', key: 'constraint_date', width: 13 },
+  { header: '汇总',     key: 'rollup',    width: 7 },
+  { header: '非激活',   key: 'inactive',  width: 7 },
+  { header: '项目边界', key: 'project_boundary', width: 10 },
+  { header: '状态',     key: 'status',    width: 10 },
+  { header: '复杂度',   key: 'complexity', width: 7 },
+  { header: '基线结束', key: 'baseline_end_date', width: 13 },
   { header: '备注',     key: 'note',      width: 22 },
 ]
 
@@ -108,6 +128,15 @@ function buildRowData(
     auto_schedule: t.auto_schedule !== false ? '是' : '否',
     predecessors: formatPredecessors(t.id, deps, codeMap),
     lag: getPredecessorLag(t.id, deps),
+    percent_done: t.percent_done ?? 0,
+    constraint_type: t.constraint_type ? (CTYPE_LABELS[t.constraint_type] ?? t.constraint_type) : '',
+    constraint_date: t.constraint_date?.split('T')[0] ?? '',
+    rollup: t.rollup ? '是' : '否',
+    inactive: t.inactive ? '是' : '否',
+    project_boundary: t.project_boundary ?? '',
+    status: t.status ?? '',
+    complexity: t.complexity ?? '',
+    baseline_end_date: t.baseline_end_date?.split('T')[0] ?? '',
     note: t.note ?? '',
   }
 }

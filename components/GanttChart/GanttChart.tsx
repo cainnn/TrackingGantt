@@ -33,22 +33,91 @@ const COL_START  =  80
 const COL_END    =  80
 const COL_PRED   =  56
 const COL_SUCC   =  56
-const COL_DTYPE  =  56
+const COL_CTYPE  = 100
+const COL_CDATE  =  88
+const COL_STATUS =  80
+const COL_CPLX   =  80
 const MIN_NAME_W   = 60
 
-// Optional column keys (编号 and 任务名称 are always shown)
-export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'dtype'
-export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
-  { key: 'assignee', label: '责任人', width: COL_ASSIGN },
-  { key: 'pct',      label: '完成',   width: COL_PCT },
-  { key: 'duration', label: '工期',   width: COL_DUR },
-  { key: 'start',    label: '开始时间', width: COL_START },
-  { key: 'end',      label: '完成时间', width: COL_END },
-  { key: 'pred',     label: '前置',   width: COL_PRED },
-  { key: 'succ',     label: '后续',   width: COL_SUCC },
-  { key: 'dtype',    label: '类型',   width: COL_DTYPE },
+// 限制类型 & 状态 & 复杂性 候选值
+export { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE, CONSTRAINT_NEEDS_DATE } from './constants'
+import { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE } from './constants'
+export type AutoStatus = 'notstarted' | 'started' | 'completed' | 'ahead' | 'late' | 'pushed'
+export const STATUS_META: Record<AutoStatus, { label: string; color: string }> = {
+  notstarted: { label: '未开始',   color: '#6b7280' },
+  started:    { label: '进行中',   color: '#2563eb' },
+  completed:  { label: '已完成',   color: '#16a34a' },
+  ahead:      { label: '提前完成', color: '#059669' },
+  pushed:     { label: '受影响',   color: '#f59e0b' },
+  late:       { label: '延期',     color: '#dc2626' },
+}
+
+// 内部辅助：判断任务当前 end_date 是否相对上期基线被延长
+function isEndExtended(t: Pick<Task, 'end_date' | 'baseline_end_date'>): boolean {
+  const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
+  const e = t.end_date ? String(t.end_date).split('T')[0] : null
+  return !!(b && e && e > b)
+}
+
+export function computeTaskStatus(
+  t: Task,
+  statusDate: Date | null,
+  ctx?: { allTasks: Task[]; deps: { from_task_id: string; to_task_id: string; active?: boolean }[] },
+): AutoStatus {
+  const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
+  const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : null
+  if ((t.percent_done ?? 0) >= 100) {
+    if (baseline && curEnd && curEnd < baseline) return 'ahead'
+    return 'completed'
+  }
+  if (isEndExtended(t)) {
+    // 区分"被前置拖累"(pushed) vs "自己延期"(late)：
+    // 条件：尚未开工 + 至少一个激活前置任务自身也延长了
+    if (ctx) {
+      const ref = statusDate ?? new Date()
+      const started = t.start_date && new Date(t.start_date) <= ref
+      if (!started) {
+        const byId = new Map(ctx.allTasks.map(x => [x.id, x] as const))
+        const hasDelayedPred = ctx.deps.some(d =>
+          d.to_task_id === t.id
+          && d.active !== false
+          && (() => { const p = byId.get(d.from_task_id); return p ? isEndExtended(p) : false })()
+        )
+        if (hasDelayedPred) return 'pushed'
+      }
+    }
+    return 'late'
+  }
+  const ref = statusDate ?? new Date()
+  const timePct = timeBasedPercent(t, ref)
+  if (timePct > 0) return 'started'
+  return 'notstarted'
+}
+export const COMPLEXITY_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: 'Easy' },
+  { value: 1, label: 'Normal' },
+  { value: 2, label: 'Hard' },
+  { value: 3, label: 'Impossible' },
 ]
-export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'pct', 'start', 'duration', 'pred', 'dtype']
+
+// Optional column keys (编号 and 任务名称 are always shown)
+export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'ctype' | 'cdate' | 'status' | 'complexity' | 'inactive'
+export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
+  { key: 'assignee',   label: '责任人',   width: COL_ASSIGN },
+  { key: 'pct',        label: '完成',     width: COL_PCT },
+  { key: 'duration',   label: '持续时间', width: COL_DUR },
+  { key: 'start',      label: '开始时间', width: COL_START },
+  { key: 'end',        label: '完成时间', width: COL_END },
+  { key: 'pred',       label: '前导',     width: COL_PRED },
+  { key: 'succ',       label: '后继',     width: COL_SUCC },
+  { key: 'lag',        label: '延迟',     width: 60 },
+  { key: 'ctype',      label: '限制类型', width: COL_CTYPE },
+  { key: 'cdate',      label: '限制日期', width: COL_CDATE },
+  { key: 'status',     label: '状态',     width: COL_STATUS },
+  { key: 'complexity', label: '复杂性',   width: COL_CPLX },
+  { key: 'inactive',   label: '无效',     width: 60 },
+]
+export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'status', 'complexity']
 const INIT_LEFT_W = COL_NUM + COL_CHECK + COL_NAME + DEFAULT_VISIBLE_COLS.reduce((s, k) => s + (OPTIONAL_COL_META.find(c => c.key === k)?.width ?? 0), 0)
 
 // ─── Date helpers ──────────────────────────────────────────────────────────
@@ -273,8 +342,11 @@ export default function GanttChart({
   showComparison = true,
 }: Props) {
   const dispatch    = useAppDispatch()
-  const tasks       = useAppSelector(s => s.tasks.tasks)
-  const deps        = useAppSelector(s => s.tasks.dependencies)
+  const realTasks   = useAppSelector(s => s.tasks.tasks)
+  const realDeps    = useAppSelector(s => s.tasks.dependencies)
+  const viewSnapshot = useAppSelector(s => s.tasks.viewSnapshot)
+  const tasks       = viewSnapshot?.tasks ?? realTasks
+  const deps        = viewSnapshot?.dependencies ?? realDeps
   const selectedIds = useAppSelector(s => s.tasks.selectedIds)
   const clipboard   = useAppSelector(s => s.tasks.clipboard)
   const comparison  = useAppSelector(s => s.tasks.comparison)
@@ -375,6 +447,10 @@ export default function GanttChart({
   // ── Predecessor popup ────────────────────────────────────────────────────
   const [predPopup, setPredPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
   const [predFilter, setPredFilter] = useState('')
+  const [succPopup, setSuccPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
+  const [succFilter, setSuccFilter] = useState('')
+  const [selectedCell, setSelectedCell] = useState<{ taskId: string; col: OptionalCol | 'name' } | null>(null)
+  const [activeEditor, setActiveEditor] = useState<{ taskId: string; col: OptionalCol } | null>(null)
 
   // ── Post-create edit modal ───────────────────────────────────────────────
   const [editModalTaskId, setEditModalTaskId] = useState<string | null>(null)
@@ -393,16 +469,14 @@ export default function GanttChart({
 
   // ── Column sort & filter ────────────────────────────────────────────────
   type SortDir = 'asc' | 'desc' | null
-  type SortCol = 'assignee' | 'duration' | null
-  type DropdownCol = 'assignee' | 'duration' | 'dtype' | null
-  const [sortCol, setSortCol] = useState<SortCol>(null)
+  type SortColK = OptionalCol | null
+  const [sortCol, setSortCol] = useState<SortColK>(null)
   const [sortDir, setSortDir] = useState<SortDir>(null)
-  const [filterAssignee, setFilterAssignee] = useState<string | null>(null)
-  const [filterDtype, setFilterDtype] = useState<string | null>(null)
-  const [colDropdown, setColDropdown] = useState<DropdownCol>(null)
+  const [colFilters, setColFilters] = useState<Partial<Record<OptionalCol, Set<string>>>>({})
+  const [colDropdown, setColDropdown] = useState<OptionalCol | null>(null)
   const colDropdownRef = useRef<HTMLDivElement>(null)
 
-  const toggleSort = useCallback((col: SortCol) => {
+  const toggleSort = useCallback((col: OptionalCol) => {
     if (sortCol === col) {
       if (sortDir === 'asc') setSortDir('desc')
       else if (sortDir === 'desc') { setSortCol(null); setSortDir(null) }
@@ -411,13 +485,6 @@ export default function GanttChart({
       setSortCol(col); setSortDir('asc')
     }
   }, [sortCol, sortDir])
-
-  // 所有不重复的责任人列表
-  const assigneeList = useMemo(() => {
-    const s = new Set<string>()
-    tasks.forEach(t => { if (t.assignee) s.add(t.assignee) })
-    return [...s].sort()
-  }, [tasks])
 
   // 关闭列下拉菜单
   useEffect(() => {
@@ -444,6 +511,13 @@ export default function GanttChart({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [predPopup])
+
+  useEffect(() => {
+    if (!succPopup) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSuccPopup(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [succPopup])
 
   const svgRef         = useRef<SVGSVGElement>(null)
   const leftRef        = useRef<HTMLDivElement>(null)
@@ -572,9 +646,11 @@ export default function GanttChart({
       if (t.start_date){const d=new Date(t.start_date); if(d<mn)mn=d}
       if (t.end_date)  {const d=new Date(t.end_date);   if(d>mx)mx=d}
     })
+    if (currentProject?.start_date) { const d=new Date(currentProject.start_date); if(d<mn)mn=d }
+    if (currentProject?.end_date)   { const d=new Date(currentProject.end_date);   if(d>mx)mx=d }
     const o=sod(mn); o.setDate(o.getDate()-o.getDay()-60)
     return { origin:o, totalDays:diffDays(o, addDays(sod(mx),21)) }
-  }, [tasks])
+  }, [tasks, currentProject?.start_date, currentProject?.end_date])
 
   const dateToX = useCallback((d:Date)=>diffDays(origin,d)*colW, [origin, colW])
 
@@ -648,25 +724,30 @@ export default function GanttChart({
       rows = rows.filter(r => matched.has(r.task.id))
     }
 
-    // 责任人筛选
-    if (filterAssignee !== null) {
-      const matched = new Set<string>()
-      tasks.forEach(t => {
-        if ((t.assignee ?? '') === filterAssignee) {
-          matched.add(t.id)
-          addAncestors(t, matched)
+    // 列筛选（多列并列）
+    const activeFilterEntries = Object.entries(colFilters).filter(([, v]) => v && (v as Set<string>).size > 0) as [OptionalCol, Set<string>][]
+    if (activeFilterEntries.length > 0) {
+      const colVal = (t: Task, k: OptionalCol): string => {
+        switch (k) {
+          case 'assignee':   return t.assignee ?? ''
+          case 'pct':        return String(t.percent_done ?? 0)
+          case 'duration':   return String(t.duration ?? '')
+          case 'start':      return (t.start_date ?? '').split('T')[0]
+          case 'end':        return (t.end_date ?? '').split('T')[0]
+          case 'pred':       return deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
+          case 'succ':       return deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
+          case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d ? String(d.lag ?? 0) : '' }
+          case 'ctype':      return t.constraint_type ?? 'asap'
+          case 'cdate':      return (t.constraint_date ?? '').split('T')[0]
+          case 'status':     return t.status ?? ''
+          case 'complexity': return t.complexity != null ? String(t.complexity) : ''
+          case 'inactive':   return t.inactive ? '是' : '否'
         }
-      })
-      rows = rows.filter(r => matched.has(r.task.id))
-    }
-
-    // 类型筛选
-    if (filterDtype !== null) {
+      }
       const matched = new Set<string>()
       tasks.forEach(t => {
-        const incoming = deps.filter(d => d.to_task_id === t.id)
-        const dtype = incoming.length > 0 ? String(incoming[0].type) : (t.auto_schedule === false ? 'manual' : 'empty')
-        if (dtype === filterDtype) {
+        const pass = activeFilterEntries.every(([k, set]) => set.has(colVal(t, k)))
+        if (pass) {
           matched.add(t.id)
           addAncestors(t, matched)
         }
@@ -690,9 +771,21 @@ export default function GanttChart({
     // 排序（保持树形结构：仅对同层级兄弟排序）
     if (sortCol && sortDir) {
       const getSortVal = (t: Task): number | string => {
-        if (sortCol === 'duration') return t.duration ?? 0
-        if (sortCol === 'assignee') return t.assignee ?? ''
-        return 0
+        switch (sortCol) {
+          case 'assignee':   return t.assignee ?? ''
+          case 'pct':        return t.percent_done ?? 0
+          case 'duration':   return t.duration ?? 0
+          case 'start':      return t.start_date ?? ''
+          case 'end':        return t.end_date ?? ''
+          case 'pred':       return deps.filter(d => d.to_task_id === t.id).length
+          case 'succ':       return deps.filter(d => d.from_task_id === t.id).length
+          case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d?.lag ?? 0 }
+          case 'ctype':      return t.constraint_type ?? ''
+          case 'cdate':      return t.constraint_date ?? ''
+          case 'status':     return t.status ?? ''
+          case 'complexity': return t.complexity ?? -1
+          default:           return 0
+        }
       }
       const cmp = (a: Task, b: Task): number => {
         const va = getSortVal(a), vb = getSortVal(b)
@@ -700,36 +793,28 @@ export default function GanttChart({
           ? va - vb : String(va).localeCompare(String(vb))
         return sortDir === 'desc' ? -r : r
       }
-      // 按层级分组排序后重建
-      const sortedRows: FlatRow[] = []
-      let i = 0
-      while (i < rows.length) {
-        const lvl = rows[i].level
-        // 收集同父级的连续兄弟
-        const siblings: FlatRow[][] = []
-        while (i < rows.length && rows[i].level >= lvl) {
-          if (rows[i].level === lvl) {
-            const group: FlatRow[] = [rows[i]]
-            const j = i + 1
-            // 收集此兄弟下的所有子行
-            let k = j
-            while (k < rows.length && rows[k].level > lvl) k++
-            for (let m = j; m < k; m++) group.push(rows[m])
-            siblings.push(group)
-            i = k
-          } else {
-            i++
-          }
+      // 按父 id 分桶，同父兄弟内部排序，再按树形结构重建
+      const byParent = new Map<string | null, FlatRow[]>()
+      rows.forEach(r => {
+        const p = r.task.parent_id ?? null
+        if (!byParent.has(p)) byParent.set(p, [])
+        byParent.get(p)!.push(r)
+      })
+      byParent.forEach(arr => arr.sort((a, b) => cmp(a.task, b.task)))
+      const rebuilt: FlatRow[] = []
+      const emit = (parentId: string | null) => {
+        const siblings = byParent.get(parentId) ?? []
+        for (const r of siblings) {
+          rebuilt.push(r)
+          emit(r.task.id)
         }
-        // 按排序字段对兄弟块排序
-        siblings.sort((a, b) => cmp(a[0].task, b[0].task))
-        siblings.forEach(g => sortedRows.push(...g))
       }
-      return sortedRows
+      emit(null)
+      return rebuilt
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, filterAssignee, filterDtype, diffFilter, sortCol, sortDir])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir])
 
   // ── Row index map (based on displayed rows for arrow positioning) ────────
   const rowIdx = useMemo(() => {
@@ -766,6 +851,20 @@ export default function GanttChart({
   }, [projectStartDate, statusDate])
 
   // ── 关键路径计算（正推 + 反推，浮动=0 的任务即为关键路径） ─────────────────
+  const inactiveSet = useMemo((): Set<string> => {
+    const byId = new Map(tasks.map(t => [t.id, t] as const))
+    const cache = new Map<string, boolean>()
+    const check = (id: string): boolean => {
+      if (cache.has(id)) return cache.get(id)!
+      const t = byId.get(id); if (!t) { cache.set(id, false); return false }
+      const v = !!t.inactive || (t.parent_id ? check(t.parent_id) : false)
+      cache.set(id, v); return v
+    }
+    const s = new Set<string>()
+    tasks.forEach(t => { if (check(t.id)) s.add(t.id) })
+    return s
+  }, [tasks])
+
   const criticalSet = useMemo((): Set<string> => {
     if (!showCriticalPath) return new Set()
 
@@ -1395,6 +1494,48 @@ export default function GanttChart({
           }
         }
 
+        // ── 项目边界检查：拖动后若任务越过项目开始日期，按 project_boundary 策略处理
+        const projStart = currentProject?.start_date?.split('T')[0]
+        if (projStart && dirtyList.length > 0) {
+          const violating = dirtyList.filter(t => {
+            const s = t.start_date ? String(t.start_date).split('T')[0] : null
+            const boundary = t.project_boundary ?? 'ask'
+            return !!(s && s < projStart) && boundary !== 'ignore'
+          })
+          if (violating.length > 0) {
+            const honored = violating.filter(t => (t.project_boundary ?? 'ask') === 'honor')
+            const askList = violating.filter(t => (t.project_boundary ?? 'ask') === 'ask')
+            let userWantsClamp = false
+            if (askList.length > 0) {
+              const names = askList.map(t => `「${t.name}」`).join('、')
+              userWantsClamp = !window.confirm(
+                `${names} 的开始日期早于项目开始日期 ${projStart}。\n\n确定 = 允许越界\n取消 = 吸附到项目开始日期`
+              )
+            }
+            const clampIds = new Set<string>([
+              ...honored.map(t => t.id),
+              ...(userWantsClamp ? askList.map(t => t.id) : []),
+            ])
+            if (clampIds.size > 0) {
+              const clamp = (t: Task): Task => {
+                if (!clampIds.has(t.id)) return t
+                const s = t.start_date ? String(t.start_date).split('T')[0] : null
+                const e = t.end_date ? String(t.end_date).split('T')[0] : null
+                if (!s || s >= projStart) return t
+                const shift = diffDays(new Date(s), new Date(projStart))
+                const newEnd = e ? addDays(new Date(e), shift) : null
+                return {
+                  ...t,
+                  start_date: projStart,
+                  end_date: newEnd ? newEnd.toISOString().slice(0,10) : t.end_date,
+                }
+              }
+              dirtyList = dirtyList.map(clamp)
+              for (let i = 0; i < allUpdated.length; i++) allUpdated[i] = clamp(allUpdated[i])
+            }
+          }
+        }
+
         if (dirtyList.length > 0 || allUpdated.length > 0) {
           dispatch(saveSnapshot())
           // 乐观更新UI：包含级联下游 + 摘要任务，界面立即反映关联变更
@@ -1586,6 +1727,15 @@ export default function GanttChart({
     setCellEdit(null)
   }, [cellEdit, tasks, deps, dispatch])
 
+  // ── 通用字段修改（限制类型/日期/状态/复杂性等） ─────────────────────────
+  const handleTaskFieldChange = useCallback((taskId: string, patch: Partial<Task>) => {
+    const t = tasks.find(x => x.id === taskId)
+    if (!t) return
+    dispatch(saveSnapshot())
+    dispatch(updateTasks([{ ...t, ...patch }]))
+    dispatch(markDirty([taskId]))
+  }, [tasks, dispatch])
+
   // ── 自动排程开关 ────────────────────────────────────────────────────────
   const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
     const t = tasks.find(x => x.id === taskId)
@@ -1594,6 +1744,20 @@ export default function GanttChart({
     dispatch(updateTasks([{ ...t, auto_schedule: autoSchedule }]))
     dispatch(markDirty([taskId]))
   }, [tasks, dispatch])
+
+  // ── Change dependency lag ───────────────────────────────────────────────
+  const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
+    dispatch(updateDependency({ id: depId, lag: newLag }))
+    const res = await authFetch(`/api/dependencies/${projectId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: depId, lag: newLag }),
+    })
+    if (res.ok) {
+      const r = await authFetch(`/api/tasks/${projectId}?t=${Date.now()}`, { cache: 'no-store' })
+      const t = await r.text()
+      try { const d = t ? JSON.parse(t) : {}; if (d.ok && d.value) dispatch(setTasks(d.value)) } catch { /* ignore */ }
+    }
+  }, [dispatch, projectId])
 
   // ── Change dependency type ──────────────────────────────────────────────
   const handleDepTypeChange = useCallback(async (depId: string, newType: number) => {
@@ -2130,26 +2294,47 @@ export default function GanttChart({
   const effectivePanelW = panelCollapsed ? 0 : panelW
   const nameColW = nameW  // 任务名称列宽固定，不随面板缩小而压缩
 
+  // 列宽覆盖（用户拖动调整后持久化到 localStorage）
+  const colWidthStorageKey = `gantt-col-widths-${projectId}`
+  const [colWidthOverrides, setColWidthOverrides] = useState<Partial<Record<OptionalCol, number>>>(() => {
+    if (typeof window === 'undefined') return {}
+    try {
+      const saved = localStorage.getItem(`gantt-col-widths-${projectId}`)
+      if (saved) return JSON.parse(saved) as Partial<Record<OptionalCol, number>>
+    } catch { /* ignore */ }
+    return {}
+  })
+  const [colResizeDrag, setColResizeDrag] = useState<{ col: OptionalCol; startX: number; startW: number } | null>(null)
+  useEffect(() => {
+    if (!colResizeDrag) return
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - colResizeDrag.startX
+      const newW = Math.max(24, colResizeDrag.startW + dx)
+      setColWidthOverrides(p => ({ ...p, [colResizeDrag.col]: newW }))
+    }
+    const onUp = () => {
+      setColResizeDrag(null)
+      setColWidthOverrides(p => {
+        try { localStorage.setItem(colWidthStorageKey, JSON.stringify(p)) } catch { /* ignore */ }
+        return p
+      })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [colResizeDrag, colWidthStorageKey])
+
   // Right columns: only include visible optional columns
   const RIGHT_COL_BASES = useMemo(() =>
-    OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => c.width),
-    [visibleCols])
+    OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => colWidthOverrides[c.key] ?? c.width),
+    [visibleCols, colWidthOverrides])
   const RIGHT_COLS_TOTAL = RIGHT_COL_BASES.reduce((a, b) => a + b, 0)
-  const rightColWidths = useMemo(() => {
-    const available = Math.max(0, effectivePanelW - COL_NUM - COL_CHECK - nameColW)
-    const widths = [...RIGHT_COL_BASES]
-    let deficit = RIGHT_COLS_TOTAL - available
-    // Shrink from the last column first
-    for (let i = widths.length - 1; i >= 0 && deficit > 0; i--) {
-      const take = Math.min(deficit, widths[i])
-      widths[i] -= take
-      deficit -= take
-    }
-    return widths
-  }, [effectivePanelW, nameColW, RIGHT_COL_BASES, RIGHT_COLS_TOTAL])
+  const rightColWidths = RIGHT_COL_BASES
+  const leftNaturalW = COL_NUM + COL_CHECK + nameColW + RIGHT_COLS_TOTAL
+  const leftInnerW = Math.max(leftNaturalW, effectivePanelW)
   // Map visible column keys to their computed widths
   const visibleColWidths = useMemo(() => {
-    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, dtype: 0 }
+    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, ctype: 0, cdate: 0, status: 0, complexity: 0, inactive: 0 }
     const visibleKeys = OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => c.key)
     visibleKeys.forEach((k, i) => { map[k] = rightColWidths[i] ?? 0 })
     return map
@@ -2161,7 +2346,137 @@ export default function GanttChart({
   const colEndW    = visibleColWidths.end
   const colPredW   = visibleColWidths.pred
   const colSuccW   = visibleColWidths.succ
-  const colDtypeW  = visibleColWidths.dtype
+  const colLagW    = visibleColWidths.lag
+  const colCtypeW  = visibleColWidths.ctype
+  const colCdateW  = visibleColWidths.cdate
+  const colStatusW = visibleColWidths.status
+  const colCplxW   = visibleColWidths.complexity
+  const colInactiveW = visibleColWidths.inactive
+
+  // ── Distinct values per filterable column (for filter dropdowns) ─────────
+  const distinctValues = useMemo(() => {
+    const fmt = (s: string | null | undefined) => (s ?? '').split('T')[0]
+    const pred = (t: Task) => deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
+    const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
+    const builder: Record<OptionalCol, (t: Task) => string> = {
+      assignee:   t => t.assignee ?? '',
+      pct:        t => String(t.percent_done ?? 0),
+      duration:   t => t.duration != null ? String(t.duration) : '',
+      start:      t => fmt(t.start_date),
+      end:        t => fmt(t.end_date),
+      pred,
+      succ,
+      lag:        t => {
+        const d = deps.find(x => x.to_task_id === t.id)
+        return d ? String(d.lag ?? 0) : ''
+      },
+      ctype:      t => t.constraint_type ?? 'asap',
+      cdate:      t => fmt(t.constraint_date),
+      status:     t => t.status ?? '',
+      complexity: t => t.complexity != null ? String(t.complexity) : '',
+      inactive:   t => t.inactive ? '是' : '否',
+    }
+    const out = {} as Record<OptionalCol, string[]>
+    ;(Object.keys(builder) as OptionalCol[]).forEach(k => {
+      const s = new Set<string>()
+      tasks.forEach(t => s.add(builder[k](t)))
+      out[k] = [...s].sort()
+    })
+    return out
+  }, [tasks, deps])
+
+  const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
+    if (v === '') return '（空）'
+    if (k === 'ctype') return CONSTRAINT_TYPES.find(c => c.value === v)?.label ?? v
+    if (k === 'status') return STATUS_META[v as keyof typeof STATUS_META]?.label ?? v
+    if (k === 'complexity') return COMPLEXITY_OPTIONS.find(o => String(o.value) === v)?.label ?? v
+    return v
+  }, [])
+
+  const renderColHeader = (colKey: OptionalCol, label: string, width: number) => {
+    if (width <= 0) return null
+    const sortActive = sortCol === colKey
+    const filterSet  = colFilters[colKey]
+    const hasFilter  = !!filterSet && filterSet.size > 0
+    const values     = distinctValues[colKey] ?? []
+    return (
+      <div style={{ width, position: 'relative' }}
+           className="h-full flex items-end pb-1 px-1 border-r border-gray-200 flex-none overflow-visible select-none">
+        {width >= 24 && (
+          <div className="flex items-center w-full gap-0.5">
+            <span className="text-[11px] truncate flex-1 cursor-pointer"
+                  onClick={e => { e.stopPropagation(); toggleSort(colKey) }}
+                  title="点击排序">{label}</span>
+            <button type="button" className="flex-none p-0.5 hover:bg-gray-200 rounded cursor-pointer"
+                    onClick={e => { e.stopPropagation(); toggleSort(colKey) }}
+                    title="排序">
+              <svg width="8" height="10" viewBox="0 0 8 10">
+                <path d="M4 0 L7 4 L1 4 Z" fill={sortActive && sortDir === 'asc' ? '#2563eb' : '#cbd5e1'} />
+                <path d="M4 10 L7 6 L1 6 Z" fill={sortActive && sortDir === 'desc' ? '#2563eb' : '#cbd5e1'} />
+              </svg>
+            </button>
+            <button type="button" className="flex-none p-0.5 hover:bg-gray-200 rounded cursor-pointer"
+                    onClick={e => { e.stopPropagation(); setColDropdown(colDropdown === colKey ? null : colKey) }}
+                    title="筛选">
+              <svg width="10" height="10" viewBox="0 0 10 10">
+                <path d="M0.5 1 H9.5 L6 5 V9 L4 9 V5 Z" fill={hasFilter ? '#f97316' : '#94a3b8'} />
+              </svg>
+            </button>
+          </div>
+        )}
+        {/* 列宽拖动手柄 */}
+        <div
+          className="group/colresize"
+          style={{ position: 'absolute', right: -3, top: 0, width: 7, height: '100%', cursor: 'col-resize', zIndex: 3 }}
+          onMouseDown={e => { e.preventDefault(); e.stopPropagation(); setColResizeDrag({ col: colKey, startX: e.clientX, startW: width }) }}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="absolute left-1/2 top-1/4 -translate-x-1/2 w-[2px] h-1/2 rounded bg-transparent group-hover/colresize:bg-blue-400 transition-colors" />
+        </div>
+        {colDropdown === colKey && (
+          <div ref={colDropdownRef}
+               className="absolute top-full right-0 z-50 bg-white border border-gray-300 rounded shadow-lg py-1 min-w-[140px] max-h-[300px] overflow-y-auto"
+               onClick={e => e.stopPropagation()}>
+            <div className="px-2 py-1 text-[11px] text-gray-500 border-b border-gray-100 flex items-center justify-between">
+              <span>筛选</span>
+              {hasFilter && (
+                <button className="text-[10px] text-blue-600 hover:underline"
+                        onClick={() => { setColFilters(p => { const n = { ...p }; delete n[colKey]; return n }) }}>清除</button>
+              )}
+            </div>
+            <div className="px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 flex items-center gap-1"
+                 onClick={() => {
+                   setColFilters(p => {
+                     const all = new Set(values)
+                     return { ...p, [colKey]: (filterSet && filterSet.size === values.length) ? new Set<string>() : all }
+                   })
+                 }}>
+              <input type="checkbox" readOnly className="pointer-events-none"
+                     checked={!!filterSet && filterSet.size === values.length} />
+              <span>全选</span>
+            </div>
+            {values.map(v => {
+              const checked = !filterSet || filterSet.has(v)
+              return (
+                <div key={v}
+                     className="px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 flex items-center gap-1 truncate"
+                     onClick={() => {
+                       setColFilters(p => {
+                         const cur = p[colKey] ? new Set(p[colKey]) : new Set(values)
+                         if (cur.has(v)) cur.delete(v); else cur.add(v)
+                         return { ...p, [colKey]: cur }
+                       })
+                     }}>
+                  <input type="checkbox" readOnly className="pointer-events-none" checked={checked} />
+                  <span className="truncate">{colDisplayLabel(colKey, v)}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
@@ -2170,12 +2485,13 @@ export default function GanttChart({
                   cursor: (splitterDrag || nameDrag) ? 'col-resize' : undefined }}>
 
       {/* ── Left panel ───────────────────────────────────────────────── */}
-      <div className="flex-none flex flex-col bg-white"
-           style={{ width: effectivePanelW, overflow: 'hidden', transition: splitterDrag ? undefined : 'width 0.15s ease' }}>
+      <div className={`${rightCollapsed ? 'flex-1' : 'flex-none'} bg-white`}
+           style={{ width: rightCollapsed ? undefined : effectivePanelW, minWidth: 0, overflowX: 'scroll', overflowY: 'hidden', transition: splitterDrag ? undefined : 'width 0.15s ease' }}>
+       <div className="flex flex-col h-full" style={{ width: leftInnerW }}>
         {/* Column headers */}
         <div className="flex-none flex items-end border-b border-gray-300 bg-gray-50
                         font-semibold text-gray-500 text-[11px]"
-             style={{ height: HDR_H, minWidth: effectivePanelW }}>
+             style={{ height: HDR_H, minWidth: leftInnerW }}>
           {/* 任务编号 header */}
           <div style={{ width: COL_NUM }}
                className="h-full flex items-end pb-1 justify-center border-r border-gray-200 flex-none text-gray-400">
@@ -2201,125 +2517,19 @@ export default function GanttChart({
               <div className="absolute left-1/2 top-1/4 -translate-x-1/2 w-[2px] h-1/2 rounded bg-transparent group-hover/resize:bg-blue-400 transition-colors" />
             </div>
           </div>
-          {colAssignW > 0 && (
-            <div style={{ width: colAssignW, position: 'relative' }}
-                 className="h-full flex items-end pb-1 px-1 border-r border-gray-200 flex-none overflow-visible cursor-pointer select-none"
-                 onClick={e => { e.stopPropagation(); setColDropdown(colDropdown === 'assignee' ? null : 'assignee') }}>
-              {colAssignW >= 24 && <>
-                <span className="text-[11px] truncate">责任人</span>
-                {sortCol === 'assignee' && <span className="text-[9px] ml-0.5 text-blue-500">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-                {filterAssignee !== null && <span className="text-[9px] ml-0.5 text-orange-500">●</span>}
-              </>}
-              {colDropdown === 'assignee' && (
-                <div ref={colDropdownRef}
-                     className="absolute top-full left-0 z-50 bg-white border border-gray-300 rounded shadow-lg py-1 min-w-[120px]"
-                     onClick={e => e.stopPropagation()}>
-                  <div className="px-2 py-1 text-[11px] text-gray-500 border-b border-gray-100">排序</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${sortCol === 'assignee' && sortDir === 'asc' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setSortCol('assignee'); setSortDir('asc'); setColDropdown(null) }}>升序 A→Z</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${sortCol === 'assignee' && sortDir === 'desc' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setSortCol('assignee'); setSortDir('desc'); setColDropdown(null) }}>降序 Z→A</div>
-                  {sortCol === 'assignee' && (
-                    <div className="px-2 py-1 text-[11px] cursor-pointer hover:bg-gray-100 text-gray-500"
-                         onClick={() => { setSortCol(null); setSortDir(null); setColDropdown(null) }}>清除排序</div>
-                  )}
-                  <div className="px-2 py-1 text-[11px] text-gray-500 border-t border-b border-gray-100 mt-1">筛选</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterAssignee === null ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterAssignee(null); setColDropdown(null) }}>全部</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterAssignee === '' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterAssignee(''); setColDropdown(null) }}>（空）</div>
-                  {assigneeList.map(a => (
-                    <div key={a} className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 truncate ${filterAssignee === a ? 'text-blue-600 font-semibold' : ''}`}
-                         onClick={() => { setFilterAssignee(a); setColDropdown(null) }}>{a}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          {colPctW > 0 && (
-            <div style={{ width: colPctW }}
-                 className="h-full flex items-end pb-1 px-2 border-r border-gray-200 flex-none overflow-hidden">
-              {colPctW >= 24 && '完成'}
-            </div>
-          )}
-          {colDurW > 0 && (
-            <div style={{ width: colDurW, position: 'relative' }}
-                 className="h-full flex items-end pb-1 px-1 border-r border-gray-200 flex-none overflow-visible cursor-pointer select-none"
-                 onClick={e => { e.stopPropagation(); setColDropdown(colDropdown === 'duration' ? null : 'duration') }}>
-              {colDurW >= 24 && <>
-                <span className="text-[11px] truncate">工期</span>
-                {sortCol === 'duration' && <span className="text-[9px] ml-0.5 text-blue-500">{sortDir === 'asc' ? '▲' : '▼'}</span>}
-              </>}
-              {colDropdown === 'duration' && (
-                <div ref={colDropdownRef}
-                     className="absolute top-full left-0 z-50 bg-white border border-gray-300 rounded shadow-lg py-1 min-w-[100px]"
-                     onClick={e => e.stopPropagation()}>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${sortCol === 'duration' && sortDir === 'asc' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setSortCol('duration'); setSortDir('asc'); setColDropdown(null) }}>升序 小→大</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${sortCol === 'duration' && sortDir === 'desc' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setSortCol('duration'); setSortDir('desc'); setColDropdown(null) }}>降序 大→小</div>
-                  {sortCol === 'duration' && (
-                    <div className="px-2 py-1 text-[11px] cursor-pointer hover:bg-gray-100 text-gray-500"
-                         onClick={() => { setSortCol(null); setSortDir(null); setColDropdown(null) }}>清除排序</div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          {colStartW > 0 && (
-            <div style={{ width: colStartW }}
-                 className="h-full flex items-end pb-1 px-2 border-r border-gray-200 flex-none overflow-hidden">
-              {colStartW >= 24 && '开始'}
-            </div>
-          )}
-          {colEndW > 0 && (
-            <div style={{ width: colEndW }}
-                 className="h-full flex items-end pb-1 px-2 border-r border-gray-200 flex-none overflow-hidden">
-              {colEndW >= 24 && '完成时间'}
-            </div>
-          )}
-          {colPredW > 0 && (
-            <div style={{ width: colPredW }}
-                 className="h-full flex items-end pb-1 px-2 border-r border-gray-200 flex-none overflow-hidden">
-              {colPredW >= 24 && '前置'}
-            </div>
-          )}
-          {colSuccW > 0 && (
-            <div style={{ width: colSuccW }}
-                 className="h-full flex items-end pb-1 px-2 border-r border-gray-200 flex-none overflow-hidden">
-              {colSuccW >= 24 && '后续'}
-            </div>
-          )}
-          {colDtypeW > 0 && (
-            <div style={{ width: colDtypeW, position: 'relative' }}
-                 className="h-full flex items-end pb-1 px-1 flex-none overflow-visible cursor-pointer select-none"
-                 onClick={e => { e.stopPropagation(); setColDropdown(colDropdown === 'dtype' ? null : 'dtype') }}>
-              {colDtypeW >= 24 && <>
-                <span className="text-[11px] truncate">类型</span>
-                {filterDtype !== null && <span className="text-[9px] ml-0.5 text-orange-500">●</span>}
-              </>}
-              {colDropdown === 'dtype' && (
-                <div ref={colDropdownRef}
-                     className="absolute top-full right-0 z-50 bg-white border border-gray-300 rounded shadow-lg py-1 min-w-[90px]"
-                     onClick={e => e.stopPropagation()}>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === null ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype(null); setColDropdown(null) }}>全部</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === 'empty' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('empty'); setColDropdown(null) }}>空</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === 'manual' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('manual'); setColDropdown(null) }}>手动</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === '2' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('2'); setColDropdown(null) }}>FS</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === '0' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('0'); setColDropdown(null) }}>SS</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === '3' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('3'); setColDropdown(null) }}>FF</div>
-                  <div className={`px-2 py-1 text-[11px] cursor-pointer hover:bg-blue-50 ${filterDtype === '1' ? 'text-blue-600 font-semibold' : ''}`}
-                       onClick={() => { setFilterDtype('1'); setColDropdown(null) }}>SF</div>
-                </div>
-              )}
-            </div>
-          )}
+          {renderColHeader('assignee', '责任人', colAssignW)}
+          {renderColHeader('pct', '完成', colPctW)}
+          {renderColHeader('duration', '持续时间', colDurW)}
+          {renderColHeader('start', '开始', colStartW)}
+          {renderColHeader('end', '完成时间', colEndW)}
+          {renderColHeader('pred', '前导', colPredW)}
+          {renderColHeader('succ', '后继', colSuccW)}
+          {renderColHeader('lag', '延迟', colLagW)}
+          {renderColHeader('ctype', '限制类型', colCtypeW)}
+          {renderColHeader('cdate', '限制日期', colCdateW)}
+          {renderColHeader('status', '状态', colStatusW)}
+          {renderColHeader('complexity', '复杂性', colCplxW)}
+          {renderColHeader('inactive', '无效', colInactiveW)}
         </div>
 
         {/* Rows */}
@@ -2343,6 +2553,9 @@ export default function GanttChart({
               .join(',')
             const fmtCell = (s: string | null) =>
               s ? s.split('T')[0].slice(5) : ''  // MM-DD
+            const cellRing = (col: OptionalCol | 'name') =>
+              selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
+            const pickCell = (col: OptionalCol | 'name') => () => setSelectedCell({ taskId: t.id, col })
             return (
               <React.Fragment key={t.id}>
                 {rowDrag?.dragging && dropIdx === i && (
@@ -2355,10 +2568,10 @@ export default function GanttChart({
                   onClick={e => {
                     if (rowDrag?.dragging) return
                     if (isEditing || cellEdit?.taskId === t.id) return
-                    const newSel = (e.ctrlKey || e.metaKey)
-                      ? sel ? selectedIds.filter(x => x !== t.id) : [...selectedIds, t.id]
-                      : sel && selectedIds.length === 1 ? [] : [t.id]
-                    dispatch(setSelectedIds(newSel))
+                    // 单击单元格不再选中整行；仅 Ctrl/Meta+click 切换行选中（用于多选操作）
+                    if (e.ctrlKey || e.metaKey) {
+                      dispatch(setSelectedIds(sel ? selectedIds.filter(x => x !== t.id) : [...selectedIds, t.id]))
+                    }
                     // Center right panel on clicked task
                     if (!e.ctrlKey && !e.metaKey && t.start_date && t.end_date && rightRef.current) {
                       const x1 = dateToX(new Date(t.start_date))
@@ -2410,7 +2623,8 @@ export default function GanttChart({
 
                   {/* ── Name cell ─────────────────────────────────── */}
                   <div style={{ width: nameColW, minWidth: MIN_NAME_W, paddingLeft: 4 + row.level * 16 }}
-                       className="flex items-center border-r border-gray-100 h-full flex-none overflow-hidden"
+                       className={`flex items-center border-r border-gray-100 h-full flex-none overflow-hidden ${cellRing('name')}`}
+                       onClick={pickCell('name')}
                        onDoubleClick={() => { if (!readOnly) { setEditId(t.id); setEditName(t.name) } }}>
                     {row.hasChildren
                       ? <button onClick={e => { e.stopPropagation(); toggle(t.id) }}
@@ -2442,7 +2656,8 @@ export default function GanttChart({
                   {/* ── Assignee cell ─────────────────────────────── */}
                   {colAssignW > 0 && (
                   <div style={{ width: colAssignW }}
-                       className="flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden"
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('assignee')}`}
+                       onClick={pickCell('assignee')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -2469,7 +2684,8 @@ export default function GanttChart({
                   {/* ── Percent done cell (read-only, based on status date) ── */}
                   {colPctW > 0 && (
                   <div style={{ width: colPctW }}
-                       className="flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden">
+                       className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('pct')}`}
+                       onClick={pickCell('pct')}>
                     <span className="text-[11px] text-gray-600">
                       {t.is_milestone ? 100 : row.hasChildren ? (summaryProgressMap.get(t.id) ?? 0) : timeBasedPercent(t, statusDateObj)}%
                     </span>
@@ -2479,7 +2695,8 @@ export default function GanttChart({
                   {/* ── Duration cell ─────────────────────────────── */}
                   {colDurW > 0 && (
                   <div style={{ width: colDurW }}
-                       className="flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden"
+                       className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('duration')}`}
+                       onClick={pickCell('duration')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -2506,12 +2723,12 @@ export default function GanttChart({
                   {/* ── Start date cell ───────────────────────────── */}
                   {colStartW > 0 && (
                   <div style={{ width: colStartW }}
-                       className="flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden"
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('start')}`}
+                       onClick={pickCell('start')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
                          if (t.auto_schedule !== false) {
-                           // FF/SF: 结束日期锁定，允许编辑开始日期；FS/SS/空: 开始日期锁定
                            const inc = deps.filter(d => d.to_task_id === t.id)
                            const dt = inc.length > 0 ? (inc[0].type ?? 2) : -1
                            if (dt !== 3 && dt !== 1) return
@@ -2539,7 +2756,8 @@ export default function GanttChart({
                   {/* ── End date cell ────────────────────────────── */}
                   {colEndW > 0 && (
                   <div style={{ width: colEndW }}
-                       className="flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden"
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('end')}`}
+                       onClick={pickCell('end')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -2572,63 +2790,188 @@ export default function GanttChart({
                   {/* ── Predecessors cell (clickable popup) ───────── */}
                   {colPredW > 0 && (
                   <div style={{ width: colPredW }}
-                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${row.hasChildren ? '' : 'cursor-pointer'}`}
-                       onClick={e => {
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('pred')}`}
+                       onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'pred' }) }}
+                       onDoubleClick={e => {
                          e.stopPropagation()
-                         if (row.hasChildren) return // 摘要任务不能有依赖
+                         if (row.hasChildren) return
                          const rect = e.currentTarget.getBoundingClientRect()
                          setPredFilter('')
                          const popupH = 320
                          const spaceBelow = window.innerHeight - rect.bottom
                          const yPos = spaceBelow < popupH ? rect.top - popupH : rect.bottom
-                         setPredPopup(p =>
-                           p?.taskId === t.id ? null
-                           : { taskId: t.id, x: rect.left, y: yPos }
-                         )
+                         setPredPopup({ taskId: t.id, x: rect.left, y: yPos })
                        }}>
                     <span className="text-[11px] text-gray-600 truncate flex-1">{row.hasChildren ? '—' : predNums}</span>
                     {!row.hasChildren && <span className="text-[9px] text-gray-400 flex-none group-hover:text-gray-600">▾</span>}
                   </div>
                   )}
 
-                  {/* ── Successors cell (read-only display) ────── */}
+                  {/* ── Successors cell (clickable popup) ────── */}
                   {colSuccW > 0 && (
                   <div style={{ width: colSuccW }}
-                       className="flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden">
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('succ')}`}
+                       onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'succ' }) }}
+                       onDoubleClick={e => {
+                         e.stopPropagation()
+                         if (row.hasChildren) return
+                         const rect = e.currentTarget.getBoundingClientRect()
+                         setSuccFilter('')
+                         const popupH = 320
+                         const spaceBelow = window.innerHeight - rect.bottom
+                         const yPos = spaceBelow < popupH ? rect.top - popupH : rect.bottom
+                         setSuccPopup({ taskId: t.id, x: rect.left, y: yPos })
+                       }}>
                     <span className="text-[11px] text-gray-600 truncate flex-1">{row.hasChildren ? '—' : succNums}</span>
+                    {!row.hasChildren && <span className="text-[9px] text-gray-400 flex-none group-hover:text-gray-600">▾</span>}
                   </div>
                   )}
 
-                  {/* ── Dep type / schedule mode cell ────────────── */}
-                  {colDtypeW > 0 && (
-                  <div style={{ width: colDtypeW }}
-                       className="flex items-center h-full flex-none px-1 overflow-hidden">
+                  {/* ── 延迟 cell ── */}
+                  {colLagW > 0 && (
+                  <div style={{ width: colLagW }}
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('lag')}`}
+                       onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'lag' }) }}
+                       onDoubleClick={e => {
+                         e.stopPropagation()
+                         if (row.hasChildren || incomingDeps.length === 0) return
+                         setActiveEditor({ taskId: t.id, col: 'lag' })
+                       }}>
+                    {row.hasChildren || incomingDeps.length === 0 ? (
+                      <span className="text-[11px] text-gray-300 w-full text-center">—</span>
+                    ) : activeEditor?.taskId === t.id && activeEditor?.col === 'lag' ? (
+                      <input autoFocus type="number"
+                        className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
+                        defaultValue={incomingDeps[0].lag ?? 0}
+                        onClick={e => e.stopPropagation()}
+                        onBlur={e => {
+                          const v = parseInt(e.target.value, 10) || 0
+                          if (v !== (incomingDeps[0].lag ?? 0)) handleDepLagChange(incomingDeps[0].id, v)
+                          setActiveEditor(null)
+                        }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                          if (e.key === 'Escape') setActiveEditor(null)
+                        }} />
+                    ) : (
+                      <span className="text-[11px] text-gray-600 w-full text-right">{incomingDeps[0].lag ?? 0}</span>
+                    )}
+                  </div>
+                  )}
+
+                  {/* ── 限制类型 ─────────────────────────────────── */}
+                  {colCtypeW > 0 && (
+                  <div style={{ width: colCtypeW }}
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ctype')}`}
+                       onClick={pickCell('ctype')}
+                       onDoubleClick={e => { e.stopPropagation(); if (!row.hasChildren) setActiveEditor({ taskId: t.id, col: 'ctype' }) }}>
                     {row.hasChildren ? (
                       <span className="text-[11px] text-gray-300 w-full text-center">—</span>
-                    ) : (
-                      <select
-                        className="text-[11px] border border-gray-200 rounded px-0.5 bg-white
-                                   text-gray-700 focus:outline-none focus:border-blue-400 cursor-pointer w-full"
-                        value={incomingDeps.length > 0 ? String(incomingDeps[0].type) : (t.auto_schedule === false ? 'manual' : 'empty')}
+                    ) : activeEditor?.taskId === t.id && activeEditor?.col === 'ctype' ? (
+                      <select autoFocus
+                        className="text-[11px] border border-blue-400 rounded px-0.5 bg-white text-gray-700 focus:outline-none cursor-pointer w-full"
+                        value={t.constraint_type || DEFAULT_CONSTRAINT_TYPE}
                         onClick={e => e.stopPropagation()}
+                        onBlur={() => setActiveEditor(null)}
+                        onChange={e => { handleTaskFieldChange(t.id, { constraint_type: e.target.value }); setActiveEditor(null) }}>
+                        {CONSTRAINT_TYPES.map(o => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="text-[11px] text-gray-600 truncate w-full">
+                        {CONSTRAINT_TYPES.find(c => c.value === (t.constraint_type || DEFAULT_CONSTRAINT_TYPE))?.label ?? ''}
+                      </span>
+                    )}
+                  </div>
+                  )}
+                  {/* ── 限制日期 ─────────────────────────────────── */}
+                  {colCdateW > 0 && (() => {
+                    const ct = t.constraint_type || DEFAULT_CONSTRAINT_TYPE
+                    const meta = CONSTRAINT_TYPES.find(c => c.value === ct)
+                    const needsDate = !!meta?.needsDate && !row.hasChildren
+                    const dv = (t.constraint_date ?? '').split('T')[0]
+                    const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'cdate'
+                    return (
+                      <div style={{ width: colCdateW }}
+                           className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('cdate')}`}
+                           onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'cdate' }) }}
+                           onDoubleClick={e => { e.stopPropagation(); if (needsDate) setActiveEditor({ taskId: t.id, col: 'cdate' }) }}>
+                        {!needsDate ? (
+                          <span className="text-[11px] text-gray-300 w-full text-center">—</span>
+                        ) : editing ? (
+                          <input autoFocus type="date"
+                            className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
+                            defaultValue={dv}
+                            onClick={e => e.stopPropagation()}
+                            onBlur={e => {
+                              handleTaskFieldChange(t.id, { constraint_date: e.target.value || null })
+                              setActiveEditor(null)
+                            }}
+                            onKeyDown={e => { if (e.key === 'Escape') setActiveEditor(null) }} />
+                        ) : (
+                          <span className="text-[11px] text-gray-600 w-full">{dv}</span>
+                        )}
+                      </div>
+                    )
+                  })()}
+                  {/* ── 状态（自动计算） ─────────────────────────── */}
+                  {colStatusW > 0 && (() => {
+                    const st = computeTaskStatus(t, statusDate ? new Date(statusDate) : null, { allTasks: tasks, deps })
+                    const meta = STATUS_META[st]
+                    return (
+                      <div style={{ width: colStatusW }}
+                           className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('status')}`}
+                           onClick={pickCell('status')}>
+                        <span className="inline-flex items-center gap-1 text-[11px] truncate"
+                              style={{ color: meta.color }}>
+                          <span className="inline-block rounded-full" style={{ width: 8, height: 8, background: meta.color }} />
+                          {meta.label}
+                        </span>
+                      </div>
+                    )
+                  })()}
+                  {/* ── 复杂性 ───────────────────────────────────── */}
+                  {colCplxW > 0 && (
+                  <div style={{ width: colCplxW }}
+                       className={`flex items-center h-full flex-none px-1 overflow-hidden ${cellRing('complexity')}`}
+                       onClick={pickCell('complexity')}
+                       onDoubleClick={e => { e.stopPropagation(); if (!row.hasChildren) setActiveEditor({ taskId: t.id, col: 'complexity' }) }}>
+                    {row.hasChildren ? (
+                      <span className="text-[11px] text-gray-300 w-full text-center">—</span>
+                    ) : activeEditor?.taskId === t.id && activeEditor?.col === 'complexity' ? (
+                      <select autoFocus
+                        className="text-[11px] border border-blue-400 rounded px-0.5 bg-white text-gray-700 focus:outline-none cursor-pointer w-full"
+                        value={t.complexity ?? ''}
+                        onClick={e => e.stopPropagation()}
+                        onBlur={() => setActiveEditor(null)}
                         onChange={e => {
                           const v = e.target.value
-                          if (v === 'empty' || v === 'manual') {
-                            handleScheduleModeChange(t.id, v)
-                          } else if (incomingDeps.length > 0) {
-                            handleDepTypeChange(incomingDeps[0].id, Number(v))
-                          }
+                          handleTaskFieldChange(t.id, { complexity: v === '' ? null : Number(v) })
+                          setActiveEditor(null)
                         }}>
-                        <option value="empty">空</option>
-                        <option value="manual">手动</option>
-                        {incomingDeps.length > 0 && <>
-                          <option value={2}>FS</option>
-                          <option value={0}>SS</option>
-                          <option value={3}>FF</option>
-                          <option value={1}>SF</option>
-                        </>}
+                        <option value="">—</option>
+                        {COMPLEXITY_OPTIONS.map(o => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
                       </select>
+                    ) : (
+                      <span className="text-[11px] text-gray-600 truncate w-full">
+                        {COMPLEXITY_OPTIONS.find(o => o.value === t.complexity)?.label ?? ''}
+                      </span>
                     )}
+                  </div>
+                  )}
+                  {/* ── 无效 ────────────────────────────────────── */}
+                  {colInactiveW > 0 && (
+                  <div style={{ width: colInactiveW }}
+                       className={`flex items-center justify-center h-full flex-none px-1 overflow-hidden ${cellRing('inactive')}`}
+                       onClick={pickCell('inactive')}>
+                    <input type="checkbox"
+                      checked={t.inactive ?? false}
+                      onClick={e => e.stopPropagation()}
+                      onChange={e => handleTaskFieldChange(t.id, { inactive: e.target.checked })}
+                      className="w-4 h-4 accent-blue-500 cursor-pointer" />
                   </div>
                   )}
                 </div>
@@ -2641,16 +2984,15 @@ export default function GanttChart({
           {/* 补偿右侧水平滚动条高度，使左右面板底部对齐 */}
           {hScrollbarH > 0 && <div style={{ height: hScrollbarH, flexShrink: 0 }} />}
         </div>
+       </div>
       </div>
 
       {/* ── Splitter ─────────────────────────────────────────────────── */}
       <div
-        className="flex-none relative flex flex-col items-center justify-center select-none gap-2"
+        className="flex-none relative flex flex-col items-center justify-center select-none"
         style={{
-          width: 8,
-          background: splitterDrag ? '#dbeafe' : '#f3f4f6',
-          borderLeft:  '1px solid #d1d5db',
-          borderRight: '1px solid #d1d5db',
+          width: 6,
+          background: splitterDrag ? '#dbeafe' : '#e5e7eb',
           cursor: 'col-resize',
           zIndex: 10,
         }}
@@ -2659,46 +3001,48 @@ export default function GanttChart({
           setSplitterDrag({ startX: e.clientX, startW: panelCollapsed ? 0 : panelW })
         }}
       >
-        {/* Collapse / expand left panel */}
-        <button
-          title={panelCollapsed ? '展开左面板' : '折叠左面板'}
-          style={{
-            width: 16, height: 32, background: '#e5e7eb',
-            border: '1px solid #d1d5db', borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', fontSize: 11, color: '#6b7280',
-          }}
-          onClick={e => {
-            e.stopPropagation()
-            if (panelCollapsed) {
-              setPanelCollapsed(false)
-              setPanelW(prevPanelW.current)
-            } else {
-              prevPanelW.current = panelW
-              setPanelCollapsed(true)
-            }
-          }}
-          onMouseDown={e => e.stopPropagation()}
+        <div className="flex flex-col items-center rounded-full bg-white shadow-sm"
+             style={{ border: '1px solid #d1d5db', padding: '2px 0' }}
+             onMouseDown={e => e.stopPropagation()}
         >
-          {panelCollapsed ? '›' : '‹'}
-        </button>
-        {/* Collapse / expand right panel (timeline) */}
-        <button
-          title={rightCollapsed ? '展开时间轴' : '折叠时间轴'}
-          style={{
-            width: 16, height: 32, background: rightCollapsed ? '#dbeafe' : '#e5e7eb',
-            border: `1px solid ${rightCollapsed ? '#93c5fd' : '#d1d5db'}`, borderRadius: 4,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer', fontSize: 11, color: rightCollapsed ? '#2563eb' : '#6b7280',
-          }}
-          onClick={e => {
-            e.stopPropagation()
-            setRightCollapsed(v => !v)
-          }}
-          onMouseDown={e => e.stopPropagation()}
-        >
-          {rightCollapsed ? '‹' : '›'}
-        </button>
+          {/* Collapse / expand left panel */}
+          <button
+            title={panelCollapsed ? '展开左面板' : '折叠左面板'}
+            style={{
+              width: 14, height: 14, background: 'transparent', border: 'none',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', fontSize: 11, color: '#6b7280', lineHeight: 1,
+            }}
+            onClick={e => {
+              e.stopPropagation()
+              if (panelCollapsed) {
+                setPanelCollapsed(false)
+                setPanelW(prevPanelW.current)
+              } else {
+                prevPanelW.current = panelW
+                setPanelCollapsed(true)
+              }
+            }}
+          >
+            {panelCollapsed ? '›' : '‹'}
+          </button>
+          {/* Collapse / expand right panel (timeline) */}
+          <button
+            title={rightCollapsed ? '展开右面板' : '折叠右面板'}
+            style={{
+              width: 14, height: 14, background: 'transparent', border: 'none',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer', fontSize: 11,
+              color: rightCollapsed ? '#2563eb' : '#6b7280', lineHeight: 1,
+            }}
+            onClick={e => {
+              e.stopPropagation()
+              setRightCollapsed(v => !v)
+            }}
+          >
+            {rightCollapsed ? '‹' : '›'}
+          </button>
+        </div>
       </div>
 
       {/* ── Right timeline（上：日期头冻结；上下同步横向滚动，仅下方纵向滚动）──── */}
@@ -2709,11 +3053,11 @@ export default function GanttChart({
           ref={rightHeaderRef}
           onScroll={onRightHeaderScroll}
           className="flex-none overflow-x-auto overflow-y-hidden shrink-0 border-b border-gray-300 bg-gray-50 scrollbar-hide"
-          style={{ height: HDR_H, minHeight: HDR_H, flexShrink: 0 }}
+          style={{ height: HDR_H + 4, minHeight: HDR_H + 4, flexShrink: 0 }}
         >
           <svg
             width={Math.max(totalW, 800)}
-            height={HDR_H}
+            height={HDR_H + 4}
             style={{ display: 'block', fontFamily: 'system-ui, sans-serif' }}
             overflow="visible"
           >
@@ -2789,6 +3133,43 @@ export default function GanttChart({
                   )
                 })
             }
+            {/* Date markers aligned under day numbers */}
+            {(() => {
+              const nodes: React.ReactNode[] = []
+              const LBL_Y = HDR_H
+              const ps = currentProject?.start_date?.split('T')[0]
+              let pe = currentProject?.end_date?.split('T')[0]
+              if (!pe) {
+                let mx = ''
+                tasks.forEach(t => {
+                  const d = t.end_date?.split('T')[0]
+                  if (d && d > mx) mx = d
+                })
+                pe = mx || undefined
+              }
+              if (ps) {
+                const x = dateToX(new Date(ps + 'T00:00:00'))
+                nodes.push(
+                  <text key="lbl-ps" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
+                        fill="#dc2626" fontWeight={600}>开始日期</text>
+                )
+              }
+              if (statusDate) {
+                const x = dateToX(new Date(statusDate))
+                nodes.push(
+                  <text key="lbl-sd" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
+                        fill="#ef4444" fontWeight={600}>状态日期</text>
+                )
+              }
+              if (pe) {
+                const x = dateToX(new Date(pe + 'T00:00:00'))
+                nodes.push(
+                  <text key="lbl-pe" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
+                        fill="#dc2626" fontWeight={600}>结束日期</text>
+                )
+              }
+              return nodes
+            })()}
           </svg>
         </div>
         <div
@@ -2946,12 +3327,14 @@ export default function GanttChart({
             const y  = i*ROW_H + BAR_TOP
             const isDragging = !!previewMap[t.id]
 
+            const inactiveDim = inactiveSet.has(t.id) ? 0.35 : 1
+
             if (t.is_milestone) {
               const r=BAR_H/2, cx=x, cy=y+r
               const hovered = hoveredBar === t.id
               return (
                 <g key={t.id}
-                   style={{ cursor:'pointer', opacity: isDragging?0.7:1 }}
+                   style={{ cursor:'pointer', opacity: (isDragging?0.7:1) * inactiveDim }}
                    onMouseEnter={()=>setHoveredBar(t.id)}
                    onMouseLeave={()=>setHoveredBar(null)}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
@@ -2989,7 +3372,7 @@ export default function GanttChart({
                 <g key={t.id}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e=>{ if(e.button!==0)return; onBarMouseDown(e,t) }}
-                   style={{ cursor:'grab', opacity: isDragging?0.7:1 }}>
+                   style={{ cursor:'grab', opacity: (isDragging?0.7:1) * inactiveDim }}>
                   <text x={x-4} y={y+BAR_H/2+4} fontSize={11} textAnchor="end" fill="#6b7280" fontWeight="600" style={{ pointerEvents:'none' }}>{t.name}</text>
                   <rect x={x} y={y} width={w} height={BAR_H} fill="#93c5fd" rx={3} opacity={0.9}/>
                   {sDoneW > 0.5 && (
@@ -3012,7 +3395,7 @@ export default function GanttChart({
             const barText = isCritical ? '#7f1d1d' : '#14532d'
 
             return (
-              <g key={t.id} style={{ opacity: isDragging?0.65:1 }}
+              <g key={t.id} style={{ opacity: (isDragging?0.65:1) * inactiveDim }}
                  onMouseEnter={()=>setHoveredBar(t.id)}
                  onMouseLeave={()=>setHoveredBar(null)}
                  onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
@@ -3180,9 +3563,42 @@ export default function GanttChart({
               <g>
                 <line x1={sx} y1={0} x2={sx} y2={totalH}
                       stroke="#ef4444" strokeWidth={2} strokeDasharray="5 3" />
-                <text x={sx+3} y={12} fontSize={10} fill="#ef4444">状态日期</text>
               </g>
             )
+          })()}
+
+          {/* Project start / end lines */}
+          {(() => {
+            const nodes: React.ReactNode[] = []
+            const ps = currentProject?.start_date?.split('T')[0]
+            let pe = currentProject?.end_date?.split('T')[0]
+            if (!pe) {
+              let mx = ''
+              tasks.forEach(t => {
+                const d = t.end_date?.split('T')[0]
+                if (d && d > mx) mx = d
+              })
+              pe = mx || undefined
+            }
+            if (ps) {
+              const px = dateToX(new Date(ps + 'T00:00:00'))
+              nodes.push(
+                <g key="proj-start">
+                  <line x1={px} y1={0} x2={px} y2={totalH}
+                        stroke="#dc2626" strokeWidth={2} strokeDasharray="4 4" />
+                </g>
+              )
+            }
+            if (pe) {
+              const px = dateToX(new Date(pe + 'T00:00:00'))
+              nodes.push(
+                <g key="proj-end">
+                  <line x1={px} y1={0} x2={px} y2={totalH}
+                        stroke="#dc2626" strokeWidth={2} strokeDasharray="4 4" />
+                </g>
+              )
+            }
+            return nodes
           })()}
 
           {/* Project lines */}
@@ -3440,6 +3856,61 @@ export default function GanttChart({
               )}
             </div>
           </div>
+          </>
+        )
+      })()}
+      {/* ── Successor popup ──────────────────────────────────────────── */}
+      {succPopup && !summarySet.has(succPopup.taskId) && (() => {
+        const currentSeq = seqMap.get(succPopup.taskId) ?? 0
+        const candidateTasks = tasks
+          .filter(t => t.id !== succPopup.taskId && !t.is_deleted && !summarySet.has(t.id))
+          .sort((a, b) => {
+            const sa = seqMap.get(a.id) ?? 99999
+            const sb = seqMap.get(b.id) ?? 99999
+            return Math.abs(sa - currentSeq) - Math.abs(sb - currentSeq)
+          })
+        const filterLower = succFilter.toLowerCase()
+        const filtered = filterLower
+          ? candidateTasks.filter(t =>
+              t.name.toLowerCase().includes(filterLower)
+              || (flatRowIdx[t.id] ?? '').includes(filterLower)
+            )
+          : candidateTasks
+        return (
+          <>
+            <div className="fixed inset-0 z-[49]" onClick={() => setSuccPopup(null)} aria-hidden />
+            <div className="fixed z-[50] bg-white border border-gray-200 rounded-lg shadow-2xl"
+                 style={{ left: succPopup.x, top: succPopup.y, width: 300, maxHeight: 320 }}
+                 onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
+                <span className="text-gray-400 text-xs">▼</span>
+                <input autoFocus placeholder="搜索任务..." value={succFilter}
+                       onChange={e => setSuccFilter(e.target.value)}
+                       className="flex-1 text-[12px] outline-none text-gray-700 placeholder-gray-400" />
+              </div>
+              <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
+                {filtered.map(task => {
+                  const isSucc = deps.some(d => d.from_task_id === succPopup.taskId && d.to_task_id === task.id)
+                  const rowNum = flatRowIdx[task.id]
+                  return (
+                    <div key={task.id} role="button" tabIndex={0}
+                         className="flex items-center gap-2.5 px-3 py-2 hover:bg-blue-50 cursor-pointer"
+                         onClick={() => togglePredecessor(succPopup.taskId, task.id)}
+                         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePredecessor(succPopup.taskId, task.id) } }}>
+                      <span className="flex-none w-3.5 h-3.5 rounded border flex items-center justify-center"
+                            style={{ background: isSucc ? '#3b82f6' : 'transparent', borderColor: isSucc ? '#3b82f6' : '#9ca3af' }}>
+                        {isSucc && <span className="text-white text-[10px]">✓</span>}
+                      </span>
+                      <span className="text-[11px] text-gray-400 flex-none w-6 text-right">{rowNum}</span>
+                      <span className="text-[12px] text-gray-700 truncate">{task.name}</span>
+                    </div>
+                  )
+                })}
+                {filtered.length === 0 && (
+                  <div className="px-3 py-4 text-[12px] text-gray-400 text-center">无匹配任务</div>
+                )}
+              </div>
+            </div>
           </>
         )
       })()}

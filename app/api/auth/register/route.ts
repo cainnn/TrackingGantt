@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(failure('username, email and password are required', 400), { status: 400 })
   }
 
-  const userRole = role === 'view' ? 'view' : 'admin'
+  const userRole = role === 'view' ? 'view' : role === 'administrator' ? 'administrator' : 'admin'
   const passwordHash = await bcrypt.hash(password, 10)
 
   try {

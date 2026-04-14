@@ -113,7 +113,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (!(await verifyOwnership(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
-  const { id, type, lag } = await req.json()
+  const { id, type, lag, active } = await req.json()
   if (!id) return NextResponse.json(failure('id required', 400), { status: 400 })
 
   const client = await pool.connect()
@@ -122,9 +122,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
     const r = await client.query(
       `UPDATE dependencies
-       SET type = COALESCE($1, type), lag = COALESCE($2, lag)
+       SET type = COALESCE($1, type),
+           lag  = COALESCE($2, lag),
+           active = COALESCE($5, active)
        WHERE id = $3 AND project_id = $4 RETURNING *`,
-      [type ?? null, lag ?? null, id, projectId]
+      [type ?? null, lag ?? null, id, projectId, active ?? null]
     )
     if (!r.rows[0]) {
       await client.query('ROLLBACK')

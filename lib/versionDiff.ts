@@ -9,6 +9,7 @@ export interface SnapshotTask {
   percent_done: number
   is_milestone: boolean
   parent_id: string | null
+  order_index?: number | null
 }
 
 export interface DiffItem {
@@ -16,18 +17,27 @@ export interface DiffItem {
   task_name: string
   type: 'added' | 'removed' | 'changed'
   changes?: { field: string; old: string; new: string }[]
+  reason?: string
 }
 
 const FIELD_LABELS: Record<string, string> = {
   name: '任务名称', start_date: '开始日期', end_date: '结束日期',
   duration: '工期', assignee: '责任人',
-  is_milestone: '里程碑', parent_id: '父任务',
+  is_milestone: '里程碑', parent_id: '父任务', order_index: '顺序',
 }
 
 function normalize(val: unknown): string {
   if (val === null || val === undefined) return ''
   const s = String(val)
-  return s.includes('T') ? s.split('T')[0] : s
+  // ISO 日期带时区偏移时，需正确转换为本地日期（如 "2025-12-21T16:00:00.000Z" → "2025-12-22"）
+  if (s.includes('T')) {
+    const d = new Date(s)
+    if (!isNaN(d.getTime())) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+    return s.split('T')[0]
+  }
+  return s
 }
 
 export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]): DiffItem[] {
@@ -47,7 +57,7 @@ export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]
     }
   }
 
-  const compareFields = ['name', 'start_date', 'end_date', 'duration', 'assignee', 'is_milestone']
+  const compareFields = ['name', 'start_date', 'end_date', 'duration', 'assignee', 'is_milestone', 'order_index']
   for (const [code, newT] of newMap) {
     const oldT = oldMap.get(code)
     if (!oldT) continue

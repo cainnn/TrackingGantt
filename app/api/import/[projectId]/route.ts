@@ -41,6 +41,15 @@ interface ImportTask {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  percent_done?: number | null
+  constraint_type?: string | null
+  constraint_date?: string | null
+  rollup?: boolean
+  inactive?: boolean
+  project_boundary?: string | null
+  status?: string | null
+  complexity?: number | null
+  baseline_end_date?: string | null
 }
 
 interface ImportDep {
@@ -187,11 +196,18 @@ async function importReplace(
     await client.query(
       `INSERT INTO tasks (id, project_id, parent_id, task_code, name, assignee,
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
-       is_deleted, percent_done, duration_unit)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,0,'day')`,
+       is_deleted, percent_done, duration_unit,
+       constraint_type, constraint_date, rollup, inactive, project_boundary,
+       status, complexity, baseline_end_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'day',
+               $15,$16,$17,$18,$19,$20,$21,$22)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
-       t.auto_schedule, t.note, i]
+       t.auto_schedule, t.note, i,
+       t.percent_done ?? 0,
+       t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
+       t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
+       t.status ?? null, t.complexity ?? null, toDateStr(t.baseline_end_date)]
     )
   }
 
@@ -249,10 +265,23 @@ async function importMerge(
     const parentId = rawParentId === t.id ? null : rawParentId
     await client.query(
       `UPDATE tasks SET parent_id=$1, name=$2, assignee=$3, start_date=$4, end_date=$5,
-       duration=$6, is_milestone=$7, auto_schedule=$8, note=$9
+       duration=$6, is_milestone=$7, auto_schedule=$8, note=$9,
+       percent_done=COALESCE($12, percent_done),
+       constraint_type=COALESCE($13, constraint_type),
+       constraint_date=$14,
+       rollup=COALESCE($15, rollup),
+       inactive=COALESCE($16, inactive),
+       project_boundary=COALESCE($17, project_boundary),
+       status=COALESCE($18, status),
+       complexity=$19,
+       baseline_end_date=$20
        WHERE id=$10 AND project_id=$11`,
       [parentId, t.name, t.assignee, t.start_date, t.end_date,
-       t.duration, t.is_milestone, t.auto_schedule, t.note, t.id, projectId]
+       t.duration, t.is_milestone, t.auto_schedule, t.note, t.id, projectId,
+       t.percent_done ?? null,
+       t.constraint_type ?? null, toDateStr(t.constraint_date),
+       t.rollup ?? null, t.inactive ?? null, t.project_boundary ?? null,
+       t.status ?? null, t.complexity ?? null, toDateStr(t.baseline_end_date)]
     )
   }
 
@@ -265,11 +294,18 @@ async function importMerge(
     await client.query(
       `INSERT INTO tasks (id, project_id, parent_id, task_code, name, assignee,
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
-       is_deleted, percent_done, duration_unit)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,0,'day')`,
+       is_deleted, percent_done, duration_unit,
+       constraint_type, constraint_date, rollup, inactive, project_boundary,
+       status, complexity, baseline_end_date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'day',
+               $15,$16,$17,$18,$19,$20,$21,$22)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
-       t.auto_schedule, t.note, orderIdx++]
+       t.auto_schedule, t.note, orderIdx++,
+       t.percent_done ?? 0,
+       t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
+       t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
+       t.status ?? null, t.complexity ?? null, toDateStr(t.baseline_end_date)]
     )
   }
 

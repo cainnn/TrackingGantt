@@ -14,7 +14,10 @@ export async function POST(req: NextRequest, { params }: Params) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  const proj = await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
+  // administrator 可操作所有项目，其他角色只能操作自己的项目
+  const proj = auth.value.role === 'administrator'
+    ? await pool.query('SELECT id FROM projects WHERE id = $1', [projectId])
+    : await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
   if (!proj.rows.length) return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { version_id } = await req.json()
@@ -55,8 +58,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
     const autoVersion = (maxRes.rows[0].mx as number) + 1
     await client.query(
-      `INSERT INTO project_versions (project_id, version_number, name, description, snapshot, is_baseline, created_by)
-       VALUES ($1, $2, $3, $4, $5, false, $6)`,
+      `INSERT INTO project_versions (project_id, version_number, name, description, snapshot, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         projectId, autoVersion,
         `恢复前自动备份`,

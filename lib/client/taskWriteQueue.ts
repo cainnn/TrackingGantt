@@ -1,6 +1,6 @@
 'use client'
 
-import { authFetchHeaders } from '@/lib/client/authFetch'
+import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 
 const projectQueues = new Map<string, Promise<unknown>>()
 
@@ -17,9 +17,8 @@ function enqueueByProject<T>(projectId: string, run: () => Promise<T>): Promise<
 
 export function enqueueTaskPut(projectId: string, payload: unknown): Promise<Response> {
   return enqueueByProject(projectId, () =>
-    fetch(`/api/tasks/${projectId}`, {
+    authFetch(`/api/tasks/${projectId}`, {
       method: 'PUT',
-      credentials: 'include',
       headers: authFetchHeaders(true),
       body: JSON.stringify(payload),
     })

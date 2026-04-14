@@ -8,8 +8,8 @@ export async function GET(req: NextRequest) {
   const auth = getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
 
-  // view 用户可查看所有项目，admin 只看自己的
-  const projectsResult = auth.value.role === 'view'
+  // view/administrator 用户可查看所有项目，admin 只看自己的
+  const projectsResult = (auth.value.role === 'view' || auth.value.role === 'administrator')
     ? await pool.query('SELECT * FROM projects ORDER BY created_at DESC')
     : await pool.query('SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC', [auth.value.userId])
 

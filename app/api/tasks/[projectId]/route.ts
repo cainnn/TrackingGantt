@@ -258,12 +258,13 @@ export async function POST(req: NextRequest, { params }: Params) {
       const r = await client.query(
         `INSERT INTO tasks
            (project_id, parent_id, task_code, name, assignee, start_date, end_date,
-            duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+            duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule, constraint_type)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
         [projectId, parent_id ?? null, code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          duration ?? null, duration_unit ?? 'day',
-         percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true]
+         percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
+         'asap']
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
@@ -373,6 +374,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
 
+    // 查询项目的 status_date 用于判定"历史修改"
+    const projRes = await client.query('SELECT status_date FROM projects WHERE id = $1', [projectId])
+    const projStatusDate: string | null = projRes.rows[0]?.status_date
+      ? toDateStr(projRes.rows[0].status_date as string)
+      : null
+
     // ── Batch fetch all old tasks in one query ────────────────────────────
     const inputIds = taskInputs.map((t: Record<string, unknown>) => t.id as string).filter(Boolean)
     const oldMap = new Map<string, Record<string, unknown>>()
@@ -395,6 +402,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
     // Collect parent IDs that need name lookups for lifecycle descriptions
     const parentLookupIds = new Set<string>()
+
+    // 回溯修改审计日志（对 end_date ≤ 项目状态日期 的"历史任务"做关键字段修改时记录）
+    const auditEntries: Array<{
+      taskId: string; field: string
+      oldValue: string | null; newValue: string | null
+      reason: string | null
+    }> = []
+    const AUDIT_FIELDS = ['name', 'start_date', 'end_date', 'duration', 'percent_done'] as const
 
     for (const task of taskInputs) {
       const { id } = task as { id: string }
@@ -444,6 +459,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
       }
 
       const hasAutoScheduleKey = 'auto_schedule' in task
+      const t = task as Record<string, unknown>
+      const hasCT = 'constraint_type' in task
+      const hasCD = 'constraint_date' in task
+      const hasStatus = 'status' in task
+      const hasCplx = 'complexity' in task
+      const hasRollup = 'rollup' in task
+      const hasInactive = 'inactive' in task
+      const hasPB = 'project_boundary' in task
+      const hasBE = 'baseline_end_date' in task
       const r = await client.query(
         `UPDATE tasks SET
            name         = COALESCE($1, name),
@@ -458,28 +482,64 @@ export async function PUT(req: NextRequest, { params }: Params) {
            note         = $10,
            order_index  = COALESCE($11, order_index),
            auto_schedule= CASE WHEN $16 THEN $17 ELSE auto_schedule END,
+           constraint_type = CASE WHEN $18 THEN $19 ELSE constraint_type END,
+           constraint_date = CASE WHEN $20 THEN $21 ELSE constraint_date END,
+           status          = CASE WHEN $22 THEN $23 ELSE status END,
+           complexity      = CASE WHEN $24 THEN $25 ELSE complexity END,
+           rollup          = CASE WHEN $26 THEN $27 ELSE rollup END,
+           inactive        = CASE WHEN $28 THEN $29 ELSE inactive END,
+           project_boundary= CASE WHEN $30 THEN $31 ELSE project_boundary END,
+           baseline_end_date = CASE WHEN $32 THEN $33 ELSE baseline_end_date END,
            updated_at   = NOW()
          WHERE id = $12 AND project_id = $15
          RETURNING *`,
         [
-          (task as Record<string, unknown>).name ?? null,
-          (task as Record<string, unknown>).parent_id ?? null,
-          (task as Record<string, unknown>).assignee ?? null,
-          normalizeDate((task as Record<string, unknown>).start_date),
-          normalizeDate((task as Record<string, unknown>).end_date),
-          (task as Record<string, unknown>).duration ?? null,
-          (task as Record<string, unknown>).duration_unit ?? null,
-          (task as Record<string, unknown>).percent_done ?? null,
-          (task as Record<string, unknown>).is_milestone ?? null,
-          (task as Record<string, unknown>).note ?? null,
-          (task as Record<string, unknown>).order_index ?? null,
+          t.name ?? null,
+          t.parent_id ?? null,
+          t.assignee ?? null,
+          normalizeDate(t.start_date),
+          normalizeDate(t.end_date),
+          t.duration ?? null,
+          t.duration_unit ?? null,
+          t.percent_done ?? null,
+          t.is_milestone ?? null,
+          t.note ?? null,
+          t.order_index ?? null,
           id, hasParentKey, hasAssigneeKey, projectId,
-          hasAutoScheduleKey, (task as Record<string, unknown>).auto_schedule ?? true,
+          hasAutoScheduleKey, t.auto_schedule ?? true,
+          hasCT, (t.constraint_type as string | null) ?? null,
+          hasCD, normalizeDate(t.constraint_date),
+          hasStatus, (t.status as string | null) ?? null,
+          hasCplx, (t.complexity as number | null) ?? null,
+          hasRollup, (t.rollup as boolean | null) ?? false,
+          hasInactive, (t.inactive as boolean | null) ?? false,
+          hasPB, (t.project_boundary as string | null) ?? 'ask',
+          hasBE, normalizeDate(t.baseline_end_date),
         ]
       )
       if (!r.rows[0]) continue
       const cur = r.rows[0]
       updated.push(cur)
+
+      // ── 审计：判定是否为"历史任务"回溯修改 ─────────────────────────────
+      const oldEndStr = toDateStr(old.end_date as string)
+      const isHistorical = projStatusDate && oldEndStr && oldEndStr <= projStatusDate
+      if (isHistorical) {
+        const reason = (t._reason as string | undefined) ?? null
+        for (const f of AUDIT_FIELDS) {
+          if (!(f in task)) continue
+          const norm = (v: unknown) => {
+            if (v == null) return null
+            if (f === 'start_date' || f === 'end_date') return toDateStr(v as string)
+            return String(v)
+          }
+          const oldV = norm(old[f])
+          const newV = norm(cur[f])
+          if (oldV !== newV) {
+            auditEntries.push({ taskId: id, field: f, oldValue: oldV, newValue: newV, reason })
+          }
+        }
+      }
 
       const code: string = cur.task_code ?? old.task_code ?? id.slice(0, 8)
 
@@ -643,6 +703,23 @@ export async function PUT(req: NextRequest, { params }: Params) {
         const full = fullMap.get(updated[i].id)
         if (full) updated[i] = full
       }
+    }
+
+    // 审计日志批量插入
+    if (auditEntries.length > 0) {
+      const vals: unknown[] = []
+      const rows: string[] = []
+      auditEntries.forEach((e, i) => {
+        const b = i * 8
+        rows.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8})`)
+        vals.push(projectId, e.taskId, projStatusDate, e.field, e.oldValue, e.newValue, e.reason, auth.value.userId)
+      })
+      await client.query(
+        `INSERT INTO task_change_log
+           (project_id, task_id, status_date_at_change, field, old_value, new_value, reason, changed_by)
+         VALUES ${rows.join(',')}`,
+        vals,
+      )
     }
 
     await client.query('COMMIT')

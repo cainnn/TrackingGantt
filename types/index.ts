@@ -2,7 +2,7 @@ export interface User {
   id: string
   username: string
   email: string
-  role: 'admin' | 'view'
+  role: 'administrator' | 'admin' | 'view'
   created_at: string
 }
 
@@ -36,6 +36,14 @@ export interface Task {
   is_deleted: boolean
   deleted_at: string | null
   auto_schedule?: boolean  // 默认 true：根据前置依赖自动调整开始时间
+  constraint_type?: string | null  // 限制类型: asap | alap | startnoearlierthan | finishnolaterthan | null
+  constraint_date?: string | null
+  status?: string | null      // 状态: notstarted | started | completed | late
+  complexity?: number | null  // 复杂性: 0=Easy 1=Normal 2=Hard 3=Impossible
+  rollup?: boolean
+  inactive?: boolean
+  project_boundary?: string | null  // ask | honor | ignore
+  baseline_end_date?: string | null // 上次"确认变更"时的 end_date 快照；用于延期判定
   created_at: string
   updated_at: string
 }
@@ -60,6 +68,7 @@ export interface Dependency {
   to_task_id: string
   type: number
   lag: number
+  active?: boolean
 }
 
 export interface CreateTaskInput {

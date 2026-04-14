@@ -81,6 +81,12 @@ interface ChartData {
   statusDate?: string | null
   projectLines?: ProjectLine[]
   summarySet: Set<string>
+  projectStart: string | null
+  projectEnd: string | null
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 }
 
 // ── Filter key tasks for single-page export ─────────────────────────────
@@ -222,13 +228,22 @@ function prepareChartData(
   const summarySet = new Set<string>()
   activeTasks.forEach(t => { if (t.parent_id) summarySet.add(t.parent_id) })
 
-  return { rows, activeTasks, dependencies, origin, totalDays, colW, months, projectName, statusDate, projectLines, summarySet }
+  const starts = activeTasks.map(t => t.start_date).filter(Boolean) as string[]
+  const ends = activeTasks.map(t => t.end_date).filter(Boolean) as string[]
+  const projectStart = starts.length ? fmtDate(new Date(starts.reduce((a,b) => a < b ? a : b))) : null
+  const projectEnd = ends.length ? fmtDate(new Date(ends.reduce((a,b) => a > b ? a : b))) : null
+
+  return { rows, activeTasks, dependencies, origin, totalDays, colW, months, projectName, statusDate, projectLines, summarySet, projectStart, projectEnd }
 }
 
 // ── Render header (title + month bar) ───────────────────────────────────
 function renderHeader(cd: ChartData): string {
   const parts: string[] = []
-  parts.push(`<text x="${CONTENT_W/2}" y="${TITLE_H - 8}" text-anchor="middle" font-size="${F_TITLE}" font-weight="bold" fill="#111827">${escXml(cd.projectName)}</text>`)
+  parts.push(`<text x="${CONTENT_W/2}" y="${TITLE_H - 12}" text-anchor="middle" font-size="${F_TITLE}" font-weight="bold" fill="#111827">${escXml(cd.projectName)}</text>`)
+  if (cd.projectStart || cd.projectEnd) {
+    const dateLine = `${cd.projectStart ?? ''} ~ ${cd.projectEnd ?? ''}`
+    parts.push(`<text x="${CONTENT_W/2}" y="${TITLE_H - 2}" text-anchor="middle" font-size="9" fill="#6b7280">${escXml(dateLine)}</text>`)
+  }
   const hy = TITLE_H
   parts.push(`<rect x="0" y="${hy}" width="${CONTENT_W}" height="${HDR_H}" fill="#f9fafb"/>`)
   parts.push(`<line x1="0" y1="${hy + HDR_H}" x2="${CONTENT_W}" y2="${hy + HDR_H}" stroke="#d1d5db"/>`)

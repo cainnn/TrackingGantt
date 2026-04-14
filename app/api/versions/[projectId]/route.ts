@@ -18,7 +18,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const { projectId } = await params
 
-  if (auth.value.role !== 'view' && !(await verifyOwner(projectId, auth.value.userId)))
+  if (auth.value.role !== 'view' && auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const listAll = req.nextUrl.searchParams.get('list')
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwner(projectId, auth.value.userId)))
+  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const client = await pool.connect()
@@ -111,9 +111,14 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // 计算与上一版本的差异
     let changes = null
+    const reasonMap: Record<string, string> =
+      body.reasons && typeof body.reasons === 'object' ? body.reasons : {}
     if (lastVersion) {
       const prevTasks: SnapshotTask[] = lastVersion.snapshot?.tasks ?? []
-      const diffs = diffSnapshots(prevTasks, snapshotTasks)
+      const diffs = diffSnapshots(prevTasks, snapshotTasks).map(d => {
+        const r = reasonMap[d.task_code]
+        return r ? { ...d, reason: r } : d
+      })
       changes = {
         diffs,
         stats: {
@@ -201,7 +206,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwner(projectId, auth.value.userId)))
+  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id, name, description } = await req.json()
@@ -227,7 +232,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwner(projectId, auth.value.userId)))
+  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id } = await req.json()

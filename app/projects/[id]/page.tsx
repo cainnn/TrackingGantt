@@ -13,7 +13,7 @@ import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
 import Link from 'next/link'
 import { authFetch } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
-import { DEFAULT_VISIBLE_COLS, type OptionalCol } from '@/components/GanttChart/GanttChart'
+import { DEFAULT_VISIBLE_COLS, OPTIONAL_COL_META, type OptionalCol } from '@/components/GanttChart/GanttChart'
 
 const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ssr: false,
@@ -46,14 +46,18 @@ export default function ProjectPage() {
   const [showAI,            setShowAI]            = useState(false)
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
   const [showProjectLines,  setShowProjectLines]  = useState(false)
-  const [showComparison,    setShowComparison]    = useState(true)
+  const [showComparison,    setShowComparison]    = useState(false)
+  const [compareLock,       setCompareLock]       = useState(false)
+  const [pendingAIMessage,  setPendingAIMessage]  = useState<string | null>(null)
   const [visibleCols, setVisibleCols] = useState<OptionalCol[]>(() => {
     if (typeof window === 'undefined') return DEFAULT_VISIBLE_COLS
     try {
       const saved = localStorage.getItem(`gantt-cols-${projectId}`)
       if (saved) {
         const parsed = JSON.parse(saved) as OptionalCol[]
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed
+        const validKeys = new Set(OPTIONAL_COL_META.map(c => c.key))
+        const filtered = Array.isArray(parsed) ? parsed.filter(k => validKeys.has(k)) : []
+        if (filtered.length > 0) return filtered
       }
     } catch { /* ignore */ }
     return DEFAULT_VISIBLE_COLS
@@ -152,11 +156,15 @@ export default function ProjectPage() {
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         onToggleAI={() => setShowAI(v => !v)}
+        onAutoAI={(msg: string) => { setShowAI(true); setPendingAIMessage(msg) }}
         showCriticalPath={showCriticalPath}
         onToggleCriticalPath={() => setShowCriticalPath(v => !v)}
         onToggleProjectLines={() => setShowProjectLines(v => !v)}
         showComparison={showComparison}
         onToggleComparison={() => setShowComparison(v => !v)}
+        onShowComparison={() => setShowComparison(true)}
+        compareLock={compareLock}
+        onToggleCompareLock={(next) => { setCompareLock(next); setShowComparison(next) }}
         visibleCols={visibleCols}
         onVisibleColsChange={handleVisibleColsChange}
       />
@@ -177,12 +185,17 @@ export default function ProjectPage() {
             focusSignal={focusSignal}
             showCriticalPath={showCriticalPath}
             visibleCols={visibleCols}
-            readOnly={isViewOnly}
+            readOnly={compareLock}
             showComparison={showComparison}
           />
         </div>
         {showAI && (
-          <AIChatPanel projectId={projectId} onClose={() => setShowAI(false)} />
+          <AIChatPanel
+            projectId={projectId}
+            onClose={() => setShowAI(false)}
+            autoMessage={pendingAIMessage}
+            onAutoMessageConsumed={() => setPendingAIMessage(null)}
+          />
         )}
       </div>
     </div>

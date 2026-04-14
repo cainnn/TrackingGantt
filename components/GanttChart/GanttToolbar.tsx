@@ -5,7 +5,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
   setSelectedIds, setTasks, saveSnapshot, undo, redo,
-  markDirty, clearDirty, setComparison, clearComparison, clearDiffFilter,
+  markDirty, clearDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
@@ -18,7 +18,8 @@ import { parseExcelFile, validateImportData, type ImportTask } from '@/lib/clien
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { OPTIONAL_COL_META, type OptionalCol } from './GanttChart'
 import VersionPanel from './VersionPanel'
-import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
+import RetroLogPanel from './RetroLogPanel'
+import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 
 // ── Flat tree order ───────────────────────────────────────────────────────
 function getFlatOrder(tasks: Task[]): Task[] {
@@ -127,11 +128,15 @@ interface GanttToolbarProps {
   searchQuery: string
   onSearchChange: (q: string) => void
   onToggleAI?: () => void
+  onAutoAI?: (msg: string) => void
   showCriticalPath?: boolean
   onToggleCriticalPath?: () => void
   onToggleProjectLines?: () => void
   showComparison?: boolean
   onToggleComparison?: () => void
+  onShowComparison?: () => void
+  compareLock?: boolean
+  onToggleCompareLock?: (next: boolean) => void
   visibleCols?: OptionalCol[]
   onVisibleColsChange?: (cols: OptionalCol[]) => void
 }
@@ -144,16 +149,20 @@ export default function GanttToolbar({
   onFocusTask,
   searchQuery, onSearchChange,
   onToggleAI,
+  onAutoAI,
   showCriticalPath,
   onToggleCriticalPath,
   onToggleProjectLines,
   showComparison,
   onToggleComparison,
+  onShowComparison,
+  compareLock,
+  onToggleCompareLock,
   visibleCols,
   onVisibleColsChange,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
-  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, undoStack, redoStack, dirtyIds, comparison, diffFilter } = useAppSelector(s => s.tasks)
+  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, undoStack, redoStack, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
 
@@ -190,24 +199,168 @@ export default function GanttToolbar({
 
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
+  const [retroLogOpen, setRetroLogOpen] = useState(false)
 
-  // 上一版本的快照任务（用于检测是否有变更）
-  const [lastSnapshotTasks, setLastSnapshotTasks] = useState<SnapshotTask[] | null>(null)
+  // ── 变更检测（纯本地，不依赖 API）──────────────────────────────────
+  // 基线：首次加载任务时捕获，不做任何 API 调用
+  const [baseline, setBaseline] = useState<SnapshotTask[] | null>(null)
 
-  // 检测当前任务相对于上一版本快照是否有变更
-  const hasChanges = React.useMemo(() => {
-    // 没有上一版本 → 首次确认，总是允许
-    if (!lastSnapshotTasks) return versions.length === 0
+  // 任务首次加载完成时，捕获当前状态作为基线
+  const baselineCapturedRef = useRef(false)
+  useEffect(() => {
+    if (baselineCapturedRef.current || tasks.length === 0) return
+    baselineCapturedRef.current = true
+    setBaseline(tasks.filter(t => !t.is_deleted).map(t => ({
+      id: t.id, task_code: t.task_code, name: t.name,
+      start_date: t.start_date, end_date: t.end_date,
+      duration: t.duration, assignee: t.assignee,
+      percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
+      parent_id: t.parent_id,
+    })))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks.length])
+
+  // changeDiffs: 当前任务 vs 基线
+  const changeDiffs = React.useMemo(() => {
+    if (!baseline) return [] as DiffItem[]
     const currentSnap: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
       id: t.id, task_code: t.task_code, name: t.name,
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
-      percent_done: t.percent_done, is_milestone: t.is_milestone,
+      percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
       parent_id: t.parent_id,
     }))
-    const diffs = diffSnapshots(lastSnapshotTasks, currentSnap)
-    return diffs.length > 0
-  }, [lastSnapshotTasks, tasks, versions.length])
+    return diffSnapshots(baseline, currentSnap)
+  }, [baseline, tasks])
+
+  const hasChanges = changeDiffs.length > 0
+
+  // 变更审核弹窗状态
+  const [reviewOpen, setReviewOpen] = useState(false)
+  // 每个变更项的原因（key = task_code）
+  const [reasons, setReasons] = useState<Record<string, string>>({})
+
+  // 对比模式：进入时默认对比最近快照，目标可在历史版本面板切换
+  const handleToggleCompareLock = useCallback(async () => {
+    if (comparison) {
+      dispatch(clearComparison())
+      dispatch(clearViewSnapshot())
+      onToggleCompareLock?.(false)
+      return
+    }
+    if (!versions.length) {
+      alert('还没有历史快照可供对比')
+      return
+    }
+    const latest = versions[0]
+    try {
+      const r = await authFetch(`/api/versions/${projectId}?id=${latest.id}`)
+      const d = await r.json()
+      if (d.ok && d.value?.snapshot?.tasks) {
+        dispatch(setComparison({
+          tasks: d.value.snapshot.tasks,
+          versionName: latest.name || latest.status_date?.split('T')[0] || `快照 #${latest.version_number}`,
+        }))
+        onShowComparison?.()
+        onToggleCompareLock?.(true)
+      }
+    } catch { /* ignore */ }
+  }, [comparison, versions, projectId, dispatch, onShowComparison, onToggleCompareLock])
+
+  // 同步对比锁定与 comparison 状态：面板里选别的版本对比时，也触发编辑锁
+  useEffect(() => {
+    if (comparison && !compareLock) {
+      onToggleCompareLock?.(true)
+      onShowComparison?.()
+    } else if (!comparison && compareLock) {
+      onToggleCompareLock?.(false)
+    }
+  }, [comparison, compareLock, onToggleCompareLock, onShowComparison])
+  // 区分主动/被动变更：
+  // - 添加/删除 → 主动
+  // - 仅顺序（order_index）变化 → 被动，自动填「由于 {主动项} 调整引发」
+  // - 字段变更且该任务存在上游依赖（from→to 链中的 from 也在变更集里） → 被动，自动填「由 {前置 task_code} 调整引发」
+  // - 其余字段变更 → 主动
+  // - 特例：全部都是顺序变化 → 位移最大的那项视为主动
+  const { primaryCodes, passiveReasonMap } = React.useMemo(() => {
+    const idByCode = new Map<string, string>()
+    const codeById = new Map<string, string>()
+    for (const t of tasks) {
+      idByCode.set(t.task_code, t.id)
+      codeById.set(t.id, t.task_code)
+    }
+
+    const addedRemoved = new Set<string>()
+    const fieldChangedCodes = new Set<string>()
+    const orderOnly: { code: string; delta: number }[] = []
+    for (const d of changeDiffs) {
+      if (d.type !== 'changed') { addedRemoved.add(d.task_code); continue }
+      const fields = (d.changes ?? []).map(c => c.field)
+      const isOrderOnly = fields.length > 0 && fields.every(f => f === '顺序')
+      if (isOrderOnly) {
+        const c = d.changes![0]
+        orderOnly.push({ code: d.task_code, delta: Math.abs((Number(c.new) || 0) - (Number(c.old) || 0)) })
+      } else {
+        fieldChangedCodes.add(d.task_code)
+      }
+    }
+
+    // 依赖级联：沿依赖链向上追溯源头——只有无变更前置的节点才是主动
+    // 例：1→2→3，1、2、3 都变了，2 和 3 的源头都追溯到 1
+    const changedPredsOf = (code: string): string[] => {
+      const id = idByCode.get(code)
+      if (!id) return []
+      return dependencies
+        .filter(dep => dep.to_task_id === id)
+        .map(dep => codeById.get(dep.from_task_id))
+        .filter((c): c is string => !!c && fieldChangedCodes.has(c))
+    }
+    const cascadeReason: Record<string, string> = {}
+    for (const code of fieldChangedCodes) {
+      if (changedPredsOf(code).length === 0) continue // 本身是源头
+      const roots = new Set<string>()
+      const visited = new Set<string>()
+      const stack = [code]
+      while (stack.length) {
+        const cur = stack.pop()!
+        if (visited.has(cur)) continue
+        visited.add(cur)
+        const preds = changedPredsOf(cur)
+        if (cur !== code && preds.length === 0) {
+          roots.add(cur)
+        } else {
+          for (const p of preds) stack.push(p)
+        }
+      }
+      if (roots.size > 0) {
+        cascadeReason[code] = `由 ${Array.from(roots).join(', ')} 调整引发`
+      }
+    }
+
+    const primary = new Set<string>()
+    for (const c of addedRemoved) primary.add(c)
+    for (const c of fieldChangedCodes) if (!cascadeReason[c]) primary.add(c)
+
+    const passive: Record<string, string> = { ...cascadeReason }
+    if (primary.size === 0 && orderOnly.length > 0) {
+      orderOnly.sort((a, b) => b.delta - a.delta)
+      primary.add(orderOnly[0].code)
+      for (const { code } of orderOnly.slice(1)) passive[code] = `由于 ${orderOnly[0].code} 的调整引发`
+    } else {
+      const label = Array.from(primary).join(', ')
+      for (const { code } of orderOnly) {
+        if (!primary.has(code)) passive[code] = `由于 ${label} 的调整引发`
+      }
+    }
+    return { primaryCodes: primary, passiveReasonMap: passive }
+  }, [changeDiffs, tasks, dependencies])
+
+  const openReview = useCallback(() => {
+    setReasons({})
+    setReviewOpen(true)
+  }, [])
+  const allReasonsFilled = changeDiffs.length > 0 &&
+    changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
   // 初始加载时，拉取版本列表
   useEffect(() => {
@@ -217,19 +370,37 @@ export default function GanttToolbar({
       .catch(() => {})
   }, [projectId, dispatch])
 
-  // 版本列表变化时，拉取最新版本的快照用于变更检测
+  // 用户编辑产生变更后，自动加载最近版本快照并显示对比基线
+  // 只要 hasChanges 为 true 且当前未显示对比，就补上；不再用 once-ref 锁死
+  const comparisonShownRef = useRef(false)
   useEffect(() => {
-    if (!versions.length) { setLastSnapshotTasks(null); return }
-    const latestId = versions[0].id
-    authFetch(`/api/versions/${projectId}?id=${latestId}`)
-      .then(r => r.json())
-      .then(d => {
-        if (d.ok && d.value?.snapshot?.tasks) {
-          setLastSnapshotTasks(d.value.snapshot.tasks)
-        }
-      })
-      .catch(() => {})
-  }, [versions, projectId])
+    if (!hasChanges) { comparisonShownRef.current = false; return }
+    if (comparison) return
+    if (comparisonShownRef.current) return
+    if (!baseline || baseline.length === 0) return
+    comparisonShownRef.current = true
+    // 直接用本地基线（进入项目时的状态）作为对比基线——与当前任务 id 完全匹配
+    const byId = new Map(tasks.map(t => [t.id, t]))
+    const snap = baseline.map(b => {
+      const t = byId.get(b.id)
+      if (!t) return null
+      return {
+        ...t,
+        start_date: b.start_date,
+        end_date: b.end_date,
+        duration: b.duration,
+        percent_done: b.percent_done,
+        is_milestone: b.is_milestone,
+        parent_id: b.parent_id,
+      }
+    }).filter((x): x is NonNullable<typeof x> => !!x)
+    if (snap.length === 0) { comparisonShownRef.current = false; return }
+    const versionName = versions[0]?.status_date?.split('T')[0]
+      ?? versions[0]?.name
+      ?? '进入时状态'
+    dispatch(setComparison({ tasks: snap, versionName }))
+    onShowComparison?.()
+  }, [hasChanges, comparison, baseline, tasks, versions, dispatch, onShowComparison])
 
 
   // ── Export ─────────────────────────────────────────────────────────────
@@ -719,25 +890,24 @@ export default function GanttToolbar({
   // 确认变更：保存所有改动 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
     const sd = currentProject?.status_date?.split('T')[0] ?? null
-    if (!sd) {
-      alert('请先设置状态日期')
-      return
-    }
-    // 新版本日期必须严格大于上一版本
-    if (lastVersionDate && sd <= lastVersionDate) {
-      alert(`状态日期必须晚于上一版本的日期 (${lastVersionDate})`)
-      return
-    }
-    if (statusDateSaving) return
+    if (!sd || statusDateSaving) return
     setStatusDateSaving(true)
 
-    // 1. Recalculate percent_done for all tasks
+    // 1. Recalculate percent_done + 快照 baseline_end_date（用于下次延期判定）
     const sdDate = new Date(sd)
-    const updated = tasks.filter(t => t.start_date && t.end_date).map(t => ({ ...t, percent_done: calcPercent(t, sdDate) }))
+    const updated = tasks
+      .filter(t => t.start_date && t.end_date)
+      .map(t => ({
+        ...t,
+        percent_done: calcPercent(t, sdDate),
+        baseline_end_date: (t.end_date ?? '').split('T')[0] || null,
+      }))
     if (updated.length > 0) {
       dispatch(updateTasks(updated))
       const payload = updated.map(t => ({
-        id: t.id, percent_done: t.percent_done,
+        id: t.id,
+        percent_done: t.percent_done,
+        baseline_end_date: t.baseline_end_date,
       }))
       await authFetch(`/api/tasks/${projectId}`, {
         method: 'PUT',
@@ -755,6 +925,9 @@ export default function GanttToolbar({
         duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
         order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
         assignee: t.assignee, note: t.note,
+        constraint_type: t.constraint_type, constraint_date: t.constraint_date,
+        status: t.status, complexity: t.complexity,
+        rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
       }))
       await authFetch(`/api/tasks/${projectId}`, {
         method: 'PUT',
@@ -765,12 +938,22 @@ export default function GanttToolbar({
     }
 
     // 3. Create version snapshot（2个状态日期间的变更都算在这个版本上）
+    const reasonMap: Record<string, string> = {}
+    for (const d of changeDiffs) {
+      if (primaryCodes.has(d.task_code)) {
+        const r = (reasons[d.task_code] ?? '').trim()
+        if (r) reasonMap[d.task_code] = r
+      } else if (passiveReasonMap[d.task_code]) {
+        reasonMap[d.task_code] = passiveReasonMap[d.task_code]
+      }
+    }
     const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
       method: 'POST',
       headers: authFetchHeaders(true),
       body: JSON.stringify({
         tasks, dependencies,
         status_date: sd,
+        reasons: reasonMap,
       }),
     })
     const snapshotData = await snapshotRes.json()
@@ -778,95 +961,53 @@ export default function GanttToolbar({
     setStatusDateSaving(false)
 
     if (snapshotData.ok) {
-      // 更新快照基线，使确认变更按钮立即置灰
-      const currentSnap: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
+      dispatch(clearDirty())
+
+      // 重置基线为当前任务，使 changeDiffs 变空 → hasChanges = false
+      setBaseline(tasks.filter(t => !t.is_deleted).map(t => ({
         id: t.id, task_code: t.task_code, name: t.name,
         start_date: t.start_date, end_date: t.end_date,
         duration: t.duration, assignee: t.assignee,
-        percent_done: t.percent_done, is_milestone: t.is_milestone,
+        percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
         parent_id: t.parent_id,
-      }))
-      setLastSnapshotTasks(currentSnap)
+      })))
 
       // 自动将当前状态设为对比基线，后续编辑可立即看到计划偏差
       dispatch(setComparison({ tasks: tasks.map(t => ({ ...t })), versionName: sd }))
+      comparisonShownRef.current = false
 
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
         .catch(() => {})
     }
-  }, [currentProject, lastVersionDate, statusDateSaving, dispatch, projectId, tasks, dependencies, dirtyIds])
+  }, [currentProject, lastVersionDate, statusDateSaving, dispatch, projectId, tasks, dependencies, dirtyIds, changeDiffs, onAutoAI, versions, reasons, primaryCodes, passiveReasonMap])
 
-  // ── 刷新：重新拉取任务与依赖，应用 FS 级联后的日期
+  // ── 放弃更改：重新加载任务（等同于返回项目列表再进入）
   const handleRefresh = useCallback(async () => {
-    const r = await authFetch(`/api/tasks/${projectId}?t=${Date.now()}`, { cache: 'no-store' })
-    const t = await r.text()
     try {
-      const d = t ? JSON.parse(t) : {}
-      if (d.ok && d.value) dispatch(setTasks(d.value))
+      const res = await authFetch(`/api/tasks/${projectId}`)
+      const data = await res.json()
+      if (data.ok && data.value) {
+        dispatch(setTasks({
+          tasks: Array.isArray(data.value.tasks) ? data.value.tasks : [],
+          dependencies: Array.isArray(data.value.dependencies) ? data.value.dependencies : [],
+        }))
+        dispatch(clearDirty())
+        comparisonShownRef.current = false
+        dispatch(clearComparison())
+        // 用刚加载的任务重建基线
+        const freshTasks = Array.isArray(data.value.tasks) ? data.value.tasks : []
+        setBaseline(freshTasks.filter((t: any) => !t.is_deleted).map((t: any) => ({
+          id: t.id, task_code: t.task_code, name: t.name,
+          start_date: t.start_date, end_date: t.end_date,
+          duration: t.duration, assignee: t.assignee,
+          percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
+          parent_id: t.parent_id,
+        })))
+      }
     } catch { /* ignore */ }
   }, [dispatch, projectId])
-
-  // ── 保存改动（批量 PUT 脏任务）────────────────────────────────────────
-  const [savingChanges, setSavingChanges] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
-  const saveAbortRef = useRef<AbortController | null>(null)
-  const handleSaveChanges = useCallback(async () => {
-    if (dirtyIds.length === 0) return
-    // Abort any in-flight save to prevent stacking
-    saveAbortRef.current?.abort()
-    const abort = new AbortController()
-    saveAbortRef.current = abort
-    // 30s timeout
-    const timer = setTimeout(() => abort.abort(), 30000)
-
-    setSavingChanges(true)
-    setSaveError(null)
-    const dirtyTasks = tasks.filter(t => dirtyIds.includes(t.id))
-    const payload = dirtyTasks.map(t => ({
-      id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
-      duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
-      order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
-      assignee: t.assignee, note: t.note,
-    }))
-    try {
-      const res = await authFetch(`/api/tasks/${projectId}`, {
-        method: 'PUT',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify(payload),
-        signal: abort.signal,
-      })
-      let data: { ok?: boolean; value?: unknown; error?: string; errors?: Array<{ taskId?: string; field?: string; message?: string }> }
-      try {
-        data = await res.json()
-      } catch {
-        setSaveError(`服务器返回异常 (HTTP ${res.status})，请检查服务端日志`)
-        return
-      }
-      if (data.ok) {
-        dispatch(clearDirty())
-        if (Array.isArray(data.value)) dispatch(updateTasks(data.value))
-      } else if (data.errors) {
-        const msgs = data.errors.map((e: { taskId?: string; field?: string; message?: string }) =>
-          `${e.field ?? '?'}: ${e.message ?? '校验失败'}`
-        ).join('\n')
-        setSaveError(msgs)
-      } else {
-        setSaveError(data.error ?? '保存失败，请重试')
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setSaveError('保存超时，请重试')
-      } else {
-        setSaveError(`网络错误: ${err instanceof Error ? err.message : '请检查网络连接'}`)
-      }
-    } finally {
-      clearTimeout(timer)
-      setSavingChanges(false)
-    }
-  }, [dispatch, projectId, tasks, dirtyIds])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
@@ -877,11 +1018,11 @@ export default function GanttToolbar({
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); dispatch(redo()) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') handleCopy()
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') handlePaste()
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); handleSaveChanges() }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault() }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [dispatch, handleCopy, handlePaste, handleSaveChanges, readOnly])
+  }, [dispatch, handleCopy, handlePaste, readOnly])
 
   const sep = <div className="w-px h-6 bg-gray-200 mx-1" />
 
@@ -899,7 +1040,7 @@ export default function GanttToolbar({
           <>
             {/* Group 1: Create + Edit + Refresh */}
             <LabelIc icon={<IcoPlus />}   label="创建任务" variant="green" onClick={handleAddTask} />
-            <LabelIc icon={<IcoRefresh />} label="刷新" variant="default" onClick={handleRefresh} />
+            <LabelIc icon={<IcoRefresh />} label="放弃更改" variant="default" disabled={!hasChanges} onClick={handleRefresh} />
             <LabelIc icon={<IcoPencil />} label="EDIT"   variant="blue"
                      disabled={selectedIds.length !== 1}
                      onClick={() => selectedIds.length === 1 && setEditModalOpen(true)} />
@@ -914,7 +1055,6 @@ export default function GanttToolbar({
           </>
         )}
 
-        {readOnly && <LabelIc icon={<IcoRefresh />} label="刷新" variant="default" onClick={handleRefresh} />}
         {readOnly && sep}
 
         {/* Group 3: Expand / Collapse all */}
@@ -980,92 +1120,163 @@ export default function GanttToolbar({
                 onChange={handleStatusDatePick}
                 className="border border-gray-300 rounded px-2 h-8 text-[13px] focus:outline-none focus:border-blue-400"
               />
+              {(() => {
+                const sd = currentProject?.status_date?.split('T')[0] ?? null
+                const statusDateAdvanced = !!sd && (!lastVersionDate || sd > lastVersionDate)
+                const canSubmit = !!currentProject?.status_date && !statusDateSaving && (hasChanges || statusDateAdvanced)
+                const label = hasChanges ? '确认变更' : '保存状态日期'
+                const tip = !currentProject?.status_date
+                  ? '请先设置状态日期'
+                  : hasChanges ? '确认变更：保存所有改动并创建版本快照'
+                  : statusDateAdvanced ? '没有任务变更，直接为当前状态日期保存一个快照'
+                  : '状态日期未变化，无需保存'
+                return (
+                  <button
+                    onClick={() => {
+                      if (!sd) { alert('请先设置状态日期'); return }
+                      if (lastVersionDate && sd < lastVersionDate) {
+                        alert(`状态日期不能早于上一版本 (${lastVersionDate})`); return
+                      }
+                      if (hasChanges) openReview()
+                      else handleConfirmChanges()
+                    }}
+                    disabled={!canSubmit}
+                    title={tip}
+                    className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
+                      ${canSubmit
+                        ? hasChanges
+                          ? 'border-green-500 text-green-700 bg-green-50 hover:bg-green-100 cursor-pointer'
+                          : 'border-blue-400 text-blue-700 bg-blue-50 hover:bg-blue-100 cursor-pointer'
+                        : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
+                  >
+                    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    {statusDateSaving ? '保存中...' : label}
+                  </button>
+                )
+              })()}
               <button
-                onClick={handleConfirmChanges}
-                disabled={!currentProject?.status_date || statusDateSaving || !hasChanges}
-                title={!hasChanges ? '没有任务变更，无需确认' : '确认变更：保存所有改动并创建版本快照'}
+                onClick={handleToggleCompareLock}
+                title={comparison ? `退出对比模式（当前对比：${comparison.versionName}）` : '进入对比模式，默认对比最近一次快照；可在历史版本面板切换对比目标'}
                 className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
-                  ${currentProject?.status_date && !statusDateSaving && hasChanges
-                    ? 'border-green-500 text-green-700 bg-green-50 hover:bg-green-100 cursor-pointer'
-                    : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
+                  ${comparison
+                    ? 'border-orange-500 text-orange-700 bg-orange-50 hover:bg-orange-100 cursor-pointer'
+                    : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50 cursor-pointer'}`}
               >
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round"/>
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" strokeLinecap="round" strokeLinejoin="round"/>
+                  <circle cx="8" cy="8" r="2.5"/>
                 </svg>
-                {statusDateSaving ? '保存中...' : '确认变更'}
+                {comparison ? `对比中: ${comparison.versionName}` : '对比模式'}
               </button>
+              <div className="relative">
+                <button
+                  onClick={() => setVersionPanelOpen(v => !v)}
+                  title="历史版本"
+                  className={`inline-flex items-center justify-center w-8 h-8 rounded border transition-colors cursor-pointer
+                    ${versionPanelOpen
+                      ? 'border-orange-500 text-orange-600 bg-orange-100'
+                      : 'border-gray-300 text-gray-600 hover:bg-gray-50 bg-white'}`}
+                >
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M8 3v5l3 2" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M2 8a6 6 0 1 0 2-4.5" strokeLinecap="round"/>
+                    <path d="M2 2v3h3" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+                <VersionPanel
+                  projectId={projectId}
+                  open={versionPanelOpen}
+                  onClose={() => setVersionPanelOpen(false)}
+                  readOnly={readOnly}
+                />
+              </div>
             </div>
 
-            {sep}
-
-            {/* Save changes */}
-            <button
-              disabled={dirtyIds.length === 0 || savingChanges}
-              onClick={handleSaveChanges}
-              title="保存改动 (Ctrl+S)"
-              className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
-                ${dirtyIds.length > 0
-                  ? 'border-blue-500 text-white bg-blue-600 hover:bg-blue-700 cursor-pointer'
-                  : 'border-gray-300 text-gray-400 bg-gray-50 cursor-not-allowed'}
-                disabled:opacity-50 disabled:cursor-not-allowed`}>
-              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M2 12V4l3-2h6l3 2v8a1 1 0 01-1 1H3a1 1 0 01-1-1z"/>
-                <path d="M5 14V9h6v5M10 2v4H5V2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              {savingChanges ? '保存中...' : dirtyIds.length > 0 ? `保存 (${dirtyIds.length})` : '保存'}
-            </button>
-            {saveError && (
-              <span className="text-[11px] text-red-500 max-w-[200px] truncate" title={saveError}>
-                {saveError}
-              </span>
-            )}
           </>
         )}
 
-        {/* 只读模式下显示状态日期（只读） */}
-        {readOnly && currentProject?.status_date && (
+        {/* 只读模式下仍允许调整状态日期（本地生效，不落库） */}
+        {readOnly && (
           <>
             {sep}
-            <span className="text-xs text-gray-500">
-              状态日期: <span className="font-medium text-gray-700">{currentProject.status_date.split('T')[0]}</span>
-            </span>
+            <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
+            <input
+              type="date"
+              value={currentProject?.status_date?.split('T')[0] ?? ''}
+              onChange={handleStatusDatePick}
+              className="border border-gray-300 rounded px-2 h-8 text-[13px] focus:outline-none focus:border-blue-400"
+            />
           </>
         )}
-
-        {/* Version management dropdown */}
-        <div className="relative">
-          <button
-            onClick={() => setVersionPanelOpen(v => !v)}
-            title="版本管理"
-            className={`inline-flex items-center gap-1.5 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors cursor-pointer
-              ${versionPanelOpen
-                ? 'border-orange-500 text-orange-600 bg-orange-100'
-                : 'border-orange-400 text-orange-600 hover:bg-orange-50 bg-white'}`}
-          >
-            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M2 14h12M4 10h8M6 6h4" strokeLinecap="round"/>
-            </svg>
-            版本
-            <svg viewBox="0 0 16 16" width="10" height="10" fill="currentColor">
-              <path d="M4 6l4 4 4-4"/>
-            </svg>
-          </button>
-          <VersionPanel
-            projectId={projectId}
-            open={versionPanelOpen}
-            onClose={() => setVersionPanelOpen(false)}
-            readOnly={readOnly}
-          />
-        </div>
 
         {/* Comparison indicator + show/hide toggle */}
         {comparison && (
           <span className="inline-flex items-center h-8 rounded border border-orange-300 bg-orange-50 text-[12px] font-medium">
-            <span className="inline-flex items-center gap-1.5 px-2.5 h-full text-orange-600">
+            <span className="inline-flex items-center gap-1 pl-2.5 pr-1 h-full text-orange-600">
               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M2 8h12M8 2v12" strokeLinecap="round"/>
               </svg>
-              对比: {comparison.versionName}
+              <span className="text-[11px] text-orange-500">基准</span>
+              <select
+                value={versions.find(v => (v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`) === comparison.versionName)?.id ?? ''}
+                onChange={async e => {
+                  const vid = e.target.value
+                  const v = versions.find(x => x.id === vid)
+                  if (!v) return
+                  try {
+                    const r = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
+                    const d = await r.json()
+                    if (d.ok && d.value?.snapshot?.tasks) {
+                      dispatch(setComparison({
+                        tasks: d.value.snapshot.tasks,
+                        versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
+                      }))
+                    }
+                  } catch { /* ignore */ }
+                }}
+                className="bg-transparent border-none text-orange-700 text-[12px] font-medium focus:outline-none cursor-pointer pr-4"
+                title="基准版本（以基线条显示）"
+              >
+                {versions.map(v => {
+                  const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+                  return <option key={v.id} value={v.id}>{label}</option>
+                })}
+              </select>
+              <span className="text-orange-400">vs</span>
+              <select
+                value={viewSnapshot?.versionId ?? '__current__'}
+                onChange={async e => {
+                  const vid = e.target.value
+                  if (vid === '__current__') {
+                    dispatch(clearViewSnapshot())
+                    return
+                  }
+                  const v = versions.find(x => x.id === vid)
+                  if (!v) return
+                  try {
+                    const r = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
+                    const d = await r.json()
+                    if (d.ok && d.value?.snapshot) {
+                      dispatch(setViewSnapshot({
+                        tasks: d.value.snapshot.tasks ?? [],
+                        dependencies: d.value.snapshot.dependencies ?? [],
+                        versionId: v.id,
+                        versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
+                      }))
+                    }
+                  } catch { /* ignore */ }
+                }}
+                className="bg-transparent border-none text-orange-700 text-[12px] font-medium focus:outline-none cursor-pointer pr-4"
+                title="对比目标（作为主视图显示）"
+              >
+                <option value="__current__">当前</option>
+                {versions.map(v => {
+                  const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+                  return <option key={v.id} value={v.id}>{label}</option>
+                })}
+              </select>
             </span>
             {onToggleComparison && (
               <button
@@ -1087,7 +1298,7 @@ export default function GanttToolbar({
               </button>
             )}
             <button
-              onClick={() => dispatch(clearComparison())}
+              onClick={() => { dispatch(clearComparison()); dispatch(clearViewSnapshot()) }}
               title="取消对比"
               className="inline-flex items-center px-1.5 h-full text-orange-400 hover:text-orange-600 hover:bg-orange-100 rounded-r border-l border-orange-200 cursor-pointer">
               ×
@@ -1176,6 +1387,15 @@ export default function GanttToolbar({
             </svg>
           </Ic>
         )}
+        {/* 历史变更记录 */}
+        <Ic title="历史变更记录" onClick={() => setRetroLogOpen(true)}>
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 3v5h5"/>
+            <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
+            <path d="M12 7v5l3 2"/>
+          </svg>
+        </Ic>
+
         {/* Column settings */}
         {visibleCols && onVisibleColsChange && (
           <div ref={colSettingsRef} className="relative">
@@ -1186,7 +1406,7 @@ export default function GanttToolbar({
               </svg>
             </Ic>
             {colSettingsOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[140px]">
+              <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[180px] whitespace-nowrap">
                 <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold flex items-center justify-between gap-2">
                 <span>显示列</span>
                 <span className="flex gap-1">
@@ -1240,6 +1460,10 @@ export default function GanttToolbar({
         )}
       </div>
 
+      {retroLogOpen && (
+        <RetroLogPanel projectId={projectId} onClose={() => setRetroLogOpen(false)} />
+      )}
+
       {/* Edit Task Modal */}
       {editModalOpen && selectedIds.length === 1 && (
         <EditTaskModal
@@ -1247,6 +1471,117 @@ export default function GanttToolbar({
           projectId={projectId}
           onClose={() => setEditModalOpen(false)}
         />
+      )}
+
+      {/* Review Changes Dialog */}
+      {reviewOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-lg shadow-xl w-[560px] max-h-[80vh] flex flex-col">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200">
+              <h3 className="text-[15px] font-semibold text-gray-900">
+                变更审核
+                <span className="ml-2 text-xs font-normal text-gray-500">
+                  状态日期: {currentProject?.status_date?.split('T')[0]}
+                </span>
+              </h3>
+              <button onClick={() => setReviewOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none cursor-pointer">×</button>
+            </div>
+
+            {/* Stats bar */}
+            <div className="flex gap-4 px-5 py-2.5 bg-gray-50 border-b border-gray-100 text-xs">
+              {(() => {
+                const added = changeDiffs.filter(d => d.type === 'added').length
+                const removed = changeDiffs.filter(d => d.type === 'removed').length
+                const changed = changeDiffs.filter(d => d.type === 'changed').length
+                return (
+                  <>
+                    {added > 0 && <span className="text-green-600">+ 新增 {added}</span>}
+                    {changed > 0 && <span className="text-blue-600">~ 修改 {changed}</span>}
+                    {removed > 0 && <span className="text-red-600">- 删除 {removed}</span>}
+                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length} 项变更</span>
+                  </>
+                )
+              })()}
+            </div>
+
+            {/* Diff list */}
+            <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 min-h-0">
+              {changeDiffs.length === 0 ? (
+                <div className="text-center text-gray-400 py-8 text-sm">没有检测到变更</div>
+              ) : (
+                changeDiffs.map((d, i) => (
+                  <div key={i} className={`rounded border px-3 py-2 text-[13px] ${
+                    d.type === 'added' ? 'border-green-200 bg-green-50'
+                    : d.type === 'removed' ? 'border-red-200 bg-red-50'
+                    : 'border-blue-200 bg-blue-50'
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-medium ${
+                        d.type === 'added' ? 'bg-green-200 text-green-800'
+                        : d.type === 'removed' ? 'bg-red-200 text-red-800'
+                        : 'bg-blue-200 text-blue-800'
+                      }`}>
+                        {d.type === 'added' ? '新增' : d.type === 'removed' ? '删除' : '修改'}
+                      </span>
+                      <span className="text-gray-500 text-xs">{d.task_code}</span>
+                      <span className="font-medium text-gray-800">{d.task_name}</span>
+                    </div>
+                    {d.changes && d.changes.length > 0 && (
+                      <div className="mt-1.5 space-y-0.5 pl-2 border-l-2 border-blue-200">
+                        {d.changes.map((c, j) => (
+                          <div key={j} className="text-xs text-gray-600">
+                            <span className="text-gray-400">{c.field}:</span>{' '}
+                            <span className="line-through text-red-500/70">{c.old}</span>
+                            {' → '}
+                            <span className="text-green-700">{c.new}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="mt-2">
+                      {primaryCodes.has(d.task_code) ? (
+                        <textarea
+                          value={reasons[d.task_code] ?? ''}
+                          onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
+                          placeholder="变更原因（必填）"
+                          rows={2}
+                          className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
+                            (reasons[d.task_code] ?? '').trim().length === 0
+                              ? 'border-red-300 focus:border-red-400'
+                              : 'border-gray-300 focus:border-blue-400'
+                          }`}
+                        />
+                      ) : (
+                        <div className="text-xs text-gray-500 italic px-2 py-1 rounded border border-dashed border-gray-200 bg-gray-50">
+                          {passiveReasonMap[d.task_code] ?? '被动变更'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => setReviewOpen(false)}
+                className="px-4 py-2 text-sm text-gray-600 bg-white border border-gray-300 rounded hover:bg-gray-50 cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { setReviewOpen(false); handleConfirmChanges() }}
+                disabled={statusDateSaving || !allReasonsFilled}
+                title={!allReasonsFilled ? '请为每项变更填写原因' : ''}
+                className="px-4 py-2 text-sm text-white bg-green-600 rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {statusDateSaving ? '保存中...' : '确认并保存'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )

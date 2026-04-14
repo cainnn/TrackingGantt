@@ -4,6 +4,20 @@ import * as XLSX from 'xlsx'
 
 const DEP_TYPE_MAP: Record<string, number> = { SS: 0, SF: 1, FS: 2, FF: 3 }
 
+const CTYPE_REVERSE: Record<string, string> = {
+  '无': 'none',
+  '尽早': 'asap',
+  '尽快': 'asap',
+  '尽晚': 'alap',
+  '必须于…开始': 'muststarton',
+  '必须于…结束': 'mustfinishon',
+  '不早于…开始': 'startnoearlierthan',
+  '不早于…结束': 'finishnoearlierthan',
+  '不迟于…开始': 'startnolaterthan',
+  '不迟于…结束': 'finishnolaterthan',
+  '不晚于…结束': 'finishnolaterthan',
+}
+
 export interface ImportTask {
   task_code: string
   level: number
@@ -16,6 +30,15 @@ export interface ImportTask {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  percent_done?: number | null
+  constraint_type?: string | null
+  constraint_date?: string | null
+  rollup?: boolean
+  inactive?: boolean
+  project_boundary?: string | null
+  status?: string | null
+  complexity?: number | null
+  baseline_end_date?: string | null
 }
 
 export interface ImportDep {
@@ -285,6 +308,19 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,
+      percent_done: row['完成度'] != null && String(row['完成度']).trim() !== '' ? Number(row['完成度']) || 0 : null,
+      constraint_type: (() => {
+        const v = String(row['限制类型'] ?? '').trim()
+        if (!v) return null
+        return CTYPE_REVERSE[v] ?? v
+      })(),
+      constraint_date: parseDateCell(row['限制日期']),
+      rollup: String(row['汇总'] ?? '').trim() === '是',
+      inactive: String(row['非激活'] ?? '').trim() === '是',
+      project_boundary: String(row['项目边界'] ?? '').trim() || null,
+      status: String(row['状态'] ?? '').trim() || null,
+      complexity: row['复杂度'] != null && String(row['复杂度']).trim() !== '' ? Number(row['复杂度']) || null : null,
+      baseline_end_date: parseDateCell(row['基线结束']),
     }
     tasks.push(task)
 

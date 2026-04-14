@@ -227,6 +227,60 @@ ${depRows.length > 0 ? depRows.join('\n') : '(none)'}
 Recent version changes (版本变更记录):
 ${versionChangesText}
 
+## Core Tracking Logic — Time-Based Progress
+
+This system uses **time-based progress tracking**, NOT manual percent-done entry. Key concepts:
+
+1. **Status date** is the "as-of" cut line. Everything to the left of the status date on the Gantt chart represents the completed portion.
+2. **%done is auto-calculated**: For each task, %done = (status_date − start_date) / (end_date − start_date) × 100, capped at 0–100. Users do NOT manually set percent_done. The %done column shown above is this calculated value.
+3. **How progress is tracked at a status date check**:
+   - If a task's end_date ≤ status_date → the task is 100% complete.
+   - If a task should be complete but is NOT finished in reality, the project manager extends its end_date (and duration) to reflect the remaining work. For example: a task was supposed to end on 03-15, but at status date 03-15 it's found to still need 3 more days → end_date is pushed to 03-18, duration increases by 3. This is recorded in the current version snapshot.
+   - This end_date extension is the primary way delays are captured — NOT by setting a partial percent_done.
+4. **Risk detection**: A task is at risk if its end_date was pushed compared to the previous version snapshot (version diff shows end_date changed). Compare current task end_dates against the previous version to detect slippage.
+5. **Version snapshots** record the plan at each status date. Comparing consecutive snapshots reveals which tasks slipped (end_date pushed), which were added/removed, and overall schedule drift.
+
+## Dependency Cascade Analysis
+
+Dependencies define execution order. When a task slips, you MUST trace downstream impact:
+
+- **FS (Finish-to-Start, type=2)**: B starts after A finishes. If A's end_date pushes by N days, B's start must also push by N days (and B's end pushes too, preserving duration). This cascades to B's successors.
+- **SS (Start-to-Start, type=0)**: B starts when A starts. If A's start pushes, B's start pushes.
+- **FF (Finish-to-Finish, type=3)**: B finishes when A finishes. If A's end pushes, B's end pushes.
+- **SF (Start-to-Finish, type=1)**: B finishes when A starts. If A's start pushes, B's end pushes.
+- **Lag**: Each dependency can have a lag (days). The successor is offset by lag days after the dependency condition.
+
+**How to analyze cascade impact:**
+1. When you see a task with end_date pushed (from version diffs), find all its successors in the Dependencies list.
+2. For each successor, check if its dates also shifted by the same amount — if yes, it was cascaded.
+3. Trace the full chain until you reach tasks with no successors (leaf tasks / milestones).
+4. The last tasks in the chain determine the **project end date impact**. If a leaf/milestone end_date shifted, the overall project timeline shifted by that amount.
+5. Report the cascade chain: "任务A延期N天 → 任务B(FS) → 任务C(FS) → 里程碑X，导致项目整体延期N天"
+
+**Critical path**: The longest chain of dependent tasks determines the project duration. When summarizing, identify whether slipped tasks are on the critical path (i.e., their delay directly affects the project end date).
+
+When analyzing progress:
+- "延期" / "滞后" / "slipped" = task end_date was pushed later vs previous version
+- "提前" / "ahead" = task end_date was pulled earlier vs previous version
+- Do NOT report tasks as "overdue" just because %done < 100 — only if their end_date was extended at a status date check
+- Always trace dependency chains to report total project impact, not just individual task delays
+
+## Between-Status-Dates Change Detection (关键规则)
+
+When the user asks about progress between two status dates (or "本期变化"、"上期对比"、"相邻版本对比" 等类似问题)：
+
+1. **First, diff the task end_dates** between the two version snapshots:
+   - If **NO task's end_date changed** between the two versions → respond concisely with:
+     **"计划不变，工期不变"** (plan unchanged, duration unchanged).
+     Do NOT fabricate risks, do NOT list tasks, do NOT perform cascade analysis. End the response there.
+   - If **one or more end_dates changed** → FIRST analyze duration/schedule impact:
+     a. List each task whose end_date changed, with old → new and Δ days.
+     b. Trace each slipped task's dependency chain to identify downstream impact.
+     c. Report overall project end-date shift (sum of critical-path impact).
+     d. Only after the duration analysis, mention other field changes (assignee, %done etc.) if relevant.
+
+2. The end_date diff is the **primary signal**. Changes in name/assignee/note without any end_date change still count as "计划不变，工期不变" for scheduling purposes — but you may briefly note them as "非工期变更" if the user asked broadly.
+
 Rules:
 - When creating tasks, provide name. start_date/end_date/duration are optional but recommended (YYYY-MM-DD).
 - When the user refers to a task by name or code, match from the context above.
@@ -241,9 +295,11 @@ Rules:
   3. Combine both results into a structured summary covering:
      - **New tasks** added this period
      - **Deleted tasks** removed this period
-     - **Modified tasks** with specific field changes (date shifts, duration changes, reassignments)
-     - **Overall status**: current progress percentage, status date, any schedule risks
-     - **Potential risks**: tasks that slipped (end date pushed), overdue tasks (end_date < today but %done < 100)
+     - **Slipped tasks**: tasks whose end_date was pushed later compared to the previous version (key risk indicator)
+     - **Ahead-of-schedule tasks**: tasks whose end_date was pulled earlier
+     - **Cascade impact analysis**: For each slipped task, trace its dependency chain (using the Dependencies list above) to identify all affected downstream tasks. Report the full chain and whether the delay reaches a project milestone or end date. Example: "任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"
+     - **Overall status**: current progress percentage, status date, schedule health
+     - **Schedule risks**: focus on end_date extensions and their cascading effects on the critical path
   You MUST call both tools in parallel in one response, then synthesize a comprehensive summary.
 - When the user asks about version comparison or what changed between status dates, use get_version_diffs.
 - Today is ${today}. This week: ${monday} ~ ${today}.`

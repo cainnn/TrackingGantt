@@ -95,7 +95,7 @@ export async function cascadeDependencies(
   const cascadedIds: string[] = []
 
   const depsRes = await client.query(
-    `SELECT d.id as dep_id, d.from_task_id, d.to_task_id, d.type, d.lag FROM dependencies d
+    `SELECT d.id as dep_id, d.from_task_id, d.to_task_id, d.type, d.lag, COALESCE(d.active, true) AS active FROM dependencies d
      JOIN tasks ft ON ft.id = d.from_task_id AND ft.is_deleted = false
      JOIN tasks tt ON tt.id = d.to_task_id AND tt.is_deleted = false
      WHERE d.project_id = $1`,
@@ -103,18 +103,44 @@ export async function cascadeDependencies(
   )
 
   const tasksRes = await client.query(
-    'SELECT id, parent_id, start_date, end_date, duration, COALESCE(auto_schedule, true) AS auto_schedule FROM tasks WHERE project_id = $1 AND is_deleted = false',
+    `SELECT id, parent_id, start_date, end_date, duration,
+            COALESCE(auto_schedule, true) AS auto_schedule,
+            COALESCE(inactive, false) AS inactive,
+            constraint_type, constraint_date
+     FROM tasks WHERE project_id = $1 AND is_deleted = false`,
     [projectId],
   )
-  const taskMap = new Map<string, { start_date: string | null; end_date: string | null; duration: number | null; auto_schedule: boolean; parent_id: string | null }>()
+  const taskMap = new Map<string, { start_date: string | null; end_date: string | null; duration: number | null; auto_schedule: boolean; parent_id: string | null; inactive: boolean; constraint_type: string | null; constraint_date: string | null }>()
+  const constrainedIds = new Set<string>()
   for (const r of tasksRes.rows) {
+    const ctype = (r.constraint_type as string | null) ?? null
+    const cdate = toDateStr(r.constraint_date as string | null)
     taskMap.set(r.id, {
       start_date: toDateStr(r.start_date),
       end_date: toDateStr(r.end_date),
       duration: r.duration,
       auto_schedule: r.auto_schedule !== false,
       parent_id: r.parent_id,
+      inactive: r.inactive === true,
+      constraint_type: ctype,
+      constraint_date: cdate,
     })
+    if (ctype && ctype !== 'asap' && ctype !== 'alap' && ctype !== 'none' && cdate) {
+      constrainedIds.add(r.id)
+    }
+  }
+
+  // 任务是否为"无效"：自身或任一祖先为 inactive
+  const isInactive = (id: string): boolean => {
+    let cur = taskMap.get(id)
+    const visited = new Set<string>()
+    while (cur) {
+      if (cur.inactive) return true
+      if (!cur.parent_id || visited.has(cur.parent_id)) break
+      visited.add(cur.parent_id)
+      cur = taskMap.get(cur.parent_id)
+    }
+    return false
   }
 
   // 判断 ancestorId 是否是 taskId 的祖先（父→祖父→…）
@@ -133,11 +159,19 @@ export async function cascadeDependencies(
   // 按后继任务分组依赖，方便聚合多前置任务的约束
   // 跳过父子关系的依赖（摘要任务日期由子任务决定，不应反向约束子任务）
   const depsByTo = new Map<string, DepRow[]>()
-  for (const dep of depsRes.rows as DepRow[]) {
+  for (const dep of depsRes.rows as (DepRow & { active?: boolean })[]) {
     if (isAncestor(dep.from_task_id, dep.to_task_id)) continue
     if (isAncestor(dep.to_task_id, dep.from_task_id)) continue
+    // 跳过 inactive 依赖以及任一端为无效任务的依赖
+    if (dep.active === false) continue
+    if (isInactive(dep.from_task_id) || isInactive(dep.to_task_id)) continue
     if (!depsByTo.has(dep.to_task_id)) depsByTo.set(dep.to_task_id, [])
     depsByTo.get(dep.to_task_id)!.push(dep)
+  }
+
+  // 有硬约束但无前置依赖的任务也需要参与调度（保证 muststarton 等生效）
+  for (const id of constrainedIds) {
+    if (!depsByTo.has(id)) depsByTo.set(id, [])
   }
 
   let changed = true
@@ -175,11 +209,27 @@ export async function cascadeDependencies(
         if (rs && (!maxRequired || rs > maxRequired)) maxRequired = rs
       }
 
-      if (!maxRequired) continue
-      // 有依赖的任务：精确匹配才跳过（依赖优先，支持向前推 + 向后拉）
-      if (toStart === maxRequired) continue
+      // 应用硬约束：muststarton / mustfinishon / (start|finish)no(earlier|later)than
+      let newStart: string | null = maxRequired
+      const ctype = to.constraint_type
+      const cdate = to.constraint_date
+      if (ctype && cdate && ctype !== 'asap' && ctype !== 'alap' && ctype !== 'none') {
+        if (ctype === 'muststarton') {
+          newStart = cdate
+        } else if (ctype === 'mustfinishon') {
+          newStart = addDaysStr(cdate, -dur)
+        } else if (ctype === 'startnoearlierthan') {
+          newStart = (maxRequired && maxRequired > cdate) ? maxRequired : cdate
+        } else if (ctype === 'finishnoearlierthan') {
+          const s = addDaysStr(cdate, -dur)
+          newStart = (maxRequired && s && maxRequired > s) ? maxRequired : s
+        }
+        // 上界约束（nolaterthan）不主动前移：有依赖时允许依赖推动（冲突时依赖胜）
+      }
 
-      const newStart = maxRequired
+      if (!newStart) continue
+      if (toStart === newStart) continue
+
       const newEnd = addDaysStr(newStart, dur)
       if (!newEnd) continue
 
@@ -195,6 +245,9 @@ export async function cascadeDependencies(
         duration: dur,
         auto_schedule: to.auto_schedule,
         parent_id: to.parent_id,
+        inactive: to.inactive,
+        constraint_type: to.constraint_type,
+        constraint_date: to.constraint_date,
       })
       changed = true
     }

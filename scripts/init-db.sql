@@ -56,8 +56,15 @@ CREATE TABLE IF NOT EXISTS tasks (
   percent_done INTEGER DEFAULT 0,
   is_milestone BOOLEAN DEFAULT false,
   auto_schedule BOOLEAN DEFAULT true,
+  constraint_type VARCHAR(40) DEFAULT 'asap',
+  constraint_date DATE,
+  status VARCHAR(20),
+  complexity INTEGER,
   note TEXT,
   order_index INTEGER DEFAULT 0,
+  rollup BOOLEAN DEFAULT false,
+  inactive BOOLEAN DEFAULT false,
+  project_boundary VARCHAR(20) DEFAULT 'ask',
   is_deleted BOOLEAN DEFAULT false,
   deleted_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -72,6 +79,7 @@ CREATE TABLE IF NOT EXISTS dependencies (
   to_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   type INTEGER NOT NULL DEFAULT 2, -- 0=SS,1=SF,2=FS,3=FF
   lag INTEGER DEFAULT 0,
+  active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(from_task_id, to_task_id)
@@ -129,6 +137,30 @@ CREATE TRIGGER update_project_lines_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
 
+-- 兼容旧库的增量字段
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS rollup BOOLEAN DEFAULT false;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS inactive BOOLEAN DEFAULT false;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS project_boundary VARCHAR(20) DEFAULT 'ask';
+ALTER TABLE dependencies ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date DATE;
+
+-- 历史变更审计：记录对"状态日期之前"的任务所做的回溯修改
+CREATE TABLE IF NOT EXISTS task_change_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  status_date_at_change DATE,
+  field VARCHAR(40) NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  reason TEXT,
+  changed_by UUID,
+  changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_tcl_project  ON task_change_log(project_id);
+CREATE INDEX IF NOT EXISTS idx_tcl_task     ON task_change_log(task_id);
+CREATE INDEX IF NOT EXISTS idx_tcl_statusdt ON task_change_log(status_date_at_change);
+
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent_id ON tasks(parent_id);
@@ -172,6 +204,12 @@ CREATE TRIGGER update_dependencies_updated_at
   BEFORE UPDATE ON dependencies
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
+
+-- 插入超级管理员用户（用户名: administrator  密码: admin123）
+-- 可管理用户：创建、删除用户，修改密码
+INSERT INTO users (username, email, password_hash, role)
+VALUES ('administrator', 'administrator@example.com', '$2b$10$Zwy3LDurO3iD6N7Bowlj0uZDvAg33n7R7adAFsKzjN1FzL7RUn3pS', 'administrator')
+ON CONFLICT (username) DO NOTHING;
 
 -- 插入默认管理员用户（首次初始化）
 INSERT INTO users (username, email, password_hash)

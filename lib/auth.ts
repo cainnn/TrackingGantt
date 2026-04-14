@@ -7,7 +7,7 @@ const JWT_EXPIRES_IN = '7d'
 export interface JwtPayload {
   userId: string
   username: string
-  role: 'admin' | 'view'
+  role: 'administrator' | 'admin' | 'view'
 }
 
 export function signToken(payload: JwtPayload): string {

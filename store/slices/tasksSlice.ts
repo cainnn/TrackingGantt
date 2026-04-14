@@ -13,12 +13,20 @@ interface DiffFilter {
   taskCodes: string[]  // task_codes of changed tasks
 }
 
+interface ViewSnapshot {
+  tasks: Task[]
+  dependencies: Dependency[]
+  versionId: string
+  versionName: string
+}
+
 interface TasksState {
   tasks: Task[]
   dependencies: Dependency[]
   clipboard: Task[]
   clipboardDeps: Dependency[]
   comparison: Comparison | null
+  viewSnapshot: ViewSnapshot | null
   diffFilter: DiffFilter | null
   dirtyIds: string[]
   selectedIds: string[]
@@ -34,6 +42,7 @@ const initialState: TasksState = {
   clipboard: [],
   clipboardDeps: [],
   comparison: null,
+  viewSnapshot: null,
   diffFilter: null,
   dirtyIds: [],
   selectedIds: [],
@@ -94,11 +103,12 @@ const tasksSlice = createSlice({
     removeDependency(state, action: PayloadAction<string>) {
       state.dependencies = state.dependencies.filter(d => d.id !== action.payload)
     },
-    updateDependency(state, action: PayloadAction<{ id: string; type?: number; lag?: number }>) {
+    updateDependency(state, action: PayloadAction<{ id: string; type?: number; lag?: number; active?: boolean }>) {
       const idx = state.dependencies.findIndex(d => d.id === action.payload.id)
       if (idx !== -1) {
-        if (action.payload.type !== undefined) state.dependencies[idx].type = action.payload.type
-        if (action.payload.lag  !== undefined) state.dependencies[idx].lag  = action.payload.lag
+        if (action.payload.type   !== undefined) state.dependencies[idx].type   = action.payload.type
+        if (action.payload.lag    !== undefined) state.dependencies[idx].lag    = action.payload.lag
+        if (action.payload.active !== undefined) state.dependencies[idx].active = action.payload.active
       }
     },
     markDirty(state, action: PayloadAction<string[]>) {
@@ -115,6 +125,12 @@ const tasksSlice = createSlice({
     clearComparison(state) {
       state.comparison = null
     },
+    setViewSnapshot(state, action: PayloadAction<ViewSnapshot>) {
+      state.viewSnapshot = action.payload
+    },
+    clearViewSnapshot(state) {
+      state.viewSnapshot = null
+    },
     setDiffFilter(state, action: PayloadAction<DiffFilter>) {
       state.diffFilter = action.payload
     },
@@ -127,6 +143,7 @@ const tasksSlice = createSlice({
       state.clipboard = []
       state.clipboardDeps = []
       state.comparison = null
+      state.viewSnapshot = null
       state.diffFilter = null
       state.dirtyIds = []
       state.selectedIds = []
@@ -161,6 +178,7 @@ export const {
   copyTasks, clearClipboard, setSelectedIds,
   markDirty, clearDirty,
   setComparison, clearComparison,
+  setViewSnapshot, clearViewSnapshot,
   setDiffFilter, clearDiffFilter,
   setLoading, setError, clearTasks,
   addDependency, removeDependency, updateDependency,

@@ -7,13 +7,16 @@ import { setProjects, addProject } from '@/store/slices/projectSlice'
 import ProjectCard from '@/components/ProjectCard'
 import { logout } from '@/store/slices/authSlice'
 import { authFetch } from '@/lib/client/authFetch'
+import UserManagement from '@/components/UserManagement'
 
 export default function DashboardPage() {
   const dispatch = useAppDispatch()
   const router = useRouter()
   const { user, token } = useAppSelector(s => s.auth)
   const isViewOnly = user?.role === 'view'
+  const isAdministrator = user?.role === 'administrator'
   const { projects } = useAppSelector(s => s.project)
+  const [activeTab, setActiveTab] = useState<'projects' | 'users'>('projects')
   const [creating, setCreating] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [copyFrom, setCopyFrom] = useState('')
@@ -95,6 +98,35 @@ export default function DashboardPage() {
         </div>
       </header>
       <main className="max-w-4xl mx-auto px-6 py-8">
+        {isAdministrator && (
+          <div className="flex gap-1 mb-6 border-b border-gray-200">
+            <button
+              onClick={() => setActiveTab('projects')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                activeTab === 'projects'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              项目管理
+            </button>
+            <button
+              onClick={() => setActiveTab('users')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                activeTab === 'users'
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              用户管理
+            </button>
+          </div>
+        )}
+
+        {activeTab === 'users' && isAdministrator ? (
+          <UserManagement />
+        ) : (
+        <>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-lg font-semibold text-gray-800">我的项目</h2>
           {!isViewOnly && (
@@ -170,6 +202,8 @@ export default function DashboardPage() {
               <ProjectCard key={p.id} project={p} readOnly={isViewOnly} />
             ))}
           </div>
+        )}
+        </>
         )}
       </main>
     </div>
