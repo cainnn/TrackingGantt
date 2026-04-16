@@ -165,15 +165,49 @@ export function buildSystemPrompt(
   progress?: number | null,
 ): string {
   const codeById = new Map(tasks.map(t => [t.id, t.task_code]))
+  const taskById = new Map(tasks.map(t => [t.id, t] as const))
+
+  // 辅助：判断任务 end_date 是否相对 baseline 延长
+  const isExtended = (tk: Task) => {
+    const b = tk.baseline_end_date ? String(tk.baseline_end_date).split('T')[0] : null
+    const e = tk.end_date ? String(tk.end_date).split('T')[0] : null
+    return !!(b && e && e > b)
+  }
 
   const taskRows = tasks.slice(0, 200).map(t => {
     const parentCode = t.parent_id ? (codeById.get(t.parent_id) ?? '') : ''
     const pct = computeTimeBasedPercent(t, statusDate)
+    const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : ''
+    const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : ''
+    let delayFlag = ''
+    if (baseline && curEnd && baseline !== curEnd) {
+      const days = Math.round((new Date(curEnd).getTime() - new Date(baseline).getTime()) / 86_400_000)
+      if (days > 0) delayFlag = `延期+${days}天`
+      else if (days < 0) delayFlag = `提前${days}天`
+    }
+    // 计算延期原因
+    let delayReason = ''
+    if (delayFlag && delayFlag.startsWith('延期')) {
+      const inDeps = dependencies.filter(d => d.to_task_id === t.id && d.active !== false)
+      const delayedPreds = inDeps.filter(d => { const p = taskById.get(d.from_task_id); return p ? isExtended(p) : false })
+      const lagPreds = inDeps.filter(d => (d.lag ?? 0) > 0)
+      const reasons: string[] = []
+      if (delayedPreds.length > 0) {
+        const names = delayedPreds.map(d => taskById.get(d.from_task_id)?.name ?? '?').slice(0, 3)
+        reasons.push(`前置任务延期(${names.join(',')})`)
+      }
+      if (lagPreds.length > 0) {
+        const descs = lagPreds.map(d => `${taskById.get(d.from_task_id)?.name ?? '?'}lag=${d.lag}天`).slice(0, 3)
+        reasons.push(`依赖延迟(${descs.join(',')})`)
+      }
+      delayReason = reasons.length > 0 ? reasons.join('; ') : '自身工期延长'
+    }
     return [
       t.task_code, t.name,
-      t.start_date?.split('T')[0] ?? '', t.end_date?.split('T')[0] ?? '',
+      t.start_date?.split('T')[0] ?? '', curEnd,
       t.duration ?? '', t.assignee ?? '', pct,
       parentCode, t.is_milestone ? 'Y' : '',
+      baseline, delayFlag, delayReason,
     ].join(' | ')
   })
 
@@ -217,7 +251,10 @@ Today: ${today}
 ${statusDate ? `Status date: ${typeof statusDate === 'string' && statusDate.includes('T') ? statusDate.split('T')[0] : statusDate}` : 'Status date: not set'}
 ${progress != null ? `Overall progress: ${progress}%` : ''}
 
-Tasks (code | name | start | end | duration | assignee | %done | parent_code | milestone):
+Tasks (code | name | start | end | duration | assignee | %done | parent_code | milestone | baseline_end | delay_flag | delay_reason):
+- **baseline_end** 是上一期版本快照中的计划结束日期。
+- **delay_flag** 格式："延期+N天"（end 晚于 baseline_end N 天）或"提前-N天"（end 早于 baseline_end）；为空表示无变化。这是判定任务延期/提前的权威依据，优先使用，总结时必须明确列出天数。
+- **delay_reason** 延期原因说明："自身工期延长"表示任务本身被拉长；"前置任务延期(任务名)"表示因上游任务延期被拖累；"依赖延迟(任务名lag=N天)"表示因依赖关系的lag设置导致延期。总结时必须说明延期原因。
 ${taskRows.length > 0 ? taskRows.join('\n') : '(empty)'}
 ${tasks.length > 200 ? `... and ${tasks.length - 200} more tasks` : ''}
 
@@ -260,6 +297,7 @@ Dependencies define execution order. When a task slips, you MUST trace downstrea
 **Critical path**: The longest chain of dependent tasks determines the project duration. When summarizing, identify whether slipped tasks are on the critical path (i.e., their delay directly affects the project end date).
 
 When analyzing progress:
+- **判定任务"延期"的规则**：对每个任务比较 end_date vs baseline_end_date（即任务行中的 baseline_end 列）；若 end > baseline_end（或 delay_flag="延期"），则该任务为"延期"。这个判定在"确认变更"后会持续，直到下一期重置基线。
 - "延期" / "滞后" / "slipped" = task end_date was pushed later vs previous version
 - "提前" / "ahead" = task end_date was pulled earlier vs previous version
 - Do NOT report tasks as "overdue" just because %done < 100 — only if their end_date was extended at a status date check
@@ -292,14 +330,22 @@ Rules:
 - **IMPORTANT — Summarizing progress or changes:** When the user asks to "总结进展", "总结本周", "项目进展", "weekly summary", or any variation about project progress / change summary:
   1. Call get_task_changes with from_date="${monday}" and to_date="${today}" to get this week's task-level change log (new tasks, deleted tasks, field modifications).
   2. Also call get_version_diffs to get version snapshot diffs (what changed between status date confirmations).
-  3. Combine both results into a structured summary covering:
-     - **New tasks** added this period
-     - **Deleted tasks** removed this period
-     - **Slipped tasks**: tasks whose end_date was pushed later compared to the previous version (key risk indicator)
-     - **Ahead-of-schedule tasks**: tasks whose end_date was pulled earlier
-     - **Cascade impact analysis**: For each slipped task, trace its dependency chain (using the Dependencies list above) to identify all affected downstream tasks. Report the full chain and whether the delay reaches a project milestone or end date. Example: "任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"
-     - **Overall status**: current progress percentage, status date, schedule health
-     - **Schedule risks**: focus on end_date extensions and their cascading effects on the critical path
+  3. Combine both results into a structured summary. **输出顺序严格按照以下两段式，必须先写"工期和计划变更"，再写"任务完成情况"，不得颠倒**：
+
+     ### 一、工期和计划变更（优先）
+     - **项目整体工期影响**：比较最新两个版本，量化项目结束日期/关键里程碑的偏移天数（延期N天 / 提前N天 / 无变化）。这是开头第一句。
+     - **延期任务清单**：列出 end_date 被推后的任务，给出 old → new 和 Δ天数，并引用 delay_flag 字段。
+     - **提前任务清单**：列出 end_date 被提前的任务（如有）。
+     - **级联影响分析**：对每个延期任务，沿依赖关系追踪下游受影响任务，写出完整链路。示例："任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"。
+     - **计划结构调整**：本期新增 / 删除的任务，以及非工期字段变更（负责人、里程碑等）。
+
+     ### 二、任务完成情况
+     - **整体进度**：当前进度百分比、状态日期、时间基线下应达成进度 vs 实际。
+     - **已完成任务**：end_date ≤ 状态日期且未被推迟的任务数量与代表性示例。
+     - **进行中任务**：跨越状态日期、按时推进的任务。
+     - **风险任务**：尚未完成且 end_date 已被推迟 / 逾期的任务。
+
+  若本期"计划不变、工期不变"（参见下节的判定规则），第一段直接写"本期计划不变，工期不变"即可，第二段仍按上面的子项正常输出。
   You MUST call both tools in parallel in one response, then synthesize a comprehensive summary.
 - When the user asks about version comparison or what changed between status dates, use get_version_diffs.
 - Today is ${today}. This week: ${monday} ~ ${today}.`

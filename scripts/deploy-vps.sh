@@ -266,13 +266,25 @@ echo "   数据库 OK"
 if [[ "$SKIP_MIGRATE" -ne 1 ]] && [[ -f "$APP_DIR/scripts/init-db.sql" ]]; then
   echo ">> 运行数据库迁移..."
   sudo -u postgres psql -d gantt_app -v ON_ERROR_STOP=1 < "$APP_DIR/scripts/init-db.sql" 2>&1 | tail -3
-  # 增量迁移脚本
-  for mf in "$APP_DIR"/scripts/migrate-*.sql; do
+  # 增量迁移脚本（按文件名排序执行，遇错即停）
+  mig_count=0
+  for mf in $(ls "$APP_DIR"/scripts/migrate-*.sql 2>/dev/null | sort); do
     [[ -f "$mf" ]] || continue
     echo "   运行迁移: $(basename "$mf")"
-    sudo -u postgres psql -d gantt_app < "$mf" 2>&1 | tail -3
+    sudo -u postgres psql -d gantt_app -v ON_ERROR_STOP=1 < "$mf" 2>&1 | tail -3
+    mig_count=$((mig_count+1))
   done
-  echo "   迁移完成"
+  # 校验关键 schema：确保 tasks 表包含新增列
+  required_cols=(constraint_type constraint_date deadline baseline_end_date project_boundary)
+  for col in "${required_cols[@]}"; do
+    exists=$(sudo -u postgres psql -d gantt_app -tAc \
+      "SELECT 1 FROM information_schema.columns WHERE table_name='tasks' AND column_name='$col'")
+    if [[ "$exists" != "1" ]]; then
+      echo "   ✗ tasks.$col 未找到，迁移可能失败" >&2
+      exit 1
+    fi
+  done
+  echo "   迁移完成（增量 $mig_count 个，schema 校验通过）"
 fi
 
 # 安装依赖 + 构建

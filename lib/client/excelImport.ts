@@ -37,7 +37,6 @@ export interface ImportTask {
   inactive?: boolean
   project_boundary?: string | null
   status?: string | null
-  complexity?: number | null
   baseline_end_date?: string | null
 }
 
@@ -319,7 +318,6 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
       inactive: String(row['非激活'] ?? '').trim() === '是',
       project_boundary: String(row['项目边界'] ?? '').trim() || null,
       status: String(row['状态'] ?? '').trim() || null,
-      complexity: row['复杂度'] != null && String(row['复杂度']).trim() !== '' ? Number(row['复杂度']) || null : null,
       baseline_end_date: parseDateCell(row['基线结束']),
     }
     tasks.push(task)

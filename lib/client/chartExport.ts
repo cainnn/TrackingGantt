@@ -83,6 +83,8 @@ interface ChartData {
   summarySet: Set<string>
   projectStart: string | null
   projectEnd: string | null
+  projectStartDefined: string | null
+  projectEndDefined: string | null
 }
 
 function fmtDate(d: Date): string {
@@ -197,6 +199,7 @@ function prepareChartData(
   tasks: Task[], dependencies: Dependency[], projectName: string,
   statusDate?: string | null, projectLines?: ProjectLine[],
   fullExport = false,
+  projectStartDate?: string | null, projectEndDate?: string | null,
 ): ChartData {
   const activeTasks = tasks.filter(t => !t.is_deleted)
   const allRows = flattenForExport(activeTasks)
@@ -230,10 +233,14 @@ function prepareChartData(
 
   const starts = activeTasks.map(t => t.start_date).filter(Boolean) as string[]
   const ends = activeTasks.map(t => t.end_date).filter(Boolean) as string[]
-  const projectStart = starts.length ? fmtDate(new Date(starts.reduce((a,b) => a < b ? a : b))) : null
-  const projectEnd = ends.length ? fmtDate(new Date(ends.reduce((a,b) => a > b ? a : b))) : null
+  const taskStart = starts.length ? fmtDate(new Date(starts.reduce((a,b) => a < b ? a : b))) : null
+  const taskEnd = ends.length ? fmtDate(new Date(ends.reduce((a,b) => a > b ? a : b))) : null
+  const projectStartDefined = projectStartDate ? projectStartDate.split('T')[0] : null
+  const projectEndDefined = projectEndDate ? projectEndDate.split('T')[0] : null
+  const projectStart = projectStartDefined ?? taskStart
+  const projectEnd = projectEndDefined ?? taskEnd
 
-  return { rows, activeTasks, dependencies, origin, totalDays, colW, months, projectName, statusDate, projectLines, summarySet, projectStart, projectEnd }
+  return { rows, activeTasks, dependencies, origin, totalDays, colW, months, projectName, statusDate, projectLines, summarySet, projectStart, projectEnd, projectStartDefined, projectEndDefined }
 }
 
 // ── Render header (title + month bar) ───────────────────────────────────
@@ -241,7 +248,7 @@ function renderHeader(cd: ChartData): string {
   const parts: string[] = []
   parts.push(`<text x="${CONTENT_W/2}" y="${TITLE_H - 12}" text-anchor="middle" font-size="${F_TITLE}" font-weight="bold" fill="#111827">${escXml(cd.projectName)}</text>`)
   if (cd.projectStart || cd.projectEnd) {
-    const dateLine = `${cd.projectStart ?? ''} ~ ${cd.projectEnd ?? ''}`
+    const dateLine = `开工：${cd.projectStart ?? '—'}    完工：${cd.projectEnd ?? '—'}`
     parts.push(`<text x="${CONTENT_W/2}" y="${TITLE_H - 2}" text-anchor="middle" font-size="9" fill="#6b7280">${escXml(dateLine)}</text>`)
   }
   const hy = TITLE_H
@@ -368,21 +375,34 @@ function renderDeps(cd: ChartData, fromIdx: number, toIdx: number, bodyY: number
   return parts.join('\n')
 }
 
-// ── Render vertical lines (status date, project lines) ──────────────────
+// ── Render vertical lines (project start/end, status date, project lines) ──
 function renderVerticalLines(cd: ChartData, topY: number, bottomY: number): string {
   const dateToX = (d: Date) => diffDays(cd.origin, d) * cd.colW
   const parts: string[] = []
+  // 项目开工 / 完工日期：红色虚线（优先使用项目定义日期，回退到任务极值）
+  const psStr = cd.projectStartDefined ?? cd.projectStart
+  const peStr = cd.projectEndDefined ?? cd.projectEnd
+  if (psStr) {
+    const px = dateToX(sod(new Date(psStr)))
+    parts.push(`<line x1="${px}" y1="${topY}" x2="${px}" y2="${bottomY}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4,3"/>`)
+    parts.push(`<text x="${px + 2}" y="${topY + 8}" font-size="7" fill="#dc2626" font-weight="600">开工 ${escXml(psStr)}</text>`)
+  }
+  if (peStr) {
+    const px = dateToX(sod(new Date(peStr)))
+    parts.push(`<line x1="${px}" y1="${topY}" x2="${px}" y2="${bottomY}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4,3"/>`)
+    parts.push(`<text x="${px - 2}" y="${topY + 8}" text-anchor="end" font-size="7" fill="#dc2626" font-weight="600">完工 ${escXml(peStr)}</text>`)
+  }
   if (cd.statusDate) {
     const sx = dateToX(sod(new Date(cd.statusDate)))
     parts.push(`<line x1="${sx}" y1="${topY}" x2="${sx}" y2="${bottomY}" stroke="#ef4444" stroke-width="1" stroke-dasharray="3,2"/>`)
-    parts.push(`<text x="${sx}" y="${topY + 8}" text-anchor="middle" font-size="7" fill="#ef4444">状态日期</text>`)
+    parts.push(`<text x="${sx}" y="${topY + 16}" text-anchor="middle" font-size="7" fill="#ef4444">状态日期</text>`)
   }
   if (cd.projectLines) {
     for (const pl of cd.projectLines) {
       if (!pl.visible || !pl.line_date) continue
       const px = dateToX(sod(new Date(pl.line_date)))
       parts.push(`<line x1="${px}" y1="${topY}" x2="${px}" y2="${bottomY}" stroke="${pl.color}" stroke-width="1" stroke-dasharray="4,2"/>`)
-      parts.push(`<text x="${px}" y="${topY + 8}" text-anchor="middle" font-size="7" fill="${pl.color}">${escXml(pl.name)}</text>`)
+      parts.push(`<text x="${px + 2}" y="${topY + 16}" font-size="7" fill="${pl.color}">${escXml(pl.name)}</text>`)
     }
   }
   return parts.join('\n')
@@ -431,8 +451,9 @@ async function svgToCanvas(svgStr: string, svgW: number, svgH: number, dpi: numb
 export async function exportToJpeg(
   tasks: Task[], dependencies: Dependency[], projectName: string,
   statusDate?: string | null, projectLines?: ProjectLine[],
+  projectStartDate?: string | null, projectEndDate?: string | null,
 ) {
-  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines)
+  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines, false, projectStartDate, projectEndDate)
   const { svg, width, height } = buildSinglePageSvg(cd)
   const canvas = await svgToCanvas(svg, width, height, 3)
   const jpegData = canvas.toDataURL('image/jpeg', 0.92)
@@ -469,8 +490,9 @@ function buildPageSvg(cd: ChartData, fromIdx: number, toIdx: number, pageNum: nu
 export async function exportToPdf(
   tasks: Task[], dependencies: Dependency[], projectName: string,
   statusDate?: string | null, projectLines?: ProjectLine[],
+  projectStartDate?: string | null, projectEndDate?: string | null,
 ) {
-  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines, true)
+  const cd = prepareChartData(tasks, dependencies, projectName, statusDate, projectLines, true, projectStartDate, projectEndDate)
   const dpi = 3
 
   // Calculate rows per page

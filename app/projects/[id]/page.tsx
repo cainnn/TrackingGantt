@@ -13,7 +13,7 @@ import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
 import Link from 'next/link'
 import { authFetch } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
-import { DEFAULT_VISIBLE_COLS, OPTIONAL_COL_META, type OptionalCol } from '@/components/GanttChart/GanttChart'
+import { DEFAULT_VISIBLE_COLS, OPTIONAL_COL_META, DEFAULT_INDICATORS, type OptionalCol, type IndicatorsConfig } from '@/components/GanttChart/GanttChart'
 
 const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ssr: false,
@@ -65,6 +65,22 @@ export default function ProjectPage() {
   const handleVisibleColsChange = useCallback((cols: OptionalCol[]) => {
     setVisibleCols(cols)
     try { localStorage.setItem(`gantt-cols-${projectId}`, JSON.stringify(cols)) } catch { /* ignore */ }
+  }, [projectId])
+
+  const [indicators, setIndicators] = useState<IndicatorsConfig>(() => {
+    if (typeof window === 'undefined') return DEFAULT_INDICATORS
+    try {
+      const saved = localStorage.getItem(`gantt-indicators-${projectId}`)
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<IndicatorsConfig>
+        return { ...DEFAULT_INDICATORS, ...parsed }
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_INDICATORS
+  })
+  const handleIndicatorsChange = useCallback((next: IndicatorsConfig) => {
+    setIndicators(next)
+    try { localStorage.setItem(`gantt-indicators-${projectId}`, JSON.stringify(next)) } catch { /* ignore */ }
   }, [projectId])
 
   useEffect(() => {
@@ -167,6 +183,8 @@ export default function ProjectPage() {
         onToggleCompareLock={(next) => { setCompareLock(next); setShowComparison(next) }}
         visibleCols={visibleCols}
         onVisibleColsChange={handleVisibleColsChange}
+        indicators={indicators}
+        onIndicatorsChange={handleIndicatorsChange}
       />
 
       {showProjectLines && (
@@ -185,6 +203,7 @@ export default function ProjectPage() {
             focusSignal={focusSignal}
             showCriticalPath={showCriticalPath}
             visibleCols={visibleCols}
+            indicators={indicators}
             readOnly={compareLock}
             showComparison={showComparison}
           />

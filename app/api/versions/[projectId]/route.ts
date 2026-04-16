@@ -71,6 +71,17 @@ export async function POST(req: NextRequest, { params }: Params) {
     const statusDate: string | null = body.status_date ?? null
     const description: string | null = body.description ?? null
 
+    // 禁止保存"未来"日期的版本：状态日期不得超过服务器当前日期
+    if (statusDate) {
+      const now = new Date()
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+      if (statusDate > today) {
+        await client.query('ROLLBACK')
+        client.release()
+        return NextResponse.json(failure(`状态日期不能晚于今天 (${today})`, 400), { status: 400 })
+      }
+    }
+
     // 验证：新状态日期必须严格大于上一版本的状态日期
     const lastRes = await client.query(
       `SELECT id, version_number, status_date, snapshot FROM project_versions

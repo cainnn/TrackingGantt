@@ -462,8 +462,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
       const t = task as Record<string, unknown>
       const hasCT = 'constraint_type' in task
       const hasCD = 'constraint_date' in task
+      const hasDL = 'deadline' in task
       const hasStatus = 'status' in task
-      const hasCplx = 'complexity' in task
       const hasRollup = 'rollup' in task
       const hasInactive = 'inactive' in task
       const hasPB = 'project_boundary' in task
@@ -485,11 +485,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
            constraint_type = CASE WHEN $18 THEN $19 ELSE constraint_type END,
            constraint_date = CASE WHEN $20 THEN $21 ELSE constraint_date END,
            status          = CASE WHEN $22 THEN $23 ELSE status END,
-           complexity      = CASE WHEN $24 THEN $25 ELSE complexity END,
-           rollup          = CASE WHEN $26 THEN $27 ELSE rollup END,
-           inactive        = CASE WHEN $28 THEN $29 ELSE inactive END,
-           project_boundary= CASE WHEN $30 THEN $31 ELSE project_boundary END,
-           baseline_end_date = CASE WHEN $32 THEN $33 ELSE baseline_end_date END,
+           rollup          = CASE WHEN $24 THEN $25 ELSE rollup END,
+           inactive        = CASE WHEN $26 THEN $27 ELSE inactive END,
+           project_boundary= CASE WHEN $28 THEN $29 ELSE project_boundary END,
+           baseline_end_date = CASE WHEN $30 THEN $31 ELSE baseline_end_date END,
+           deadline        = CASE WHEN $32 THEN $33 ELSE deadline END,
            updated_at   = NOW()
          WHERE id = $12 AND project_id = $15
          RETURNING *`,
@@ -510,11 +510,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
           hasCT, (t.constraint_type as string | null) ?? null,
           hasCD, normalizeDate(t.constraint_date),
           hasStatus, (t.status as string | null) ?? null,
-          hasCplx, (t.complexity as number | null) ?? null,
           hasRollup, (t.rollup as boolean | null) ?? false,
           hasInactive, (t.inactive as boolean | null) ?? false,
           hasPB, (t.project_boundary as string | null) ?? 'ask',
           hasBE, normalizeDate(t.baseline_end_date),
+          hasDL, normalizeDate(t.deadline),
         ]
       )
       if (!r.rows[0]) continue

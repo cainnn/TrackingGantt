@@ -74,14 +74,15 @@ export async function POST(req: NextRequest, { params }: Params) {
       )
       const cascadedIds = await cascadeDependencies(client, projectId)
       // 级联后更新摘要任务日期
-      await updateSummaryTasksDates(client, projectId)
+      const summaryUpdated = await updateSummaryTasksDates(client, projectId)
 
+      const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id)])]
       let updatedTasks: Record<string, unknown>[] = []
-      if (cascadedIds.length > 0) {
-        const ph = cascadedIds.map((_, i) => `$${i + 2}`).join(',')
+      if (allUpdatedIds.length > 0) {
+        const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')
         const rows = await client.query(
           `SELECT * FROM tasks WHERE project_id = $1 AND id IN (${ph})`,
-          [projectId, ...cascadedIds]
+          [projectId, ...allUpdatedIds]
         )
         updatedTasks = rows.rows as Record<string, unknown>[]
       }
@@ -135,14 +136,16 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
     // 修改依赖类型/延迟后必须重新级联
     const cascadedIds = await cascadeDependencies(client, projectId)
-    await updateSummaryTasksDates(client, projectId)
+    const summaryUpdated = await updateSummaryTasksDates(client, projectId)
 
+    // 合并级联更新 + 摘要任务更新的 ID
+    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id)])]
     let updatedTasks: Record<string, unknown>[] = []
-    if (cascadedIds.length > 0) {
-      const ph = cascadedIds.map((_, i) => `$${i + 2}`).join(',')
+    if (allUpdatedIds.length > 0) {
+      const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')
       const rows = await client.query(
         `SELECT * FROM tasks WHERE project_id = $1 AND id IN (${ph})`,
-        [projectId, ...cascadedIds]
+        [projectId, ...allUpdatedIds]
       )
       updatedTasks = rows.rows as Record<string, unknown>[]
     }

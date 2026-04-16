@@ -1,8 +1,6 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { Task, Dependency } from '@/types'
 
-interface Snapshot { tasks: Task[]; dependencies: Dependency[] }
-
 interface Comparison {
   tasks: Task[]
   versionName: string
@@ -32,8 +30,6 @@ interface TasksState {
   selectedIds: string[]
   loading: boolean
   error: string | null
-  undoStack: Snapshot[]
-  redoStack: Snapshot[]
 }
 
 const initialState: TasksState = {
@@ -48,8 +44,6 @@ const initialState: TasksState = {
   selectedIds: [],
   loading: false,
   error: null,
-  undoStack: [],
-  redoStack: [],
 }
 
 const tasksSlice = createSlice({
@@ -60,8 +54,6 @@ const tasksSlice = createSlice({
       state.tasks = action.payload.tasks
       state.dependencies = action.payload.dependencies
       state.dirtyIds = []
-      state.undoStack = []
-      state.redoStack = []
     },
     addTasks(state, action: PayloadAction<Task[]>) {
       state.tasks.push(...action.payload)
@@ -147,28 +139,6 @@ const tasksSlice = createSlice({
       state.diffFilter = null
       state.dirtyIds = []
       state.selectedIds = []
-      state.undoStack = []
-      state.redoStack = []
-    },
-    // ── Undo / Redo ──────────────────────────────────────────────────────
-    saveSnapshot(state) {
-      state.undoStack.push({ tasks: [...state.tasks], dependencies: [...state.dependencies] })
-      if (state.undoStack.length > 50) state.undoStack.shift()
-      state.redoStack = []
-    },
-    undo(state) {
-      if (state.undoStack.length === 0) return
-      state.redoStack.push({ tasks: [...state.tasks], dependencies: [...state.dependencies] })
-      const prev = state.undoStack.pop()!
-      state.tasks = prev.tasks
-      state.dependencies = prev.dependencies
-    },
-    redo(state) {
-      if (state.redoStack.length === 0) return
-      state.undoStack.push({ tasks: [...state.tasks], dependencies: [...state.dependencies] })
-      const next = state.redoStack.pop()!
-      state.tasks = next.tasks
-      state.dependencies = next.dependencies
     },
   },
 })
@@ -182,6 +152,5 @@ export const {
   setDiffFilter, clearDiffFilter,
   setLoading, setError, clearTasks,
   addDependency, removeDependency, updateDependency,
-  saveSnapshot, undo, redo,
 } = tasksSlice.actions
 export default tasksSlice.reducer

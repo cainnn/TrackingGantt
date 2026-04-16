@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
-  addTasks, updateTasks, deleteTasks, saveSnapshot,
+  addTasks, updateTasks, deleteTasks,
   addDependency, removeDependency, setTasks,
 } from '@/store/slices/tasksSlice'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
@@ -86,7 +86,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             })
             const data = await res.json()
             if (data.ok) {
-              dispatch(saveSnapshot())
+
               dispatch(addTasks(Array.isArray(data.value) ? data.value : [data.value]))
               result = `Created task "${args.name}" (code: ${data.value?.task_code ?? data.value?.[0]?.task_code ?? '?'})`
             } else {
@@ -102,7 +102,6 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             for (const key of ['name', 'start_date', 'end_date', 'duration', 'assignee', 'percent_done', 'is_milestone', 'note']) {
               if (args[key] !== undefined) updates[key] = args[key]
             }
-            dispatch(saveSnapshot())
             await enqueueTaskPut(projectId, [updates])
             const task = tasks.find(t => t.id === id)
             if (task) dispatch(updateTasks([{ ...task, ...updates } as Task]))
@@ -113,7 +112,6 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           case 'delete_tasks': {
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
-            dispatch(saveSnapshot())
             const res = await authFetch(`/api/tasks/${projectId}`, {
               method: 'DELETE',
               headers: authFetchHeaders(true),
@@ -146,7 +144,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             })
             const data = await res.json()
             if (data.ok) {
-              dispatch(saveSnapshot())
+
               dispatch(addDependency(data.value))
               result = `Added dependency ${args.from_task_code} -> ${args.to_task_code}`
             } else {
@@ -168,7 +166,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             })
             const data = await res.json()
             if (data.ok) {
-              dispatch(saveSnapshot())
+
               dispatch(removeDependency(dep.id))
               result = `Removed dependency ${args.from_task_code} -> ${args.to_task_code}`
             } else {
@@ -246,7 +244,6 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             const updates = args.updates as Record<string, unknown>
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
-            dispatch(saveSnapshot())
             const putPayload = ids.map(id => ({ id, ...updates }))
             await enqueueTaskPut(projectId, putPayload)
             const updatedTasks = tasks
@@ -551,7 +548,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   ]
 
   return (
-    <div className="relative z-10 flex flex-col h-full border-l border-gray-200 bg-white" style={{ width: 400 }}>
+    <div className="relative z-30 flex flex-col h-full border-l border-gray-200 bg-white isolate" style={{ width: 400 }}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-2">
@@ -571,8 +568,8 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {messages.length === 0 && (
-          <div className="space-y-3">
-            <p className="text-sm text-gray-500">
+          <div className="space-y-2">
+            <p className="text-sm text-gray-500 mb-2">
               你好！我是 AI 助手，可以帮你管理甘特图中的任务。试试下面的例子：
             </p>
             <div className="space-y-2">

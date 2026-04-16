@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   auto_schedule BOOLEAN DEFAULT true,
   constraint_type VARCHAR(40) DEFAULT 'asap',
   constraint_date DATE,
+  deadline DATE,
   status VARCHAR(20),
-  complexity INTEGER,
   note TEXT,
   order_index INTEGER DEFAULT 0,
   rollup BOOLEAN DEFAULT false,
@@ -143,6 +143,10 @@ ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS inactive BOOLEAN DEFAULT false
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS project_boundary VARCHAR(20) DEFAULT 'ask';
 ALTER TABLE dependencies ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date DATE;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_type VARCHAR(40) DEFAULT 'asap';
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_date DATE;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS deadline DATE;
+ALTER TABLE tasks        DROP COLUMN IF EXISTS complexity;
 
 -- 历史变更审计：记录对"状态日期之前"的任务所做的回溯修改
 CREATE TABLE IF NOT EXISTS task_change_log (

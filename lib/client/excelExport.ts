@@ -80,7 +80,6 @@ const COLUMNS: Partial<ExcelJS.Column>[] = [
   { header: '非激活',   key: 'inactive',  width: 7 },
   { header: '项目边界', key: 'project_boundary', width: 10 },
   { header: '状态',     key: 'status',    width: 10 },
-  { header: '复杂度',   key: 'complexity', width: 7 },
   { header: '基线结束', key: 'baseline_end_date', width: 13 },
   { header: '备注',     key: 'note',      width: 22 },
 ]
@@ -135,7 +134,6 @@ function buildRowData(
     inactive: t.inactive ? '是' : '否',
     project_boundary: t.project_boundary ?? '',
     status: t.status ?? '',
-    complexity: t.complexity ?? '',
     baseline_end_date: t.baseline_end_date?.split('T')[0] ?? '',
     note: t.note ?? '',
   }

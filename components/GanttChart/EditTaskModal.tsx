@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { updateTasks, saveSnapshot, addDependency, updateDependency, removeDependency, setTasks } from '@/store/slices/tasksSlice'
+import { updateTasks, addDependency, updateDependency, removeDependency, setTasks } from '@/store/slices/tasksSlice'
 import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { markDirty } from '@/store/slices/tasksSlice'
@@ -52,6 +52,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [durationIn,  setDurationIn]  = useState('')
   const [constraintType, setConstraintType] = useState<string>('asap')
   const [constraintDate, setConstraintDate] = useState<string>('')
+  const [deadline, setDeadline] = useState<string>('')
   const [manualSchedule, setManualSchedule] = useState(false)
   const [rollup, setRollup] = useState(false)
   const [inactive, setInactive] = useState(false)
@@ -121,6 +122,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     setDurationIn(task.duration != null ? String(task.duration) : '')
     setConstraintType(task.constraint_type ?? 'asap')
     setConstraintDate(task.constraint_date?.split('T')[0] ?? '')
+    setDeadline(task.deadline?.split('T')[0] ?? '')
     setManualSchedule(task.auto_schedule === false)
     setRollup(task.rollup ?? false)
     setInactive(task.inactive ?? false)
@@ -162,7 +164,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (addingPred) return
     setAddingPred(true)
     try {
-      dispatch(saveSnapshot())
+
       const res = await authFetch(`/api/dependencies/${projectId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -187,7 +189,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── Remove predecessor ───────────────────────────────────────────────
   const handleRemovePredecessor = useCallback(async (depId: string) => {
-    dispatch(saveSnapshot())
     dispatch(removeDependency(depId))
     await authFetch(`/api/dependencies/${projectId}`, {
       method: 'DELETE',
@@ -203,7 +204,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (addingSucc) return
     setAddingSucc(true)
     try {
-      dispatch(saveSnapshot())
+
       const res = await authFetch(`/api/dependencies/${projectId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -226,7 +227,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── Remove successor ────────────────────────────────────────────────
   const handleRemoveSuccessor = useCallback(async (depId: string) => {
-    dispatch(saveSnapshot())
     dispatch(removeDependency(depId))
     await authFetch(`/api/dependencies/${projectId}`, {
       method: 'DELETE',
@@ -250,7 +250,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   // ── Toggle manual mode ───────────────────────────────────────────────
   const handleToggleManual = useCallback(async (manual: boolean) => {
     if (!task) return
-    dispatch(saveSnapshot())
     if (manual) {
       dispatch(updateTasks([{ ...task, auto_schedule: false }]))
       dispatch(markDirty([task.id]))
@@ -326,28 +325,25 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       note: note || null,
       constraint_type: constraintType || null,
       constraint_date: CONSTRAINT_NEEDS_DATE.has(constraintType) ? (constraintDate || null) : null,
+      deadline: deadline || null,
       auto_schedule: !manualSchedule,
       rollup,
       inactive,
       project_boundary: projectBoundary,
     }
-    dispatch(saveSnapshot())
     dispatch(updateTasks([updated]))
-
     dispatch(markDirty([task.id]))
 
     // Save lag/active changes (both incoming and outgoing)
     const allEditableDeps = [...incomingDeps, ...outgoingDeps]
-    let anyDepChanged = false
     for (const dep of allEditableDeps) {
       const newLag = lagEdits[dep.id] ?? dep.lag ?? 0
       const newActive = activeEdits[dep.id] ?? dep.active ?? true
       const lagChanged = newLag !== (dep.lag ?? 0)
       const actChanged = newActive !== (dep.active ?? true)
       if (lagChanged || actChanged) {
-        anyDepChanged = true
         dispatch(updateDependency({ ...dep, lag: newLag, active: newActive }))
-        await authFetch(`/api/dependencies/${projectId}`, {
+        const res = await authFetch(`/api/dependencies/${projectId}`, {
           method: 'PUT', headers: authFetchHeaders(true),
           body: JSON.stringify({
             id: dep.id,
@@ -355,10 +351,17 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
             ...(actChanged ? { active: newActive } : {}),
           }),
         })
+        // 用 PUT 返回的级联结果局部更新，不做全量 refreshTasks（避免覆盖本地 dirty 状态）
+        if (res.ok) {
+          try {
+            const d = await res.json()
+            if (d.ok && d.value?.updatedTasks?.length) {
+              dispatch(updateTasks(d.value.updatedTasks))
+              dispatch(markDirty(d.value.updatedTasks.map((t: Task) => t.id)))
+            }
+          } catch { /* ignore */ }
+        }
       }
-    }
-    if (anyDepChanged) {
-      await refreshTasks()
     }
     onClose()
   }
@@ -491,7 +494,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                         </span>
                         <span className="truncate text-gray-700">{fromTask?.name ?? '未知任务'}</span>
                       </div>
-                      <div className="px-2 py-1">
+                      <div className="px-2 py-1" onClick={e => e.stopPropagation()}>
                         <select
                           value={dep.type}
                           onChange={e => handleDepTypeChange(dep.id, Number(e.target.value))}
@@ -499,14 +502,14 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                           {DEP_TYPE_CN.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </select>
                       </div>
-                      <div className="px-2 py-1 flex items-center gap-1">
+                      <div className="px-2 py-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
                         <input type="number"
                           value={lagEdits[dep.id] ?? dep.lag ?? 0}
                           onChange={e => setLagEdits(prev => ({ ...prev, [dep.id]: Number(e.target.value) || 0 }))}
                           className="w-12 border border-gray-300 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-blue-400" />
                         <span className="text-[11px] text-gray-400">天</span>
                       </div>
-                      <div className="px-2 py-1 flex justify-center">
+                      <div className="px-2 py-1 flex justify-center" onClick={e => e.stopPropagation()}>
                         <input type="checkbox"
                           checked={activeEdits[dep.id] ?? true}
                           onChange={e => setActiveEdits(prev => ({ ...prev, [dep.id]: e.target.checked }))}
@@ -595,7 +598,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                         </span>
                         <span className="truncate text-gray-700">{toTask?.name ?? '未知任务'}</span>
                       </div>
-                      <div className="px-2 py-1">
+                      <div className="px-2 py-1" onClick={e => e.stopPropagation()}>
                         <select
                           value={dep.type}
                           onChange={e => handleDepTypeChange(dep.id, Number(e.target.value))}
@@ -603,14 +606,14 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                           {DEP_TYPE_CN.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                         </select>
                       </div>
-                      <div className="px-2 py-1 flex items-center gap-1">
+                      <div className="px-2 py-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
                         <input type="number"
                           value={lagEdits[dep.id] ?? dep.lag ?? 0}
                           onChange={e => setLagEdits(prev => ({ ...prev, [dep.id]: Number(e.target.value) || 0 }))}
                           className="w-12 border border-gray-300 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-blue-400" />
                         <span className="text-[11px] text-gray-400">天</span>
                       </div>
-                      <div className="px-2 py-1 flex justify-center">
+                      <div className="px-2 py-1 flex justify-center" onClick={e => e.stopPropagation()}>
                         <input type="checkbox"
                           checked={activeEdits[dep.id] ?? true}
                           onChange={e => setActiveEdits(prev => ({ ...prev, [dep.id]: e.target.checked }))}
@@ -716,6 +719,26 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                        onChange={e => handleDurationChange(e.target.value)}
                        placeholder="天数"
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">截止日期</label>
+                <div className="flex items-center gap-2">
+                  <input type="date" value={deadline}
+                         onChange={e => setDeadline(e.target.value)}
+                         className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                  {deadline && (
+                    <button type="button"
+                            onClick={() => setDeadline('')}
+                            className="text-gray-400 hover:text-gray-600 text-sm px-1"
+                            title="清除">×</button>
+                  )}
+                </div>
+                {deadline && endDate && endDate > deadline && (
+                  <div className="mt-1 text-[11px] text-red-600 flex items-center gap-1">
+                    <span aria-hidden>⚠</span>
+                    <span>计划结束日期 {endDate} 已超出截止日期 {deadline}</span>
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <input type="checkbox" id="edit-milestone" checked={isMilestone}

@@ -38,8 +38,8 @@ export interface Task {
   auto_schedule?: boolean  // 默认 true：根据前置依赖自动调整开始时间
   constraint_type?: string | null  // 限制类型: asap | alap | startnoearlierthan | finishnolaterthan | null
   constraint_date?: string | null
+  deadline?: string | null    // 截止日期：计划结束日期超过此日期时需要提示
   status?: string | null      // 状态: notstarted | started | completed | late
-  complexity?: number | null  // 复杂性: 0=Easy 1=Normal 2=Hard 3=Impossible
   rollup?: boolean
   inactive?: boolean
   project_boundary?: string | null  // ask | honor | ignore

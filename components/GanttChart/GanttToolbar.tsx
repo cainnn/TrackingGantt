@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
-  setSelectedIds, setTasks, saveSnapshot, undo, redo,
+  setSelectedIds, setTasks,
   markDirty, clearDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
@@ -16,7 +16,7 @@ import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
 import { parseExcelFile, validateImportData, type ImportTask } from '@/lib/client/excelImport'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
-import { OPTIONAL_COL_META, type OptionalCol } from './GanttChart'
+import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsConfig } from './GanttChart'
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
@@ -115,6 +115,53 @@ const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="n
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V2M5 5l3-3 3 3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 
+// 年-月-日顺序的日期输入：显示 YYYY-MM-DD，点击触发原生日历选择
+function YmdDateInput({
+  value, max, onChange,
+}: {
+  value: string
+  max?: string
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  const openPicker = () => {
+    const el = ref.current
+    if (!el) return
+    if (typeof el.showPicker === 'function') {
+      try { el.showPicker(); return } catch { /* fall through to focus */ }
+    }
+    el.focus()
+  }
+  return (
+    <div className="relative inline-flex items-center">
+      <input
+        readOnly
+        type="text"
+        value={value}
+        placeholder="YYYY-MM-DD"
+        onClick={openPicker}
+        onFocus={openPicker}
+        className="border border-gray-300 rounded pl-2 pr-7 h-8 text-[13px] w-[120px] bg-white cursor-pointer focus:outline-none focus:border-blue-400"
+      />
+      <svg viewBox="0 0 24 24" width="14" height="14"
+           className="absolute right-2 pointer-events-none text-gray-500"
+           fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2"/>
+        <path d="M16 2v4M8 2v4M3 10h18"/>
+      </svg>
+      <input
+        ref={ref}
+        type="date"
+        value={value}
+        max={max}
+        onChange={onChange}
+        className="absolute inset-0 opacity-0 pointer-events-none"
+        tabIndex={-1}
+      />
+    </div>
+  )
+}
+
 // ── Props ─────────────────────────────────────────────────────────────────
 interface GanttToolbarProps {
   projectId: string
@@ -139,6 +186,8 @@ interface GanttToolbarProps {
   onToggleCompareLock?: (next: boolean) => void
   visibleCols?: OptionalCol[]
   onVisibleColsChange?: (cols: OptionalCol[]) => void
+  indicators?: IndicatorsConfig
+  onIndicatorsChange?: (next: IndicatorsConfig) => void
 }
 
 export default function GanttToolbar({
@@ -160,9 +209,11 @@ export default function GanttToolbar({
   onToggleCompareLock,
   visibleCols,
   onVisibleColsChange,
+  indicators,
+  onIndicatorsChange,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
-  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, undoStack, redoStack, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
+  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
 
@@ -193,8 +244,18 @@ export default function GanttToolbar({
     return () => window.removeEventListener('mousedown', close)
   }, [colSettingsOpen])
 
-  const canUndo = undoStack.length > 0
-  const canRedo = redoStack.length > 0
+  // Indicators dropdown
+  const [indicatorsOpen, setIndicatorsOpen] = useState(false)
+  const indicatorsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!indicatorsOpen) return
+    const close = (e: MouseEvent) => {
+      if (indicatorsRef.current && !indicatorsRef.current.contains(e.target as Node)) setIndicatorsOpen(false)
+    }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [indicatorsOpen])
+
   const hasSelection = selectedIds.length > 0
 
   const [editModalOpen, setEditModalOpen] = useState(false)
@@ -424,12 +485,14 @@ export default function GanttToolbar({
 
   const handleExportJpeg = useCallback(async () => {
     setExportDropdown(false)
-    await exportToJpeg(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines)
+    await exportToJpeg(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines,
+      currentProject?.start_date, currentProject?.end_date)
   }, [tasks, dependencies, currentProject, projectLines])
 
   const handleExportPdf = useCallback(async () => {
     setExportDropdown(false)
-    await exportToPdf(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines)
+    await exportToPdf(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines,
+      currentProject?.start_date, currentProject?.end_date)
   }, [tasks, dependencies, currentProject, projectLines])
 
   // ── Excel import ──────────────────────────────────────────────────────
@@ -551,7 +614,7 @@ export default function GanttToolbar({
     const rootTasks = tasks.filter(t => t.parent_id === null)
     const nextIndex = rootTasks.length > 0
       ? Math.max(...rootTasks.map(t => t.order_index)) + 1 : 0
-    dispatch(saveSnapshot())
+
     const res = await authFetch(`/api/tasks/${projectId}`, {
       method: 'POST',
       headers: authFetchHeaders(true),
@@ -573,7 +636,7 @@ export default function GanttToolbar({
   const handleDeleteTasks = useCallback(async () => {
     if (!hasSelection) return
     if (!confirm(`确定删除 ${selectedIds.length} 个任务？`)) return
-    dispatch(saveSnapshot())
+
     const res = await authFetch(`/api/tasks/${projectId}`, {
       method: 'DELETE',
       headers: authFetchHeaders(true),
@@ -626,7 +689,7 @@ export default function GanttToolbar({
         }
       })
     }
-    dispatch(saveSnapshot())
+
 
     // 升级时删除被升级任务与旧父任务之间的依赖关系
     const promotedIds = new Set(toPromote.map(t => t.id))
@@ -705,7 +768,7 @@ export default function GanttToolbar({
       })
     }
     if (allUpdates.length === 0) return
-    dispatch(saveSnapshot())
+
 
     // 降级时：删除被降级任务与新父任务之间的依赖，
     // 并且当 anchor 变为父级任务时，取消 anchor 上的所有依赖（父级任务不允许依赖）
@@ -763,7 +826,7 @@ export default function GanttToolbar({
 
   const handlePaste = useCallback(async () => {
     if (clipboard.length === 0) return
-    dispatch(saveSnapshot())
+
 
     // ── 确定插入位置：选中任务的正下方 ────────────────────────────────
     const flat = getFlatOrder(tasks)
@@ -879,13 +942,23 @@ export default function GanttToolbar({
   // 自由移动状态日期（仅更新 Redux + 后端，不创建版本）
   const handleStatusDatePick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value || null
+    // 禁止选择未来日期
+    if (val) {
+      const now = new Date()
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+      if (val > today) {
+        alert(`状态日期不能晚于今天 (${today})`)
+        e.target.value = currentProject?.status_date?.split('T')[0] ?? ''
+        return
+      }
+    }
     dispatch(setStatusDate({ projectId, statusDate: val }))
     await authFetch(`/api/projects/${projectId}`, {
       method: 'PUT',
       headers: authFetchHeaders(true),
       body: JSON.stringify({ status_date: val }),
     })
-  }, [dispatch, projectId])
+  }, [dispatch, projectId, currentProject?.status_date])
 
   // 确认变更：保存所有改动 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
@@ -893,15 +966,34 @@ export default function GanttToolbar({
     if (!sd || statusDateSaving) return
     setStatusDateSaving(true)
 
-    // 1. Recalculate percent_done + 快照 baseline_end_date（用于下次延期判定）
+    // 1. Recalculate percent_done + 快照 baseline_end_date
+    //    baseline 取"上一期版本快照"的 end_date；若无上期，则用当前 end（首期无法比较）
     const sdDate = new Date(sd)
+    const prevEndByTaskId = new Map<string, string | null>()
+    const prevVersion = versions[0]
+    if (prevVersion) {
+      try {
+        const r = await authFetch(`/api/versions/${projectId}?id=${prevVersion.id}`)
+        const d = await r.json()
+        if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
+          for (const pt of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
+            prevEndByTaskId.set(pt.id, pt.end_date ? String(pt.end_date).split('T')[0] : null)
+          }
+        }
+      } catch { /* ignore, 退化为当前 end */ }
+    }
     const updated = tasks
       .filter(t => t.start_date && t.end_date)
-      .map(t => ({
-        ...t,
-        percent_done: calcPercent(t, sdDate),
-        baseline_end_date: (t.end_date ?? '').split('T')[0] || null,
-      }))
+      .map(t => {
+        const prevEnd = prevEndByTaskId.get(t.id) ?? null
+        // 上期有该任务 → baseline = 上期 end；上期无（新增任务）或首期 → baseline = 当前 end
+        const baseline = prevEnd ?? ((t.end_date ?? '').split('T')[0] || null)
+        return {
+          ...t,
+          percent_done: calcPercent(t, sdDate),
+          baseline_end_date: baseline,
+        }
+      })
     if (updated.length > 0) {
       dispatch(updateTasks(updated))
       const payload = updated.map(t => ({
@@ -926,7 +1018,7 @@ export default function GanttToolbar({
         order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
         assignee: t.assignee, note: t.note,
         constraint_type: t.constraint_type, constraint_date: t.constraint_date,
-        status: t.status, complexity: t.complexity,
+        status: t.status,
         rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
       }))
       await authFetch(`/api/tasks/${projectId}`, {
@@ -1014,8 +1106,6 @@ export default function GanttToolbar({
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return
       if (readOnly) return
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); dispatch(undo()) }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); dispatch(redo()) }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') handleCopy()
       if ((e.ctrlKey || e.metaKey) && e.key === 'v') handlePaste()
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault() }
@@ -1043,22 +1133,6 @@ export default function GanttToolbar({
             <Ic title="编辑任务" disabled={selectedIds.length !== 1}
                      onClick={() => selectedIds.length === 1 && setEditModalOpen(true)}>
               <IcoPencil />
-            </Ic>
-
-            {sep}
-
-            {/* Group 2: Undo / Redo */}
-            <Ic title="撤销 (Ctrl+Z)" disabled={!canUndo} onClick={() => dispatch(undo())}>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3 7v6h6"/>
-                <path d="M3 13a9 9 0 1 0 3-7.7L3 8"/>
-              </svg>
-            </Ic>
-            <Ic title="重做 (Ctrl+Y)" disabled={!canRedo} onClick={() => dispatch(redo())}>
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 7v6h-6"/>
-                <path d="M21 13A9 9 0 1 1 18 5.3L21 8"/>
-              </svg>
             </Ic>
 
             {sep}
@@ -1124,19 +1198,25 @@ export default function GanttToolbar({
             {/* Status date */}
             <div className="flex items-center gap-1.5 relative">
               <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
-              <input
-                type="date"
-                value={currentProject?.status_date?.split('T')[0] ?? ''}
-                onChange={handleStatusDatePick}
-                className="border border-gray-300 rounded px-2 h-8 text-[13px] focus:outline-none focus:border-blue-400"
-              />
+              {(() => {
+                const now = new Date()
+                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+                const v = currentProject?.status_date?.split('T')[0] ?? ''
+                return (
+                  <YmdDateInput value={v} max={today} onChange={handleStatusDatePick} />
+                )
+              })()}
               {(() => {
                 const sd = currentProject?.status_date?.split('T')[0] ?? null
+                const now = new Date()
+                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+                const isFuture = !!sd && sd > today
                 const statusDateAdvanced = !!sd && (!lastVersionDate || sd > lastVersionDate)
-                const canSubmit = !!currentProject?.status_date && !statusDateSaving && (hasChanges || statusDateAdvanced)
+                const canSubmit = !!currentProject?.status_date && !statusDateSaving && !isFuture && (hasChanges || statusDateAdvanced)
                 const label = hasChanges ? '确认变更' : '保存状态日期'
                 const tip = !currentProject?.status_date
                   ? '请先设置状态日期'
+                  : isFuture ? `状态日期不能晚于今天 (${today})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : statusDateAdvanced ? '没有任务变更，直接为当前状态日期保存一个快照'
                   : '状态日期未变化，无需保存'
@@ -1144,6 +1224,9 @@ export default function GanttToolbar({
                   <button
                     onClick={() => {
                       if (!sd) { alert('请先设置状态日期'); return }
+                      if (sd > today) {
+                        alert(`状态日期不能晚于今天 (${today})`); return
+                      }
                       if (lastVersionDate && sd < lastVersionDate) {
                         alert(`状态日期不能早于上一版本 (${lastVersionDate})`); return
                       }
@@ -1226,11 +1309,9 @@ export default function GanttToolbar({
           <>
             {sep}
             <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
-            <input
-              type="date"
+            <YmdDateInput
               value={currentProject?.status_date?.split('T')[0] ?? ''}
               onChange={handleStatusDatePick}
-              className="border border-gray-300 rounded px-2 h-8 text-[13px] focus:outline-none focus:border-blue-400"
             />
           </>
         )}
@@ -1462,6 +1543,38 @@ export default function GanttToolbar({
                       }}
                     />
                     {col.label}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Indicators settings */}
+        {indicators && onIndicatorsChange && (
+          <div ref={indicatorsRef} className="relative">
+            <Ic title="指示器" onClick={() => setIndicatorsOpen(v => !v)} active={indicatorsOpen}>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 4v16"/>
+                <path d="M4 4h12l-3 4 3 4H4"/>
+                <circle cx="18" cy="18" r="2" fill="currentColor"/>
+              </svg>
+            </Ic>
+            {indicatorsOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[160px] whitespace-nowrap">
+                <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold">
+                  指示器
+                </div>
+                {INDICATOR_META.map(item => (
+                  <label key={item.key}
+                         className="flex items-center gap-2 px-3 py-1.5 text-[12px] cursor-pointer hover:bg-blue-50">
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 accent-blue-500"
+                      checked={!!indicators[item.key]}
+                      onChange={() => onIndicatorsChange({ ...indicators, [item.key]: !indicators[item.key] })}
+                    />
+                    {item.label}
                   </label>
                 ))}
               </div>

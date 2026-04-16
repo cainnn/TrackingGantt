@@ -5,7 +5,7 @@ import ReactDOM from 'react-dom'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   setSelectedIds, setTasks, updateTasks, addTasks, deleteTasks,
-  addDependency, removeDependency, updateDependency, saveSnapshot,
+  addDependency, removeDependency, updateDependency,
   copyTasks,
 } from '@/store/slices/tasksSlice'
 import type { Task, Dependency } from '@/types'
@@ -35,11 +35,11 @@ const COL_PRED   =  56
 const COL_SUCC   =  56
 const COL_CTYPE  = 100
 const COL_CDATE  =  88
+const COL_DDATE  =  88
 const COL_STATUS =  80
-const COL_CPLX   =  80
 const MIN_NAME_W   = 60
 
-// 限制类型 & 状态 & 复杂性 候选值
+// 限制类型 & 状态候选值
 export { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE, CONSTRAINT_NEEDS_DATE } from './constants'
 import { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE } from './constants'
 export type AutoStatus = 'notstarted' | 'started' | 'completed' | 'ahead' | 'late' | 'pushed'
@@ -62,46 +62,58 @@ function isEndExtended(t: Pick<Task, 'end_date' | 'baseline_end_date'>): boolean
 export function computeTaskStatus(
   t: Task,
   statusDate: Date | null,
-  ctx?: { allTasks: Task[]; deps: { from_task_id: string; to_task_id: string; active?: boolean }[] },
-): AutoStatus {
+  ctx?: { allTasks: Task[]; deps: { from_task_id: string; to_task_id: string; active?: boolean; lag?: number }[] },
+): { status: AutoStatus; reason: string } {
   const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
   const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : null
-  if ((t.percent_done ?? 0) >= 100) {
-    if (baseline && curEnd && curEnd < baseline) return 'ahead'
-    return 'completed'
+  const ref      = statusDate ?? new Date()
+  const timePct  = timeBasedPercent(t, ref)
+  if (timePct >= 100 || (t.percent_done ?? 0) >= 100) {
+    if (baseline && curEnd && curEnd < baseline) return { status: 'ahead', reason: '实际完成早于基线' }
+    return { status: 'completed', reason: '' }
   }
   if (isEndExtended(t)) {
     // 区分"被前置拖累"(pushed) vs "自己延期"(late)：
     // 条件：尚未开工 + 至少一个激活前置任务自身也延长了
     if (ctx) {
-      const ref = statusDate ?? new Date()
       const started = t.start_date && new Date(t.start_date) <= ref
       if (!started) {
         const byId = new Map(ctx.allTasks.map(x => [x.id, x] as const))
-        const hasDelayedPred = ctx.deps.some(d =>
+        // 找到导致 pushed 的前置任务（自身延长或有 lag）
+        const delayedPredDeps = ctx.deps.filter(d =>
           d.to_task_id === t.id
           && d.active !== false
           && (() => { const p = byId.get(d.from_task_id); return p ? isEndExtended(p) : false })()
         )
-        if (hasDelayedPred) return 'pushed'
+        const lagPredDeps = ctx.deps.filter(d =>
+          d.to_task_id === t.id
+          && d.active !== false
+          && (d.lag ?? 0) > 0
+        )
+        if (delayedPredDeps.length > 0 || lagPredDeps.length > 0) {
+          const reasons: string[] = []
+          if (delayedPredDeps.length > 0) {
+            const names = delayedPredDeps.map(d => byId.get(d.from_task_id)?.name ?? '?').slice(0, 3)
+            reasons.push(`前置任务延期: ${names.join('、')}`)
+          }
+          if (lagPredDeps.length > 0) {
+            const lagDescs = lagPredDeps.map(d => {
+              const pName = byId.get(d.from_task_id)?.name ?? '?'
+              return `${pName}(lag=${d.lag}天)`
+            }).slice(0, 3)
+            reasons.push(`依赖延迟: ${lagDescs.join('、')}`)
+          }
+          return { status: 'pushed', reason: reasons.join('; ') }
+        }
       }
     }
-    return 'late'
+    return { status: 'late', reason: '自身工期延长' }
   }
-  const ref = statusDate ?? new Date()
-  const timePct = timeBasedPercent(t, ref)
-  if (timePct > 0) return 'started'
-  return 'notstarted'
+  if (timePct > 0) return { status: 'started', reason: '' }
+  return { status: 'notstarted', reason: '' }
 }
-export const COMPLEXITY_OPTIONS: { value: number; label: string }[] = [
-  { value: 0, label: 'Easy' },
-  { value: 1, label: 'Normal' },
-  { value: 2, label: 'Hard' },
-  { value: 3, label: 'Impossible' },
-]
-
 // Optional column keys (编号 and 任务名称 are always shown)
-export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'ctype' | 'cdate' | 'status' | 'complexity' | 'inactive'
+export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive'
 export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
   { key: 'assignee',   label: '责任人',   width: COL_ASSIGN },
   { key: 'pct',        label: '完成',     width: COL_PCT },
@@ -113,11 +125,25 @@ export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number
   { key: 'lag',        label: '延迟',     width: 60 },
   { key: 'ctype',      label: '限制类型', width: COL_CTYPE },
   { key: 'cdate',      label: '限制日期', width: COL_CDATE },
+  { key: 'ddate',      label: '截止日期', width: COL_DDATE },
   { key: 'status',     label: '状态',     width: COL_STATUS },
-  { key: 'complexity', label: '复杂性',   width: COL_CPLX },
   { key: 'inactive',   label: '无效',     width: 60 },
 ]
-export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'status', 'complexity']
+export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'ddate', 'status']
+
+// 指示器配置：在任务条上绘制附加标记
+export interface IndicatorsConfig {
+  deadlineDate: boolean   // 截止日期（红色虚线 + 旗子，超期时高亮）
+  constraintDate: boolean // 限制日期（紫色菱形 + 短横线）
+}
+export const DEFAULT_INDICATORS: IndicatorsConfig = {
+  deadlineDate: true,
+  constraintDate: true,
+}
+export const INDICATOR_META: { key: keyof IndicatorsConfig; label: string }[] = [
+  { key: 'deadlineDate',   label: '截止日期' },
+  { key: 'constraintDate', label: '限制日期' },
+]
 const INIT_LEFT_W = COL_NUM + COL_CHECK + COL_NAME + DEFAULT_VISIBLE_COLS.reduce((s, k) => s + (OPTIONAL_COL_META.find(c => c.key === k)?.width ?? 0), 0)
 
 // ─── Date helpers ──────────────────────────────────────────────────────────
@@ -325,6 +351,7 @@ interface Props {
   focusSignal?: number
   showCriticalPath?: boolean
   visibleCols?: OptionalCol[]
+  indicators?: IndicatorsConfig
   readOnly?: boolean
   showComparison?: boolean
 }
@@ -338,6 +365,7 @@ export default function GanttChart({
   focusSignal = 0,
   showCriticalPath = false,
   visibleCols = DEFAULT_VISIBLE_COLS,
+  indicators = DEFAULT_INDICATORS,
   readOnly = false,
   showComparison = true,
 }: Props) {
@@ -420,6 +448,22 @@ export default function GanttChart({
   const [connect, setConnect]     = useState<ConnectState|null>(null)
   const [hoveredBar, setHoveredBar] = useState<string|null>(null)
   const [selectedDep, setSelectedDep] = useState<string|null>(null)
+
+  // ── Dependency line drag (调整 lag) ────────────────────────────────────
+  interface DepDragState {
+    depId: string
+    startX: number       // mousedown 时的 SVG X 坐标
+    startLag: number     // 起始 lag
+    deltaDays: number    // 当前拖拽产生的天数差
+    labelX: number       // 提示标签 X
+    labelY: number       // 提示标签 Y
+    dragging: boolean    // 是否进入真正拖拽（移动超过阈值）
+  }
+  const [depDrag, setDepDrag] = useState<DepDragState|null>(null)
+  // 保持一个可转发的 handleDepLagChange 引用，以便在全局 mouseup 中调用（声明顺序靠后）
+  const handleDepLagChangeRef = useRef<((depId: string, newLag: number) => Promise<void>) | null>(null)
+  // 标记刚结束一次真实拖拽，用于抑制随后的 click 事件
+  const depDragJustEndedRef = useRef(false)
 
   // ── Row reorder drag ────────────────────────────────────────────────────
   const [rowDrag, setRowDrag] = useState<{ taskId: string; startY: number; dragging: boolean }|null>(null)
@@ -727,6 +771,8 @@ export default function GanttChart({
     // 列筛选（多列并列）
     const activeFilterEntries = Object.entries(colFilters).filter(([, v]) => v && (v as Set<string>).size > 0) as [OptionalCol, Set<string>][]
     if (activeFilterEntries.length > 0) {
+      const sdForStatus = statusDate ? new Date(statusDate) : null
+      const statusCtx = { allTasks: tasks, deps }
       const colVal = (t: Task, k: OptionalCol): string => {
         switch (k) {
           case 'assignee':   return t.assignee ?? ''
@@ -739,8 +785,8 @@ export default function GanttChart({
           case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d ? String(d.lag ?? 0) : '' }
           case 'ctype':      return t.constraint_type ?? 'asap'
           case 'cdate':      return (t.constraint_date ?? '').split('T')[0]
-          case 'status':     return t.status ?? ''
-          case 'complexity': return t.complexity != null ? String(t.complexity) : ''
+          case 'ddate':      return (t.deadline ?? '').split('T')[0]
+          case 'status':     return computeTaskStatus(t, sdForStatus, statusCtx).status
           case 'inactive':   return t.inactive ? '是' : '否'
         }
       }
@@ -782,8 +828,8 @@ export default function GanttChart({
           case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d?.lag ?? 0 }
           case 'ctype':      return t.constraint_type ?? ''
           case 'cdate':      return t.constraint_date ?? ''
+          case 'ddate':      return t.deadline ?? ''
           case 'status':     return t.status ?? ''
-          case 'complexity': return t.complexity ?? -1
           default:           return 0
         }
       }
@@ -814,7 +860,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, statusDate])
 
   // ── Row index map (based on displayed rows for arrow positioning) ────────
   const rowIdx = useMemo(() => {
@@ -1426,10 +1472,20 @@ export default function GanttChart({
         const maxNameW = (panelCollapsed ? 0 : panelW) - COL_NUM - COL_CHECK - 6
         setNameW(Math.max(MIN_NAME_W, Math.min(maxNameW, nameDrag.startW + delta)))
       }
+
+      if (depDrag) {
+        const dx = svgX - depDrag.startX
+        const deltaDays = Math.round(dx / colW)
+        if (!depDrag.dragging && Math.abs(dx) > 3) {
+          setDepDrag(prev => prev ? { ...prev, dragging: true, deltaDays } : null)
+        } else if (depDrag.dragging && deltaDays !== depDrag.deltaDays) {
+          setDepDrag(prev => prev ? { ...prev, deltaDays } : null)
+        }
+      }
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, flatRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag])
+  }, [drag, connect, rowDrag, flatRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1537,7 +1593,7 @@ export default function GanttChart({
         }
 
         if (dirtyList.length > 0 || allUpdated.length > 0) {
-          dispatch(saveSnapshot())
+      
           // 乐观更新UI：包含级联下游 + 摘要任务，界面立即反映关联变更
           dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
           // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
@@ -1563,7 +1619,7 @@ export default function GanttChart({
             if (svgX >= hitX && svgX <= hitX+tw) {
               const dup = deps.some(d => d.from_task_id===connect.fromTaskId && d.to_task_id===toTask.id)
               if (!dup) {
-                dispatch(saveSnapshot())
+            
                 const tempId = `temp-${Date.now()}-${connect.fromTaskId}-${toTask.id}`
                 dispatch(addDependency({ id: tempId, project_id: projectId, from_task_id: connect.fromTaskId, to_task_id: toTask.id, type: 2, lag: 0 }))
                 // 添加依赖时，后继任务自动切换为自动排程
@@ -1636,7 +1692,7 @@ export default function GanttChart({
             }
 
             if (updates.length > 0) {
-              dispatch(saveSnapshot())
+          
               dispatch(updateTasks(updates.map(u => ({ ...tasks.find(t => t.id === u.id)!, ...u }))))
               dispatch(markDirty(updates.map(u => u.id)))
             }
@@ -1647,10 +1703,20 @@ export default function GanttChart({
 
       if (splitterDrag) setSplitterDrag(null)
       if (nameDrag) setNameDrag(null)
+
+      if (depDrag) {
+        const { depId, startLag, deltaDays, dragging } = depDrag
+        setDepDrag(null)
+        if (dragging) depDragJustEndedRef.current = true
+        if (dragging && deltaDays !== 0) {
+          const newLag = startLag + deltaDays
+          await handleDepLagChangeRef.current?.(depId, newLag)
+        }
+      }
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, rowDrag, dropIdx, previewMap, flatRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag])
+  }, [drag, connect, rowDrag, dropIdx, previewMap, flatRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -1662,7 +1728,7 @@ export default function GanttChart({
     if (!orig) { setEditId(null); return }
     if (orig.name !== name) {
       const updated = { ...orig, name }
-      dispatch(saveSnapshot())
+  
       dispatch(updateTasks([updated]))
       dispatch(markDirty([editId]))
     }
@@ -1718,7 +1784,7 @@ export default function GanttChart({
 
     if (Object.keys(patch).length === 0) { setCellEdit(null); return }
     const updated = { ...orig, ...patch } as typeof orig
-    dispatch(saveSnapshot())
+
 
     // 客户端即时级联下游依赖任务
     const cascaded = cascadeLocal(updated, tasks, deps)
@@ -1727,11 +1793,11 @@ export default function GanttChart({
     setCellEdit(null)
   }, [cellEdit, tasks, deps, dispatch])
 
-  // ── 通用字段修改（限制类型/日期/状态/复杂性等） ─────────────────────────
+  // ── 通用字段修改（限制类型/日期/状态等） ─────────────────────────
   const handleTaskFieldChange = useCallback((taskId: string, patch: Partial<Task>) => {
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     dispatch(updateTasks([{ ...t, ...patch }]))
     dispatch(markDirty([taskId]))
   }, [tasks, dispatch])
@@ -1740,38 +1806,67 @@ export default function GanttChart({
   const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     dispatch(updateTasks([{ ...t, auto_schedule: autoSchedule }]))
     dispatch(markDirty([taskId]))
   }, [tasks, dispatch])
 
+  // ── 依赖变更后，用 PUT 返回的级联结果局部更新任务，不做全量刷新 ──────
+  const applyDepPutResult = useCallback(async (res: Response) => {
+    if (!res.ok) return
+    try {
+      const d = await res.json()
+      if (d.ok && d.value) {
+        const cascaded = (d.value.updatedTasks ?? []) as Task[]
+        if (cascaded.length > 0) {
+          dispatch(updateTasks(cascaded))
+          dispatch(markDirty(cascaded.map(t => t.id)))
+        }
+      }
+    } catch { /* ignore */ }
+  }, [dispatch])
+
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
+
     dispatch(updateDependency({ id: depId, lag: newLag }))
     const res = await authFetch(`/api/dependencies/${projectId}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: depId, lag: newLag }),
     })
-    if (res.ok) {
-      const r = await authFetch(`/api/tasks/${projectId}?t=${Date.now()}`, { cache: 'no-store' })
-      const t = await r.text()
-      try { const d = t ? JSON.parse(t) : {}; if (d.ok && d.value) dispatch(setTasks(d.value)) } catch { /* ignore */ }
-    }
-  }, [dispatch, projectId])
+    await applyDepPutResult(res)
+  }, [dispatch, projectId, applyDepPutResult])
+  // 同步 ref，供全局 mouseup 使用
+  handleDepLagChangeRef.current = handleDepLagChange
+
+  // ── 开始拖拽依赖线 (调整 lag) ─────────────────────────────────────────
+  const onDepLineMouseDown = useCallback((e: React.MouseEvent, dep: Dependency, midX: number, midY: number) => {
+    if (readOnly) return
+    // 仅响应左键：避免右键/中键被 preventDefault 吞掉 contextmenu
+    if (e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    setDepDrag({
+      depId: dep.id,
+      startX: getSvgX(e.clientX),
+      startLag: dep.lag ?? 0,
+      deltaDays: 0,
+      labelX: midX,
+      labelY: midY,
+      dragging: false,
+    })
+  }, [readOnly, getSvgX])
 
   // ── Change dependency type ──────────────────────────────────────────────
   const handleDepTypeChange = useCallback(async (depId: string, newType: number) => {
+
     dispatch(updateDependency({ id: depId, type: newType }))
     const res = await authFetch(`/api/dependencies/${projectId}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: depId, type: newType }),
     })
-    if (res.ok) {
-      const r = await authFetch(`/api/tasks/${projectId}?t=${Date.now()}`, { cache: 'no-store' })
-      const t = await r.text()
-      try { const d = t ? JSON.parse(t) : {}; if (d.ok && d.value) dispatch(setTasks(d.value)) } catch { /* ignore */ }
-    }
-  }, [dispatch, projectId])
+    await applyDepPutResult(res)
+  }, [dispatch, projectId, applyDepPutResult])
 
   // ── 切换任务调度模式：空/手动/依赖类型 ─────────────────────────────────
   const handleScheduleModeChange = useCallback(async (taskId: string, value: string) => {
@@ -1781,7 +1876,7 @@ export default function GanttChart({
     if (value === 'empty') {
       // 空：删除所有入依赖，auto_schedule=true，开始日期设为项目最早任务开始日期
       const incoming = deps.filter(d => d.to_task_id === taskId)
-      dispatch(saveSnapshot())
+  
       for (const dep of incoming) {
         dispatch(removeDependency(dep.id))
         await authFetch(`/api/dependencies/${projectId}`, {
@@ -1798,7 +1893,7 @@ export default function GanttChart({
     } else if (value === 'manual') {
       // 手动：删除所有入依赖，auto_schedule=false
       const incoming = deps.filter(d => d.to_task_id === taskId)
-      dispatch(saveSnapshot())
+  
       for (const dep of incoming) {
         dispatch(removeDependency(dep.id))
         authFetch(`/api/dependencies/${projectId}`, {
@@ -1815,7 +1910,7 @@ export default function GanttChart({
   const togglePredecessor = useCallback(async (fromTaskId: string, toTaskId: string) => {
     const existing = deps.find(d => d.from_task_id === fromTaskId && d.to_task_id === toTaskId)
     if (existing) {
-      dispatch(saveSnapshot())
+  
       dispatch(removeDependency(existing.id))
       setPredPopup(null)
       try {
@@ -1834,7 +1929,7 @@ export default function GanttChart({
     }
 
     // 添加：乐观更新，先更新 UI 再同步后端（与 Bryntum 示例一致）
-    dispatch(saveSnapshot())
+
     const tempId = `temp-${Date.now()}-${fromTaskId}-${toTaskId}`
     const tempDep: Dependency = {
       id: tempId,
@@ -1885,7 +1980,7 @@ export default function GanttChart({
   useEffect(() => {
     const onKey = async (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDep && document.activeElement?.tagName !== 'INPUT') {
-        dispatch(saveSnapshot())
+    
         dispatch(removeDependency(selectedDep))
         await authFetch(`/api/dependencies/${projectId}`, {
           method:'DELETE', headers:{'Content-Type':'application/json'},
@@ -1943,7 +2038,7 @@ export default function GanttChart({
   // ── Context menu: action handlers ────────────────────────────────────────
   const handleCtxDeleteTask = useCallback(async (taskId: string) => {
     setCtxMenu(null)
-    dispatch(saveSnapshot())
+
     dispatch(deleteTasks([taskId]))
     await authFetch(`/api/tasks/${projectId}`, {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
@@ -1955,7 +2050,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
     await addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate, auto_schedule: false })
@@ -1965,7 +2060,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
     await addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate, auto_schedule: false })
@@ -1975,7 +2070,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const nt = await addTask('New Milestone', t.parent_id, t.order_index + 1, { is_milestone: true })
     if (nt) setEditModalTaskId(nt.id)
   }, [tasks, addTask, dispatch])
@@ -1985,7 +2080,7 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
     const childCount = tasks.filter(x => x.parent_id === taskId).length
-    dispatch(saveSnapshot())
+
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
     await addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate, auto_schedule: false })
@@ -1996,7 +2091,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const newTask = await addTask('New Task', t.parent_id, t.order_index + 1)
     if (!newTask) return
     const res = await authFetch(`/api/dependencies/${projectId}`, {
@@ -2019,7 +2114,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const newTask = await addTask('New Task', t.parent_id, t.order_index)
     if (!newTask) return
     const res = await authFetch(`/api/dependencies/${projectId}`, {
@@ -2059,7 +2154,7 @@ export default function GanttChart({
 
   const handleCtxCut = useCallback(async (taskId: string) => {
     setCtxMenu(null)
-    dispatch(saveSnapshot())
+
     dispatch(copyTasks([taskId]))
     dispatch(deleteTasks([taskId]))
     await authFetch(`/api/tasks/${projectId}`, {
@@ -2071,7 +2166,7 @@ export default function GanttChart({
   const handleCtxPaste = useCallback(async () => {
     setCtxMenu(null)
     if (!clipboard.length) return
-    dispatch(saveSnapshot())
+
     const pastedTasks = clipboard.map(t => ({
       ...t, name: `${t.name} (副本)`, id: undefined, created_at: undefined, updated_at: undefined,
     }))
@@ -2087,7 +2182,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    dispatch(saveSnapshot())
+
     const toMilestone = !t.is_milestone
     const patch: Partial<Task> = { is_milestone: toMilestone }
     if (toMilestone) {
@@ -2113,7 +2208,7 @@ export default function GanttChart({
       .filter(t => t.parent_id === task.parent_id && t.order_index < task.order_index)
       .sort((a, b) => b.order_index - a.order_index)[0]
     if (!anchor) return
-    dispatch(saveSnapshot())
+
 
     // 降级时删除被降级任务与新父任务之间的依赖关系
     // 降级时取消 anchor（新父任务）上的所有依赖（父级任务不允许有依赖）
@@ -2150,7 +2245,7 @@ export default function GanttChart({
     const task = tasks.find(t => t.id === taskId)
     if (!task || !task.parent_id) return
     const parent = tasks.find(t => t.id === task.parent_id)!
-    dispatch(saveSnapshot())
+
 
     // 升级时删除被升级任务与旧父任务之间的依赖关系
     const depsToRemove = deps.filter(d =>
@@ -2196,7 +2291,7 @@ export default function GanttChart({
     setCtxMenu(null)
     const already = deps.find(d => d.from_task_id === fromId && d.to_task_id === toId)
     if (already) return
-    dispatch(saveSnapshot())
+
     const tempId = `temp-${Date.now()}-${fromId}-${toId}`
     dispatch(addDependency({ id: tempId, project_id: projectId, from_task_id: fromId, to_task_id: toId, type: 2, lag: 0 }))
     // 添加依赖时，后继任务自动切换为自动排程
@@ -2226,7 +2321,7 @@ export default function GanttChart({
   const handleCtxRemoveAllDeps = useCallback(async (taskId: string) => {
     setCtxMenu(null)
     const taskDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
-    dispatch(saveSnapshot())
+
     for (const d of taskDeps) {
       dispatch(removeDependency(d.id))
       await authFetch(`/api/dependencies/${projectId}`, {
@@ -2292,7 +2387,6 @@ export default function GanttChart({
 
   // ── Dynamic panel sizing ─────────────────────────────────────────────────
   const effectivePanelW = panelCollapsed ? 0 : panelW
-  const nameColW = nameW  // 任务名称列宽固定，不随面板缩小而压缩
 
   // 列宽覆盖（用户拖动调整后持久化到 localStorage）
   const colWidthStorageKey = `gantt-col-widths-${projectId}`
@@ -2324,17 +2418,55 @@ export default function GanttChart({
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
   }, [colResizeDrag, colWidthStorageKey])
 
+  // 右折叠时：按内容宽度自动展开左面板列（折叠恢复后回到用户设置）
+  const autoFitColWidths = useMemo(() => {
+    if (!rightCollapsed) return null
+    const isCJK = (c: string) => /[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]/.test(c)
+    const measure = (s: string) => {
+      let w = 0
+      for (const c of s) w += isCJK(c) ? 13 : 7
+      return w
+    }
+    const CELL_PAD = 16
+    const HDR_PAD = 40 // 表头含排序/筛选图标
+    const headerW = (label: string) => measure(label) + HDR_PAD
+    const contentW = (fn: (t: Task) => string) => {
+      let m = 0
+      for (const t of tasks) m = Math.max(m, measure(fn(t)))
+      return m + CELL_PAD
+    }
+    return {
+      name:       Math.max(MIN_NAME_W, headerW('任务名称'), contentW(t => t.name ?? '') + 32),
+      assignee:   Math.max(headerW('责任人'),   contentW(t => t.assignee ?? '')),
+      pct:        Math.max(headerW('完成'),     contentW(t => `${Math.round(t.percent_done ?? 0)}%`)),
+      duration:   Math.max(headerW('持续时间'), contentW(t => t.duration != null ? `${t.duration}天` : '')),
+      start:      Math.max(headerW('开始时间'), contentW(t => (t.start_date ?? '').split('T')[0])),
+      end:        Math.max(headerW('完成时间'), contentW(t => (t.end_date ?? '').split('T')[0])),
+      pred:       headerW('前导'),
+      succ:       headerW('后继'),
+      lag:        headerW('延迟'),
+      ctype:      Math.max(headerW('限制类型'), contentW(t => t.constraint_type ?? 'asap')),
+      cdate:      Math.max(headerW('限制日期'), contentW(t => (t.constraint_date ?? '').split('T')[0])),
+      ddate:      Math.max(headerW('截止日期'), contentW(t => (t.deadline ?? '').split('T')[0])),
+      status:     Math.max(headerW('状态'),     contentW(t => t.status ?? '')),
+      inactive:   Math.max(headerW('无效'),     contentW(t => t.inactive ? '是' : '否')),
+    } as Record<OptionalCol | 'name', number>
+  }, [rightCollapsed, tasks])
+
   // Right columns: only include visible optional columns
   const RIGHT_COL_BASES = useMemo(() =>
-    OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => colWidthOverrides[c.key] ?? c.width),
-    [visibleCols, colWidthOverrides])
+    OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c =>
+      autoFitColWidths ? autoFitColWidths[c.key] : (colWidthOverrides[c.key] ?? c.width)
+    ),
+    [visibleCols, colWidthOverrides, autoFitColWidths])
   const RIGHT_COLS_TOTAL = RIGHT_COL_BASES.reduce((a, b) => a + b, 0)
   const rightColWidths = RIGHT_COL_BASES
+  const nameColW = autoFitColWidths ? autoFitColWidths.name : nameW
   const leftNaturalW = COL_NUM + COL_CHECK + nameColW + RIGHT_COLS_TOTAL
   const leftInnerW = Math.max(leftNaturalW, effectivePanelW)
   // Map visible column keys to their computed widths
   const visibleColWidths = useMemo(() => {
-    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, ctype: 0, cdate: 0, status: 0, complexity: 0, inactive: 0 }
+    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, ctype: 0, cdate: 0, ddate: 0, status: 0, inactive: 0 }
     const visibleKeys = OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => c.key)
     visibleKeys.forEach((k, i) => { map[k] = rightColWidths[i] ?? 0 })
     return map
@@ -2349,8 +2481,8 @@ export default function GanttChart({
   const colLagW    = visibleColWidths.lag
   const colCtypeW  = visibleColWidths.ctype
   const colCdateW  = visibleColWidths.cdate
+  const colDDateW  = visibleColWidths.ddate
   const colStatusW = visibleColWidths.status
-  const colCplxW   = visibleColWidths.complexity
   const colInactiveW = visibleColWidths.inactive
 
   // ── Distinct values per filterable column (for filter dropdowns) ─────────
@@ -2358,6 +2490,8 @@ export default function GanttChart({
     const fmt = (s: string | null | undefined) => (s ?? '').split('T')[0]
     const pred = (t: Task) => deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
     const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
+    const sdForStatus = statusDate ? new Date(statusDate) : null
+    const statusCtx = { allTasks: tasks, deps }
     const builder: Record<OptionalCol, (t: Task) => string> = {
       assignee:   t => t.assignee ?? '',
       pct:        t => String(t.percent_done ?? 0),
@@ -2372,8 +2506,8 @@ export default function GanttChart({
       },
       ctype:      t => t.constraint_type ?? 'asap',
       cdate:      t => fmt(t.constraint_date),
-      status:     t => t.status ?? '',
-      complexity: t => t.complexity != null ? String(t.complexity) : '',
+      ddate:      t => fmt(t.deadline),
+      status:     t => computeTaskStatus(t, sdForStatus, statusCtx).status,
       inactive:   t => t.inactive ? '是' : '否',
     }
     const out = {} as Record<OptionalCol, string[]>
@@ -2383,13 +2517,12 @@ export default function GanttChart({
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps])
+  }, [tasks, deps, statusDate])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
     if (k === 'ctype') return CONSTRAINT_TYPES.find(c => c.value === v)?.label ?? v
     if (k === 'status') return STATUS_META[v as keyof typeof STATUS_META]?.label ?? v
-    if (k === 'complexity') return COMPLEXITY_OPTIONS.find(o => String(o.value) === v)?.label ?? v
     return v
   }, [])
 
@@ -2527,8 +2660,8 @@ export default function GanttChart({
           {renderColHeader('lag', '延迟', colLagW)}
           {renderColHeader('ctype', '限制类型', colCtypeW)}
           {renderColHeader('cdate', '限制日期', colCdateW)}
+          {renderColHeader('ddate', '截止日期', colDDateW)}
           {renderColHeader('status', '状态', colStatusW)}
-          {renderColHeader('complexity', '复杂性', colCplxW)}
           {renderColHeader('inactive', '无效', colInactiveW)}
         </div>
 
@@ -2915,53 +3048,74 @@ export default function GanttChart({
                       </div>
                     )
                   })()}
+                  {/* ── 截止日期 ─────────────────────────────────── */}
+                  {colDDateW > 0 && (() => {
+                    if (row.hasChildren) {
+                      return (
+                        <div style={{ width: colDDateW }}
+                             className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
+                             onClick={pickCell('ddate')}>
+                          <span className="text-[11px] text-gray-300 w-full text-center">—</span>
+                        </div>
+                      )
+                    }
+                    const dv = (t.deadline ?? '').split('T')[0]
+                    const ev = (t.end_date ?? '').split('T')[0]
+                    const overdue = !!(dv && ev && ev > dv)
+                    const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'ddate'
+                    return (
+                      <div style={{ width: colDDateW }}
+                           className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
+                           onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'ddate' }) }}
+                           onDoubleClick={e => { e.stopPropagation(); setActiveEditor({ taskId: t.id, col: 'ddate' }) }}
+                           title={overdue ? `计划结束 ${ev} 已超过截止日期 ${dv}` : ''}>
+                        {editing ? (
+                          <input autoFocus type="date"
+                            className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
+                            defaultValue={dv}
+                            onClick={e => e.stopPropagation()}
+                            onBlur={e => {
+                              handleTaskFieldChange(t.id, { deadline: e.target.value || null })
+                              setActiveEditor(null)
+                            }}
+                            onKeyDown={e => { if (e.key === 'Escape') setActiveEditor(null) }} />
+                        ) : dv ? (
+                          <span className={`text-[11px] w-full ${overdue ? 'text-red-600 font-semibold' : 'text-gray-600'}`}>
+                            {overdue && <span className="mr-0.5">⚠</span>}{dv}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-gray-300 w-full">—</span>
+                        )}
+                      </div>
+                    )
+                  })()}
                   {/* ── 状态（自动计算） ─────────────────────────── */}
                   {colStatusW > 0 && (() => {
-                    const st = computeTaskStatus(t, statusDate ? new Date(statusDate) : null, { allTasks: tasks, deps })
+                    const { status: st, reason: statusReason } = computeTaskStatus(t, statusDate ? new Date(statusDate) : null, { allTasks: tasks, deps })
                     const meta = STATUS_META[st]
+                    let deltaText = ''
+                    if (st === 'late' || st === 'pushed' || st === 'ahead') {
+                      const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
+                      const e = t.end_date ? String(t.end_date).split('T')[0] : null
+                      if (b && e) {
+                        const days = diffDays(new Date(b), new Date(e))
+                        if (days !== 0) deltaText = ` ${days > 0 ? '+' : ''}${days}天`
+                      }
+                    }
+                    const tooltip = statusReason ? `${meta.label}${deltaText}\n原因: ${statusReason}` : ''
                     return (
                       <div style={{ width: colStatusW }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('status')}`}
-                           onClick={pickCell('status')}>
+                           onClick={pickCell('status')}
+                           title={tooltip}>
                         <span className="inline-flex items-center gap-1 text-[11px] truncate"
                               style={{ color: meta.color }}>
                           <span className="inline-block rounded-full" style={{ width: 8, height: 8, background: meta.color }} />
-                          {meta.label}
+                          {meta.label}{deltaText}
                         </span>
                       </div>
                     )
                   })()}
-                  {/* ── 复杂性 ───────────────────────────────────── */}
-                  {colCplxW > 0 && (
-                  <div style={{ width: colCplxW }}
-                       className={`flex items-center h-full flex-none px-1 overflow-hidden ${cellRing('complexity')}`}
-                       onClick={pickCell('complexity')}
-                       onDoubleClick={e => { e.stopPropagation(); if (!row.hasChildren) setActiveEditor({ taskId: t.id, col: 'complexity' }) }}>
-                    {row.hasChildren ? (
-                      <span className="text-[11px] text-gray-300 w-full text-center">—</span>
-                    ) : activeEditor?.taskId === t.id && activeEditor?.col === 'complexity' ? (
-                      <select autoFocus
-                        className="text-[11px] border border-blue-400 rounded px-0.5 bg-white text-gray-700 focus:outline-none cursor-pointer w-full"
-                        value={t.complexity ?? ''}
-                        onClick={e => e.stopPropagation()}
-                        onBlur={() => setActiveEditor(null)}
-                        onChange={e => {
-                          const v = e.target.value
-                          handleTaskFieldChange(t.id, { complexity: v === '' ? null : Number(v) })
-                          setActiveEditor(null)
-                        }}>
-                        <option value="">—</option>
-                        {COMPLEXITY_OPTIONS.map(o => (
-                          <option key={o.value} value={o.value}>{o.label}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="text-[11px] text-gray-600 truncate w-full">
-                        {COMPLEXITY_OPTIONS.find(o => o.value === t.complexity)?.label ?? ''}
-                      </span>
-                    )}
-                  </div>
-                  )}
                   {/* ── 无效 ────────────────────────────────────── */}
                   {colInactiveW > 0 && (
                   <div style={{ width: colInactiveW }}
@@ -3329,6 +3483,51 @@ export default function GanttChart({
 
             const inactiveDim = inactiveSet.has(t.id) ? 0.35 : 1
 
+            // 截止日期标记：红色虚线 + 超期时标记超出段
+            const deadlineStr = t.deadline ? String(t.deadline).split('T')[0] : null
+            const endStrForDL = t.end_date ? String(t.end_date).split('T')[0] : null
+            const overdue = !!(deadlineStr && endStrForDL && endStrForDL > deadlineStr) && !row.hasChildren
+            const deadlineX = deadlineStr ? dateToX(new Date(deadlineStr + 'T00:00:00')) : null
+            const deadlineMarker = indicators.deadlineDate && deadlineStr && deadlineX != null && !row.hasChildren ? (
+              <g style={{ pointerEvents: 'none' }}>
+                <line x1={deadlineX} y1={y-3} x2={deadlineX} y2={y+BAR_H+3}
+                      stroke="#dc2626" strokeWidth={1.5} strokeDasharray="3,2" />
+                <polygon points={`${deadlineX},${y-5} ${deadlineX+7},${y-2} ${deadlineX},${y+1}`} fill="#dc2626" />
+                {overdue && deadlineX < x + w && (
+                  <rect x={Math.max(deadlineX, x)} y={y}
+                        width={(x + w) - Math.max(deadlineX, x)} height={BAR_H}
+                        fill="#dc2626" opacity={0.28} rx={2} />
+                )}
+                {overdue && (
+                  <text x={x + w + 4} y={y + BAR_H/2 + 3} fontSize={10}
+                        fill="#dc2626" fontWeight="700">⚠ 超期</text>
+                )}
+              </g>
+            ) : null
+
+            // 限制日期标记：紫色菱形（位置+方向提示限制类型）
+            const cDateStr = t.constraint_date ? String(t.constraint_date).split('T')[0] : null
+            const cTypeStr = t.constraint_type || null
+            const cDateX = cDateStr ? dateToX(new Date(cDateStr + 'T00:00:00')) : null
+            const constraintMarker = indicators.constraintDate && cDateStr && cDateX != null && !row.hasChildren ? (() => {
+              const cy = y + BAR_H/2
+              const r = 4
+              const arrow = cTypeStr === 'startnoearlierthan'
+                ? <polygon points={`${cDateX+r+1},${cy-3} ${cDateX+r+5},${cy} ${cDateX+r+1},${cy+3}`} fill="#7c3aed" />
+                : cTypeStr === 'finishnolaterthan'
+                ? <polygon points={`${cDateX-r-1},${cy-3} ${cDateX-r-5},${cy} ${cDateX-r-1},${cy+3}`} fill="#7c3aed" />
+                : null
+              return (
+                <g style={{ pointerEvents: 'none' }}>
+                  <line x1={cDateX} y1={y-3} x2={cDateX} y2={y+BAR_H+3}
+                        stroke="#7c3aed" strokeWidth={1.2} strokeDasharray="2,2" opacity={0.7} />
+                  <polygon points={`${cDateX},${cy-r} ${cDateX+r},${cy} ${cDateX},${cy+r} ${cDateX-r},${cy}`}
+                           fill="#ede9fe" stroke="#7c3aed" strokeWidth={1.2} />
+                  {arrow}
+                </g>
+              )
+            })() : null
+
             if (t.is_milestone) {
               const r=BAR_H/2, cx=x, cy=y+r
               const hovered = hoveredBar === t.id
@@ -3360,6 +3559,8 @@ export default function GanttChart({
                             style={{ cursor:'crosshair' }}
                             onMouseDown={e=>{ e.stopPropagation(); onConnectMouseDown(e,t,i) }} />
                   )}
+                  {deadlineMarker}
+                  {constraintMarker}
                 </g>
               )
             }
@@ -3444,6 +3645,8 @@ export default function GanttChart({
                           style={{ cursor:'crosshair' }}
                           onMouseDown={e=>{ e.stopPropagation(); onConnectMouseDown(e,t,i) }} />
                 )}
+                {deadlineMarker}
+                {constraintMarker}
               </g>
             )
           })}
@@ -3513,36 +3716,67 @@ export default function GanttChart({
               d = `M${x1},${y1} H${x1+dx1} V${midY} H${x2+dx2} V${y2} H${x2}`
             }
 
+            const midPtX = (x1+x2)/2
+            const midPtY = (y1+y2)/2
+            const isDragTarget = depDrag?.depId === dep.id && depDrag.dragging
             return (
               <g key={dep.id}>
                 <path d={d} stroke="transparent" strokeWidth={10} fill="none"
-                      style={{ cursor:'pointer' }}
-                      onClick={e=>{ e.stopPropagation(); setSelectedDep(isSel?null:dep.id) }} />
+                      style={{ cursor: readOnly ? 'pointer' : 'ew-resize' }}
+                      onClick={e=>{
+                        e.stopPropagation()
+                        // 若刚完成拖拽则不触发选中切换
+                        if (depDragJustEndedRef.current) {
+                          depDragJustEndedRef.current = false
+                          return
+                        }
+                        setSelectedDep(isSel?null:dep.id)
+                      }}
+                      onMouseDown={e=>onDepLineMouseDown(e, dep, midPtX, midPtY)} />
                 <path d={d}
-                      stroke={isSel ? '#ef4444' : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '#ef4444' : '#9ca3af'}
-                      strokeWidth={isSel ? 2 : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? 2 : 1.5}
-                      fill="none" markerEnd={`url(#dep-arrow${isSel || (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '-sel' : ''})`}
+                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '#ef4444' : '#9ca3af'}
+                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? 2 : 1.5}
+                      strokeDasharray={isDragTarget ? '5 3' : undefined}
+                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '-sel' : ''})`}
                       style={{ pointerEvents:'none' }} />
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2
+                  const lag = dep.lag ?? 0
+                  const lagLabel = `延迟 ${lag >= 0 ? '+' : ''}${lag} 天`
+                  const badgeW = Math.max(72, lagLabel.length * 8 + 12)
+                  const badgeH = 20
+                  const bx = mx - badgeW / 2
+                  const by = my - 28
                   return (
-                    <g style={{ cursor:'pointer' }}
-                       onClick={async e=>{
-                         e.stopPropagation()
-                         dispatch(saveSnapshot())
-                         dispatch(removeDependency(dep.id))
-                         await authFetch(`/api/dependencies/${projectId}`, {
-                           method:'DELETE', headers:{'Content-Type':'application/json'},
-                           body: JSON.stringify({ id:dep.id }),
-                         })
-                         setSelectedDep(null)
-                       }}>
-                      <circle cx={mx} cy={my} r={9} fill="#ef4444" />
-                      <text x={mx} y={my+4} textAnchor="middle" fontSize={12}
-                            fill="white" fontWeight="bold" style={{ pointerEvents:'none' }}>
-                        ×
-                      </text>
-                    </g>
+                    <>
+                      {/* 延迟标签（只读展示，点击不触发删除） */}
+                      <g style={{ pointerEvents:'none' }}>
+                        <rect x={bx} y={by} width={badgeW} height={badgeH} rx={4}
+                              fill="#1e40af" opacity={0.92} />
+                        <text x={mx} y={by + 14} textAnchor="middle"
+                              fontSize={11} fill="white" fontWeight="bold">
+                          {lagLabel}
+                        </text>
+                      </g>
+                      {/* 删除按钮 */}
+                      <g style={{ cursor:'pointer' }}
+                         onClick={async e=>{
+                           e.stopPropagation()
+
+                           dispatch(removeDependency(dep.id))
+                           await authFetch(`/api/dependencies/${projectId}`, {
+                             method:'DELETE', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify({ id:dep.id }),
+                           })
+                           setSelectedDep(null)
+                         }}>
+                        <circle cx={mx} cy={my} r={9} fill="#ef4444" />
+                        <text x={mx} y={my+4} textAnchor="middle" fontSize={12}
+                              fill="white" fontWeight="bold" style={{ pointerEvents:'none' }}>
+                          ×
+                        </text>
+                      </g>
+                    </>
                   )
                 })()}
               </g>
@@ -3555,6 +3789,25 @@ export default function GanttChart({
                   stroke="#3b82f6" strokeWidth={2} strokeDasharray="6 3" fill="none"
                   markerEnd="url(#connect-arrow)" style={{ pointerEvents:'none' }} />
           )}
+
+          {/* 依赖线拖拽中的 lag 提示 */}
+          {depDrag && depDrag.dragging && (() => {
+            const newLag = depDrag.startLag + depDrag.deltaDays
+            const label = `延迟 ${newLag >= 0 ? '+' : ''}${newLag} 天`
+            const badgeW = Math.max(72, label.length * 9)
+            const bx = depDrag.labelX - badgeW/2
+            const by = depDrag.labelY - 28
+            return (
+              <g style={{ pointerEvents:'none' }}>
+                <rect x={bx} y={by} width={badgeW} height={22} rx={4}
+                      fill="#1e40af" opacity={0.92} />
+                <text x={depDrag.labelX} y={by+15} textAnchor="middle"
+                      fontSize={12} fill="white" fontWeight="bold">
+                  {label}
+                </text>
+              </g>
+            )
+          })()}
 
           {/* Status date */}
           {statusDate && (() => {
