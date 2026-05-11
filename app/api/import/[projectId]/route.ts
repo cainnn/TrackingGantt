@@ -48,6 +48,7 @@ interface ImportTask {
   inactive?: boolean
   project_boundary?: string | null
   status?: string | null
+  deadline?: string | null
   baseline_end_date?: string | null
 }
 
@@ -56,6 +57,7 @@ interface ImportDep {
   to_task_code: string
   type: number
   lag: number
+  active?: boolean
 }
 
 /** 允许的最大日期跨度（天） */
@@ -197,16 +199,16 @@ async function importReplace(
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
        is_deleted, percent_done, duration_unit,
        constraint_type, constraint_date, rollup, inactive, project_boundary,
-       status, baseline_end_date)
+       status, deadline, baseline_end_date)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'day',
-               $15,$16,$17,$18,$19,$20,$21)`,
+               $15,$16,$17,$18,$19,$20,$21,$22)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
        t.auto_schedule, t.note, i,
        t.percent_done ?? 0,
        t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
        t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
-       t.status ?? null, toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
     )
   }
 
@@ -215,9 +217,9 @@ async function importReplace(
     const toId = codeToId.get(dep.to_task_code)
     if (!fromId || !toId) continue
     await client.query(
-      `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag)
-       VALUES ($1,$2,$3,$4,$5)`,
-      [projectId, fromId, toId, dep.type, dep.lag]
+      `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag, active)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [projectId, fromId, toId, dep.type, dep.lag, dep.active !== false]
     )
   }
 }
@@ -272,14 +274,15 @@ async function importMerge(
        inactive=COALESCE($16, inactive),
        project_boundary=COALESCE($17, project_boundary),
        status=COALESCE($18, status),
-       baseline_end_date=$19
+       deadline=$19,
+       baseline_end_date=$20
        WHERE id=$10 AND project_id=$11`,
       [parentId, t.name, t.assignee, t.start_date, t.end_date,
        t.duration, t.is_milestone, t.auto_schedule, t.note, t.id, projectId,
        t.percent_done ?? null,
        t.constraint_type ?? null, toDateStr(t.constraint_date),
        t.rollup ?? null, t.inactive ?? null, t.project_boundary ?? null,
-       t.status ?? null, toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
     )
   }
 
@@ -294,16 +297,16 @@ async function importMerge(
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
        is_deleted, percent_done, duration_unit,
        constraint_type, constraint_date, rollup, inactive, project_boundary,
-       status, baseline_end_date)
+       status, deadline, baseline_end_date)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'day',
-               $15,$16,$17,$18,$19,$20,$21)`,
+               $15,$16,$17,$18,$19,$20,$21,$22)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
        t.auto_schedule, t.note, orderIdx++,
        t.percent_done ?? 0,
        t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
        t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
-       t.status ?? null, toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
     )
   }
 
@@ -319,14 +322,14 @@ async function importMerge(
     )
     if (existing.rows.length > 0) {
       await client.query(
-        'UPDATE dependencies SET type=$1, lag=$2 WHERE id=$3',
-        [dep.type, dep.lag, existing.rows[0].id]
+        'UPDATE dependencies SET type=$1, lag=$2, active=$3 WHERE id=$4',
+        [dep.type, dep.lag, dep.active !== false, existing.rows[0].id]
       )
     } else {
       await client.query(
-        `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [projectId, fromId, toId, dep.type, dep.lag]
+        `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag, active)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [projectId, fromId, toId, dep.type, dep.lag, dep.active !== false]
       )
     }
   }

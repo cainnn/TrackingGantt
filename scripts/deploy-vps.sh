@@ -15,7 +15,7 @@ set -euo pipefail
 #   bash scripts/deploy-vps.sh 1.2.3.4 root '密码'  # 指定参数
 #
 # 环境变量（均可选，有默认值）：
-#   VPS_HOST      VPS IP/域名      默认 your-vps-ip
+#   VPS_HOST      VPS IP/域名      默认 159.75.40.209
 #   VPS_USER      SSH 用户          默认 root
 #   VPS_PASS      SSH 密码          留空则用公钥
 #   VPS_PORT      SSH 端口          默认 22
@@ -37,7 +37,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "  npm run deploy:local    本地构建后上传"
   echo ""
   echo "环境变量："
-  echo "  VPS_HOST=IP             VPS 地址（默认 your-vps-ip）"
+  echo "  VPS_HOST=IP             VPS 地址（默认 159.75.40.209）"
   echo "  VPS_PASS=密码           使用密码登录（默认用 SSH 公钥）"
   echo "  SKIP_BACKUP=1           跳过数据库备份"
   echo "  SKIP_MIGRATE=1          跳过数据库迁移"
@@ -50,7 +50,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-VPS_HOST="${1:-${VPS_HOST:-your-vps-ip}}"
+VPS_HOST="${1:-${VPS_HOST:-159.75.40.209}}"
 VPS_USER="${2:-${VPS_USER:-root}}"
 VPS_PASS="${3:-${VPS_PASS:-}}"
 VPS_PORT="${VPS_PORT:-22}"

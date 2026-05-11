@@ -14,11 +14,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <head>
-        {/* Bryntum Gantt 7.2.1 library loaded before page scripts */}
-        {/* eslint-disable-next-line @next/next/no-sync-scripts */}
-        <script src="/lib/gantt/gantt.umd.js" />
-      </head>
       <body>
         <StoreProvider>{children}</StoreProvider>
       </body>

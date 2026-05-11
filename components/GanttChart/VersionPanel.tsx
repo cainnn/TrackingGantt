@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
-import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter } from '@/store/slices/tasksSlice'
+import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter, setViewSnapshot } from '@/store/slices/tasksSlice'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 import type { ProjectVersion, TaskLifecycleEvent } from '@/types'
@@ -37,6 +37,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [showCreate, setShowCreate] = useState(false)
+  const [showAutosave, setShowAutosave] = useState(false)
 
   // Tab: 'versions' | 'changelog' | 'diff'
   const [activeTab, setActiveTab] = useState<'versions' | 'changelog' | 'diff'>('versions')
@@ -143,27 +144,48 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
     } catch { /* ignore */ }
   }, [projectId, dispatch])
 
-  // 恢复
-  const handleRestore = useCallback(async (v: ProjectVersion) => {
-    if (!confirm(`确定恢复到「${v.name}」？\n当前工作版本将自动备份。`)) return
+  // 查看：临时切换图表显示该版本快照，不影响当前工作状态，全局只读
+  const handleView = useCallback(async (v: ProjectVersion) => {
     try {
-      const res = await authFetch(`/api/versions/${projectId}/restore`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({ version_id: v.id }),
-      })
+      const res = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
       const data = await res.json()
-      if (data.ok && data.value) {
-        dispatch(setTasks({ tasks: data.value.tasks, dependencies: data.value.dependencies }))
-        fetchVersions()
-        alert(`已恢复到「${v.name}」`)
-      } else {
-        alert(data.error ?? '恢复失败')
+      if (!data.ok || !data.value?.snapshot) {
+        alert(data.error ?? '加载快照失败')
+        return
       }
+      const snap = data.value.snapshot
+      const versionName = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+      dispatch(setViewSnapshot({
+        tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
+        dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
+        versionId: v.id,
+        versionName,
+      }))
     } catch {
       alert('网络错误')
     }
-  }, [projectId, dispatch, fetchVersions])
+  }, [projectId, dispatch])
+
+  // 回退：仅本地预览，"保存版本"后才入库
+  const handleRollback = useCallback(async (v: ProjectVersion) => {
+    if (!confirm(`回退到「${v.name}」（本地预览）？\n\n当前所有未保存编辑会被覆盖。\n回退后需点"保存版本"才会真正入库；保存后自动生成新版本（递增 version_number），原有历史版本保留。`)) return
+    try {
+      const res = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
+      const data = await res.json()
+      if (!data.ok || !data.value?.snapshot) {
+        alert(data.error ?? '加载快照失败')
+        return
+      }
+      const snap = data.value.snapshot
+      dispatch(setTasks({
+        tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
+        dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
+      }))
+      alert(`已加载「${v.name}」到本地。点"保存版本"后入库。`)
+    } catch {
+      alert('网络错误')
+    }
+  }, [projectId, dispatch])
 
   // 在甘特图上对比：加载版本快照作为对比叠加层
   const handleCompareOnChart = useCallback(async (v: ProjectVersion) => {
@@ -276,12 +298,23 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
             <span className="text-[13px] font-semibold text-gray-800">版本管理</span>
           </div>
           {activeTab === 'versions' && (
-            <button
-              onClick={() => setShowCreate(v => !v)}
-              className="text-[12px] text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
-            >
-              + 创建快照
-            </button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1 text-[11px] text-gray-500 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showAutosave}
+                  onChange={e => setShowAutosave(e.target.checked)}
+                  className="accent-gray-400 w-3 h-3"
+                />
+                显示自动保存
+              </label>
+              <button
+                onClick={() => setShowCreate(v => !v)}
+                className="text-[12px] text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
+              >
+                + 创建快照
+              </button>
+            </div>
           )}
         </div>
         <div className="flex px-4 gap-1">
@@ -352,8 +385,8 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
             {!loading && versions.length === 0 && (
               <div className="py-8 text-center text-[12px] text-gray-400">暂无快照版本</div>
             )}
-            {!loading && versions.map(v => (
-              <div key={v.id} className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors">
+            {!loading && versions.filter(v => showAutosave || !v.is_autosave).map(v => (
+              <div key={v.id} className={`border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors ${v.is_autosave ? 'bg-gray-50/60' : ''}`}>
                 {editingId === v.id ? (
                   <div className="px-4 py-3">
                     <input
@@ -381,7 +414,8 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                   <div className="px-4 py-2.5">
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
-                        <span className="text-[13px] font-medium text-gray-800">{v.name || `快照 #${v.version_number}`}</span>
+                        <span className={`text-[13px] font-medium ${v.is_autosave ? 'text-gray-500' : 'text-gray-800'}`}>{v.name || `快照 #${v.version_number}`}</span>
+                        {v.is_autosave && <span className="text-[9px] px-1.5 py-0.5 bg-gray-200 text-gray-500 rounded font-medium">自动</span>}
                       </div>
                       <span className="text-[11px] text-gray-400">#{v.version_number}</span>
                     </div>
@@ -424,16 +458,23 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                         >
                           差异
                         </button>
+                        <button
+                          onClick={() => handleView(v)}
+                          title="查看此版本（只读浏览，不影响工作状态）"
+                          className="px-1.5 py-0.5 text-[10px] text-green-600 hover:bg-green-50 rounded cursor-pointer"
+                        >
+                          查看
+                        </button>
                         {!readOnly && (
                         <button
-                          onClick={() => handleRestore(v)}
-                          title="恢复到此版本"
+                          onClick={() => handleRollback(v)}
+                          title="回退到此版本（本地预览，保存版本后入库）"
                           className="px-1.5 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded cursor-pointer"
                         >
-                          恢复
+                          回退
                         </button>
                         )}
-                        {!readOnly && (
+                        {!readOnly && !v.is_autosave && (
                         <button
                           onClick={() => { setEditingId(v.id); setEditName(v.name); setEditDesc(v.description ?? '') }}
                           title="编辑"

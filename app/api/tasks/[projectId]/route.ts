@@ -212,11 +212,20 @@ export async function POST(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
     for (const task of taskInputs) {
-      const { name, parent_id, assignee, start_date, end_date, duration, duration_unit,
-              percent_done, is_milestone, note, order_index, auto_schedule } = task as Record<string, unknown>
+      const { id, task_code, name, parent_id, assignee, start_date, end_date, duration, duration_unit,
+              percent_done, is_milestone, note, order_index, auto_schedule,
+              constraint_type, constraint_date, deadline, status, rollup, inactive,
+              project_boundary, baseline_end_date } = task as Record<string, unknown>
       if (!name) continue
 
-      const code = await nextTaskCode(client, projectId)
+      // 客户端可提供 id / task_code（本地预先生成）。校验客户端 id 不重复。
+      const clientId = (typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id)) ? id : null
+      let code: string
+      if (typeof task_code === 'string' && task_code.trim()) {
+        code = task_code.trim()
+      } else {
+        code = await nextTaskCode(client, projectId)
+      }
 
       // 确保日期格式正确：将ISO字符串或Date对象转换为YYYY-MM-DD格式
       const normalizeDate = (date: unknown): string | null => {
@@ -257,14 +266,18 @@ export async function POST(req: NextRequest, { params }: Params) {
 
       const r = await client.query(
         `INSERT INTO tasks
-           (project_id, parent_id, task_code, name, assignee, start_date, end_date,
-            duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule, constraint_type)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-        [projectId, parent_id ?? null, code, name,
+           (id, project_id, parent_id, task_code, name, assignee, start_date, end_date,
+            duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule,
+            constraint_type, constraint_date, deadline, status, rollup, inactive,
+            project_boundary, baseline_end_date)
+         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
+        [clientId, projectId, parent_id ?? null, code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          duration ?? null, duration_unit ?? 'day',
          percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
-         'asap']
+         constraint_type ?? 'asap', normalizeDate(constraint_date), normalizeDate(deadline),
+         status ?? null, rollup ?? false, inactive ?? false,
+         project_boundary ?? 'ask', normalizeDate(baseline_end_date)]
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
@@ -576,6 +589,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       // ── Detect field updates (collect for batch lifecycle insert) ───────
       const COMPARE_FIELDS = ['name','start_date','end_date','duration','assignee','is_milestone','note']
       let dateChanged = false
+      console.log(`[lifecycle] task ${code}: checking fields`, Object.keys(task as Record<string, unknown>).filter(k => COMPARE_FIELDS.includes(k)))
       for (const f of COMPARE_FIELDS) {
         if (!(f in task)) continue
         const norm = (v: unknown) => {
@@ -584,6 +598,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         }
         const ov = norm(old[f])
         const nv = norm(cur[f])
+        console.log(`[lifecycle] task ${code}.${f}: old="${ov}" new="${nv}" changed=${ov !== nv}`)
         if (ov === nv) continue
         const label = FIELD_LABELS[f] ?? f
         const ovStr = fmtFieldVal(f, old[f])

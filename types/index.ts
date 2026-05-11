@@ -44,6 +44,8 @@ export interface Task {
   inactive?: boolean
   project_boundary?: string | null  // ask | honor | ignore
   baseline_end_date?: string | null // 上次"确认变更"时的 end_date 快照；用于延期判定
+  original_start_date?: string | null  // 任务首次成为摘要任务前的原始日期，恢复用
+  original_end_date?: string | null
   created_at: string
   updated_at: string
 }
@@ -111,6 +113,7 @@ export interface ProjectVersion {
   created_at: string
   task_count?: number
   changes?: VersionChanges | null
+  is_autosave?: boolean
 }
 
 export interface ProjectLine {

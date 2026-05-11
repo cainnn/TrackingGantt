@@ -27,6 +27,7 @@ interface TasksState {
   viewSnapshot: ViewSnapshot | null
   diffFilter: DiffFilter | null
   dirtyIds: string[]
+  editDescriptions: Record<string, string>
   selectedIds: string[]
   loading: boolean
   error: string | null
@@ -41,6 +42,7 @@ const initialState: TasksState = {
   viewSnapshot: null,
   diffFilter: null,
   dirtyIds: [],
+  editDescriptions: {},
   selectedIds: [],
   loading: false,
   error: null,
@@ -110,6 +112,10 @@ const tasksSlice = createSlice({
     },
     clearDirty(state) {
       state.dirtyIds = []
+      state.editDescriptions = {}
+    },
+    setEditDescription(state, action: PayloadAction<{ taskId: string; description: string }>) {
+      state.editDescriptions[action.payload.taskId] = action.payload.description
     },
     setComparison(state, action: PayloadAction<Comparison>) {
       state.comparison = action.payload
@@ -138,6 +144,7 @@ const tasksSlice = createSlice({
       state.viewSnapshot = null
       state.diffFilter = null
       state.dirtyIds = []
+      state.editDescriptions = {}
       state.selectedIds = []
     },
   },
@@ -146,7 +153,7 @@ const tasksSlice = createSlice({
 export const {
   setTasks, addTasks, updateTasks, deleteTasks,
   copyTasks, clearClipboard, setSelectedIds,
-  markDirty, clearDirty,
+  markDirty, clearDirty, setEditDescription,
   setComparison, clearComparison,
   setViewSnapshot, clearViewSnapshot,
   setDiffFilter, clearDiffFilter,

@@ -4,11 +4,13 @@ import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   addTasks, updateTasks, deleteTasks,
-  addDependency, removeDependency, setTasks,
+  addDependency, removeDependency,
 } from '@/store/slices/tasksSlice'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
-import { enqueueTaskPut } from '@/lib/client/taskWriteQueue'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
+import { runFullCascade } from '@/lib/clientScheduling'
+import { uuid } from '@/lib/uuid'
+import { markDirty } from '@/store/slices/tasksSlice'
 import type { Task, Dependency } from '@/types'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -54,6 +56,47 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   const scrollRef = useRef<HTMLDivElement>(null)
   const diffSentRef = useRef<string | null>(null)  // 记录已自动发送过的版本名
 
+  // ── 上一次状态日期快照的 end_date + ID 集合 ────────────────────────
+  // end_date 用于覆盖 baseline_end_date；ID 集合用于 AI 识别"本期新增任务"作为延期根源
+  const [prevSnapshotEnds, setPrevSnapshotEnds] = useState<Map<string, string>>(new Map())
+  const [prevSnapshotTaskIds, setPrevSnapshotTaskIds] = useState<string[]>([])
+  useEffect(() => {
+    const snapshots = versions.filter(v => !v.is_autosave && v.status_date)
+    const baseline = snapshots.length >= 2 ? snapshots[1] : snapshots[0]
+    if (!baseline) {
+      setPrevSnapshotEnds(new Map())
+      setPrevSnapshotTaskIds([])
+      return
+    }
+    let cancelled = false
+    authFetch(`/api/versions/${projectId}?id=${baseline.id}`)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return
+        if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
+          const m = new Map<string, string>()
+          const ids: string[] = []
+          for (const t of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
+            ids.push(t.id)
+            if (t.end_date) m.set(t.id, String(t.end_date).split('T')[0])
+          }
+          setPrevSnapshotEnds(m)
+          setPrevSnapshotTaskIds(ids)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, versions])
+
+  // 用上期状态日期快照的 end_date 覆盖 baseline_end_date，确保 AI 收到的是"最近 2 次状态日期快照"的真实差异
+  const enrichedTasks = React.useMemo(() => {
+    if (prevSnapshotEnds.size === 0) return tasks
+    return tasks.map(t => {
+      const be = prevSnapshotEnds.get(t.id)
+      return be ? { ...t, baseline_end_date: be } : t
+    })
+  }, [tasks, prevSnapshotEnds])
+
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
@@ -70,60 +113,87 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         switch (tc.function.name) {
           case 'create_task': {
             const parentId = args.parent_task_code ? codeToId(tasks, args.parent_task_code) : null
-            const res = await authFetch(`/api/tasks/${projectId}`, {
-              method: 'POST',
-              headers: authFetchHeaders(true),
-              body: JSON.stringify({
-                name: args.name,
-                start_date: args.start_date ?? null,
-                end_date: args.end_date ?? null,
-                duration: args.duration ?? null,
-                assignee: args.assignee ?? null,
-                parent_id: parentId,
-                is_milestone: args.is_milestone ?? false,
-                note: args.note ?? null,
-              }),
-            })
-            const data = await res.json()
-            if (data.ok) {
-
-              dispatch(addTasks(Array.isArray(data.value) ? data.value : [data.value]))
-              result = `Created task "${args.name}" (code: ${data.value?.task_code ?? data.value?.[0]?.task_code ?? '?'})`
-            } else {
-              result = `Failed: ${data.error}`
+            const maxCode = tasks.reduce((m, t) => {
+              const n = parseInt(t.task_code, 10)
+              return !isNaN(n) && n > m ? n : m
+            }, 0)
+            const newTask: Task = {
+              id: uuid(),
+              project_id: projectId,
+              task_code: String(maxCode + 1),
+              name: args.name,
+              parent_id: parentId,
+              assignee: args.assignee ?? null,
+              start_date: args.start_date ?? null,
+              end_date: args.end_date ?? null,
+              duration: args.duration ?? null,
+              duration_unit: 'day',
+              percent_done: 0,
+              is_milestone: args.is_milestone ?? false,
+              note: args.note ?? null,
+              order_index: tasks.filter(t => t.parent_id === parentId).length,
+              auto_schedule: true,
+              constraint_type: 'asap',
+              constraint_date: null,
+              status: null,
+              rollup: false,
+              inactive: false,
+              project_boundary: 'ask',
+              baseline_end_date: null,
+              original_start_date: null,
+              original_end_date: null,
+              deadline: null,
+              is_deleted: false,
+              deleted_at: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
             }
+            dispatch(addTasks([newTask]))
+            dispatch(markDirty([newTask.id]))
+            result = `Created task "${args.name}" (code: ${newTask.task_code})`
             break
           }
 
           case 'update_task': {
             const id = codeToId(tasks, args.task_code)
             if (!id) { result = `Task code "${args.task_code}" not found`; break }
-            const updates: Record<string, unknown> = { id }
+            const updates: Record<string, unknown> = {}
             for (const key of ['name', 'start_date', 'end_date', 'duration', 'assignee', 'percent_done', 'is_milestone', 'note']) {
               if (args[key] !== undefined) updates[key] = args[key]
             }
-            await enqueueTaskPut(projectId, [updates])
             const task = tasks.find(t => t.id === id)
-            if (task) dispatch(updateTasks([{ ...task, ...updates } as Task]))
-            result = `Updated task ${args.task_code}: ${Object.keys(updates).filter(k => k !== 'id').join(', ')}`
+            if (task) {
+              const updated = { ...task, ...updates } as Task
+              dispatch(updateTasks([updated]))
+              dispatch(markDirty([id]))
+              const cascaded = runFullCascade(
+                tasks.map(t => t.id === id ? updated : t),
+                dependencies,
+              )
+              if (cascaded.length > 0) {
+                dispatch(updateTasks(cascaded))
+                dispatch(markDirty(cascaded.map(t => t.id)))
+              }
+            }
+            result = `Updated task ${args.task_code}: ${Object.keys(updates).join(', ')}`
             break
           }
 
           case 'delete_tasks': {
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
-            const res = await authFetch(`/api/tasks/${projectId}`, {
-              method: 'DELETE',
-              headers: authFetchHeaders(true),
-              body: JSON.stringify({ ids }),
-            })
-            const data = await res.json()
-            if (data.ok) {
-              dispatch(deleteTasks(ids))
-              result = `Deleted ${ids.length} task(s)`
-            } else {
-              result = `Failed: ${data.error}`
+            const idSet = new Set(ids)
+            const relatedDeps = dependencies.filter(d => idSet.has(d.from_task_id) || idSet.has(d.to_task_id))
+            for (const d of relatedDeps) dispatch(removeDependency(d.id))
+            dispatch(deleteTasks(ids))
+            const remainTasks = tasks.filter(t => !idSet.has(t.id))
+            const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
+            const cascaded = runFullCascade(remainTasks, remainDeps)
+            if (cascaded.length > 0) {
+              dispatch(updateTasks(cascaded))
+              dispatch(markDirty(cascaded.map(t => t.id)))
             }
+            result = `Deleted ${ids.length} task(s)`
             break
           }
 
@@ -131,25 +201,22 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             const fromId = codeToId(tasks, args.from_task_code)
             const toId   = codeToId(tasks, args.to_task_code)
             if (!fromId || !toId) { result = `Task code not found`; break }
-            const res = await authFetch(`/api/tasks/${projectId}`, {
-              method: 'PATCH',
-              headers: authFetchHeaders(true),
-              body: JSON.stringify({
-                action: 'add_dependency',
-                from_task_id: fromId,
-                to_task_id: toId,
-                type: args.type ?? 2,
-                lag: args.lag ?? 0,
-              }),
-            })
-            const data = await res.json()
-            if (data.ok) {
-
-              dispatch(addDependency(data.value))
-              result = `Added dependency ${args.from_task_code} -> ${args.to_task_code}`
-            } else {
-              result = `Failed: ${data.error}`
+            const newDep: Dependency = {
+              id: uuid(),
+              project_id: projectId,
+              from_task_id: fromId,
+              to_task_id: toId,
+              type: args.type ?? 2,
+              lag: args.lag ?? 0,
+              active: true,
             }
+            dispatch(addDependency(newDep))
+            const cascaded = runFullCascade(tasks, [...dependencies, newDep])
+            if (cascaded.length > 0) {
+              dispatch(updateTasks(cascaded))
+              dispatch(markDirty(cascaded.map(t => t.id)))
+            }
+            result = `Added dependency ${args.from_task_code} -> ${args.to_task_code}`
             break
           }
 
@@ -159,19 +226,14 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             if (!fromId || !toId) { result = `Task code not found`; break }
             const dep = dependencies.find(d => d.from_task_id === fromId && d.to_task_id === toId)
             if (!dep) { result = `Dependency not found`; break }
-            const res = await authFetch(`/api/tasks/${projectId}`, {
-              method: 'PATCH',
-              headers: authFetchHeaders(true),
-              body: JSON.stringify({ action: 'remove_dependency', id: dep.id }),
-            })
-            const data = await res.json()
-            if (data.ok) {
-
-              dispatch(removeDependency(dep.id))
-              result = `Removed dependency ${args.from_task_code} -> ${args.to_task_code}`
-            } else {
-              result = `Failed: ${data.error}`
+            dispatch(removeDependency(dep.id))
+            const remainDeps = dependencies.filter(d => d.id !== dep.id)
+            const cascaded = runFullCascade(tasks, remainDeps)
+            if (cascaded.length > 0) {
+              dispatch(updateTasks(cascaded))
+              dispatch(markDirty(cascaded.map(t => t.id)))
             }
+            result = `Removed dependency ${args.from_task_code} -> ${args.to_task_code}`
             break
           }
 
@@ -244,12 +306,18 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             const updates = args.updates as Record<string, unknown>
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
-            const putPayload = ids.map(id => ({ id, ...updates }))
-            await enqueueTaskPut(projectId, putPayload)
+            const idSet = new Set(ids)
             const updatedTasks = tasks
-              .filter(t => ids.includes(t.id))
+              .filter(t => idSet.has(t.id))
               .map(t => ({ ...t, ...updates } as Task))
             dispatch(updateTasks(updatedTasks))
+            dispatch(markDirty(ids))
+            const nextTasks = tasks.map(t => updatedTasks.find(u => u.id === t.id) ?? t)
+            const cascaded = runFullCascade(nextTasks, dependencies)
+            if (cascaded.length > 0) {
+              dispatch(updateTasks(cascaded))
+              dispatch(markDirty(cascaded.map(t => t.id)))
+            }
             result = `Updated ${ids.length} task(s): ${Object.keys(updates).join(', ')}`
             break
           }
@@ -402,11 +470,12 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         body: JSON.stringify({
           projectName: currentProject?.name ?? '',
           messages: apiMessages,
-          tasks,
+          tasks: enrichedTasks,
           dependencies,
           versionChanges,
           statusDate: currentProject?.status_date ?? null,
           progress: computeProjectProgressPercent(tasks, currentProject?.status_date),
+          prevTaskIds: prevSnapshotTaskIds,
         }),
       })
 
@@ -443,9 +512,10 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           body: JSON.stringify({
             projectName: currentProject?.name ?? '',
             messages: followUpMessages,
-            tasks,
+            tasks: enrichedTasks,
             dependencies,
             versionChanges,
+            prevTaskIds: prevSnapshotTaskIds,
           }),
         })
         const followData = await followRes.json()

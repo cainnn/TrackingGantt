@@ -2,11 +2,13 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { updateTasks, addDependency, updateDependency, removeDependency, setTasks } from '@/store/slices/tasksSlice'
+import { updateTasks, addDependency, updateDependency, removeDependency } from '@/store/slices/tasksSlice'
 import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
-import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
-import { markDirty } from '@/store/slices/tasksSlice'
+import { authFetch } from '@/lib/client/authFetch'
+import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
+import { runFullCascade } from '@/lib/clientScheduling'
+import { uuid } from '@/lib/uuid'
 
 interface Props {
   taskId: string
@@ -141,118 +143,108 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const fmtDateStr = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 
-  // ── Refresh tasks from server ────────────────────────────────────────
-  const refreshTasks = useCallback(async () => {
-    const r = await authFetch(`/api/tasks/${projectId}?t=${Date.now()}`, { cache: 'no-store' })
-    const t = await r.text()
-    try {
-      const d = t ? JSON.parse(t) : {}
-      if (d.ok && d.value) {
-        dispatch(setTasks(d.value))
-        const updated = (d.value.tasks as Task[])?.find(x => x.id === taskId)
-        if (updated) {
-          setStartDate(updated.start_date?.split('T')[0] ?? '')
-          setEndDate(updated.end_date?.split('T')[0] ?? '')
-          setDurationIn(updated.duration != null ? String(updated.duration) : '')
-        }
+  // ── 本地依赖变更后跑级联 ─────────────────────────────────────────────
+  const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
+    const baseTasks = nextTasks ?? allTasks
+    const cascaded = runFullCascade(baseTasks, nextDeps)
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
+      // 同步本任务的输入框
+      const me = cascaded.find(t => t.id === taskId)
+      if (me) {
+        setStartDate(me.start_date?.split('T')[0] ?? '')
+        setEndDate(me.end_date?.split('T')[0] ?? '')
+        setDurationIn(me.duration != null ? String(me.duration) : '')
       }
-    } catch { /* ignore */ }
-  }, [dispatch, projectId, taskId])
+    }
+  }, [dispatch, allTasks, taskId])
 
   // ── Add predecessor ──────────────────────────────────────────────────
-  const handleAddPredecessor = useCallback(async (fromTaskId: string) => {
+  const handleAddPredecessor = useCallback((fromTaskId: string) => {
     if (addingPred) return
     setAddingPred(true)
     try {
-
-      const res = await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from_task_id: fromTaskId, to_task_id: taskId, type: 2, lag: 0 }),
-      })
-      const data = await res.json()
-      if (data.ok && data.value?.dependency) {
-        dispatch(addDependency(data.value.dependency))
-        if (data.value.updatedTasks) dispatch(updateTasks(data.value.updatedTasks))
-        // Init lag for new dep
-        setLagEdits(prev => ({ ...prev, [data.value.dependency.id]: 0 }))
-      } else {
-        alert(data.message || '添加前置任务失败')
+      const newDep: Dependency = {
+        id: uuid(), project_id: projectId,
+        from_task_id: fromTaskId, to_task_id: taskId,
+        type: 2, lag: 0, active: true,
       }
-      await refreshTasks()
+      dispatch(addDependency(newDep))
+      setLagEdits(prev => ({ ...prev, [newDep.id]: 0 }))
+      // 添加依赖时本任务自动切换为自动排程
+      let nextTasks = allTasks
+      if (task && task.auto_schedule === false) {
+        const updatedTo = { ...task, auto_schedule: true }
+        dispatch(updateTasks([updatedTo]))
+        dispatch(markDirty([taskId]))
+        nextTasks = allTasks.map(t => t.id === taskId ? updatedTo : t)
+      }
+      recascadeAndUpdate([...deps, newDep], nextTasks)
     } finally {
       setAddingPred(false)
       setShowAddPred(false)
       setPredSearch('')
     }
-  }, [addingPred, dispatch, projectId, taskId, refreshTasks])
+  }, [addingPred, dispatch, projectId, taskId, deps, task, allTasks, recascadeAndUpdate])
 
   // ── Remove predecessor ───────────────────────────────────────────────
-  const handleRemovePredecessor = useCallback(async (depId: string) => {
+  const handleRemovePredecessor = useCallback((depId: string) => {
     dispatch(removeDependency(depId))
-    await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId }),
-    })
     setLagEdits(prev => { const n = { ...prev }; delete n[depId]; return n })
-    await refreshTasks()
-  }, [dispatch, projectId, refreshTasks])
+    const remainDeps = deps.filter(d => d.id !== depId)
+    recascadeAndUpdate(remainDeps)
+  }, [dispatch, deps, recascadeAndUpdate])
 
   // ── Add successor ─────────────────────────────────────────────────
-  const handleAddSuccessor = useCallback(async (toTaskId: string) => {
+  const handleAddSuccessor = useCallback((toTaskId: string) => {
     if (addingSucc) return
     setAddingSucc(true)
     try {
-
-      const res = await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from_task_id: taskId, to_task_id: toTaskId, type: 2, lag: 0 }),
-      })
-      const data = await res.json()
-      if (data.ok && data.value?.dependency) {
-        dispatch(addDependency(data.value.dependency))
-        if (data.value.updatedTasks) dispatch(updateTasks(data.value.updatedTasks))
-      } else {
-        alert(data.message || '添加后续任务失败')
+      const newDep: Dependency = {
+        id: uuid(), project_id: projectId,
+        from_task_id: taskId, to_task_id: toTaskId,
+        type: 2, lag: 0, active: true,
       }
-      await refreshTasks()
+      dispatch(addDependency(newDep))
+      let nextTasks = allTasks
+      const toTask = allTasks.find(t => t.id === toTaskId)
+      if (toTask && toTask.auto_schedule === false) {
+        const updatedTo = { ...toTask, auto_schedule: true }
+        dispatch(updateTasks([updatedTo]))
+        dispatch(markDirty([toTaskId]))
+        nextTasks = allTasks.map(t => t.id === toTaskId ? updatedTo : t)
+      }
+      recascadeAndUpdate([...deps, newDep], nextTasks)
     } finally {
       setAddingSucc(false)
       setShowAddSucc(false)
       setSuccSearch('')
     }
-  }, [addingSucc, dispatch, projectId, taskId, refreshTasks])
+  }, [addingSucc, dispatch, projectId, taskId, deps, allTasks, recascadeAndUpdate])
 
   // ── Remove successor ────────────────────────────────────────────────
-  const handleRemoveSuccessor = useCallback(async (depId: string) => {
+  const handleRemoveSuccessor = useCallback((depId: string) => {
     dispatch(removeDependency(depId))
-    await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId }),
-    })
-    await refreshTasks()
-  }, [dispatch, projectId, refreshTasks])
+    const remainDeps = deps.filter(d => d.id !== depId)
+    recascadeAndUpdate(remainDeps)
+  }, [dispatch, deps, recascadeAndUpdate])
 
   // ── Change dep type ──────────────────────────────────────────────────
-  const handleDepTypeChange = useCallback(async (depId: string, newType: number) => {
+  const handleDepTypeChange = useCallback((depId: string, newType: number) => {
     dispatch(updateDependency({ id: depId, type: newType }))
-    await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId, type: newType }),
-    })
-    await refreshTasks()
-  }, [dispatch, projectId, refreshTasks])
+    const nextDeps = deps.map(d => d.id === depId ? { ...d, type: newType } : d)
+    recascadeAndUpdate(nextDeps)
+  }, [dispatch, deps, recascadeAndUpdate])
 
   // ── Toggle manual mode ───────────────────────────────────────────────
   const handleToggleManual = useCallback(async (manual: boolean) => {
     if (!task) return
     if (manual) {
-      dispatch(updateTasks([{ ...task, auto_schedule: false }]))
+      const updated = { ...task, auto_schedule: false }
+      dispatch(updateTasks([updated]))
       dispatch(markDirty([task.id]))
+      dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为手动排程` }))
     } else {
       // Switch back to auto (空)
       const projectStart = currentProject?.start_date
@@ -262,8 +254,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       const dur = task.duration ?? 0
       const addD = (d: Date, n: number) => { const r = new Date(d); r.setDate(r.getDate()+n); return r }
       const newEnd = fmtDateStr(addD(new Date(earliest + 'T00:00:00'), dur))
-      dispatch(updateTasks([{ ...task, auto_schedule: true, start_date: earliest, end_date: newEnd, duration: dur }]))
+      const updated = { ...task, auto_schedule: true, start_date: earliest, end_date: newEnd, duration: dur }
+      dispatch(updateTasks([updated]))
       dispatch(markDirty([task.id]))
+      dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为自动排程` }))
       setStartDate(earliest)
       setEndDate(newEnd)
     }
@@ -333,42 +327,38 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     }
     dispatch(updateTasks([updated]))
     dispatch(markDirty([task.id]))
+    dispatch(setEditDescription({ taskId: task.id, description: `编辑了任务「${task.name}」` }))
 
-    // Save lag/active changes (both incoming and outgoing)
+    // 应用 lag/active 变更（本地）+ 级联
     const allEditableDeps = [...incomingDeps, ...outgoingDeps]
+    let depsChanged = false
+    let nextDeps = deps
     for (const dep of allEditableDeps) {
       const newLag = lagEdits[dep.id] ?? dep.lag ?? 0
       const newActive = activeEdits[dep.id] ?? dep.active ?? true
       const lagChanged = newLag !== (dep.lag ?? 0)
       const actChanged = newActive !== (dep.active ?? true)
       if (lagChanged || actChanged) {
-        dispatch(updateDependency({ ...dep, lag: newLag, active: newActive }))
-        const res = await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'PUT', headers: authFetchHeaders(true),
-          body: JSON.stringify({
-            id: dep.id,
-            ...(lagChanged ? { lag: newLag } : {}),
-            ...(actChanged ? { active: newActive } : {}),
-          }),
-        })
-        // 用 PUT 返回的级联结果局部更新，不做全量 refreshTasks（避免覆盖本地 dirty 状态）
-        if (res.ok) {
-          try {
-            const d = await res.json()
-            if (d.ok && d.value?.updatedTasks?.length) {
-              dispatch(updateTasks(d.value.updatedTasks))
-              dispatch(markDirty(d.value.updatedTasks.map((t: Task) => t.id)))
-            }
-          } catch { /* ignore */ }
-        }
+        dispatch(updateDependency({ id: dep.id, lag: newLag, active: newActive }))
+        nextDeps = nextDeps.map(d => d.id === dep.id ? { ...d, lag: newLag, active: newActive } : d)
+        depsChanged = true
+      }
+    }
+    const nextTasks = allTasks.map(t => t.id === task.id ? updated : t)
+    if (depsChanged) recascadeAndUpdate(nextDeps, nextTasks)
+    else {
+      const cascaded = runFullCascade(nextTasks, deps)
+      if (cascaded.length > 0) {
+        dispatch(updateTasks(cascaded))
+        dispatch(markDirty(cascaded.map(t => t.id)))
       }
     }
     onClose()
   }
 
   // ── Candidate tasks for predecessor selection ────────────────────────
+  // 排序与左侧任务列表保持一致（按 seqMap 升序，#N 即列表中的"编号"列）
   const existingFromIds = new Set(incomingDeps.map(d => d.from_task_id))
-  const currentSeq = seqMap.get(taskId) ?? 0
   const candidateTasks = allTasks.filter(t => {
     if (t.id === taskId) return false          // not self
     if (t.is_deleted) return false
@@ -379,11 +369,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       return (t.name.toLowerCase().includes(q) || String(seqMap.get(t.id) ?? '').includes(q))
     }
     return true
-  }).sort((a, b) => {
-    const sa = seqMap.get(a.id) ?? 99999
-    const sb = seqMap.get(b.id) ?? 99999
-    return Math.abs(sa - currentSeq) - Math.abs(sb - currentSeq)
-  })
+  }).sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
 
   // ── Candidate tasks for successor selection ─────────────────────────
   const existingToIds = new Set(outgoingDeps.map(d => d.to_task_id))
@@ -397,11 +383,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       return (t.name.toLowerCase().includes(q) || String(seqMap.get(t.id) ?? '').includes(q))
     }
     return true
-  }).sort((a, b) => {
-    const sa = seqMap.get(a.id) ?? 99999
-    const sb = seqMap.get(b.id) ?? 99999
-    return Math.abs(sa - currentSeq) - Math.abs(sb - currentSeq)
-  })
+  }).sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
 
   const fmtDate = (s: string) => {
     const d = new Date(s)

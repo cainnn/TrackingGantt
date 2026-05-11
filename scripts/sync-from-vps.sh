@@ -12,7 +12,7 @@ set -euo pipefail
 # ============================================================
 
 # ---------- 远程 (VPS) 数据库配置 ----------
-VPS_HOST="${1:-${VPS_HOST:-your-vps-ip}}"
+VPS_HOST="${1:-${VPS_HOST:-159.75.40.209}}"
 VPS_PORT="${VPS_PORT:-5432}"
 VPS_DB="${VPS_DB:-gantt_app}"
 VPS_USER="${VPS_USER:-postgres}"

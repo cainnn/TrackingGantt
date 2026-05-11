@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS project_versions (
   snapshot JSONB NOT NULL,
   changes JSONB,
   status_date DATE,
+  is_autosave BOOLEAN DEFAULT false,
   created_by UUID REFERENCES users(id),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(project_id, version_number)
@@ -146,7 +147,9 @@ ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date DATE;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_type VARCHAR(40) DEFAULT 'asap';
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_date DATE;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS deadline DATE;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS status VARCHAR(20);
 ALTER TABLE tasks        DROP COLUMN IF EXISTS complexity;
+ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS is_autosave BOOLEAN DEFAULT false;
 
 -- 历史变更审计：记录对"状态日期之前"的任务所做的回溯修改
 CREATE TABLE IF NOT EXISTS task_change_log (

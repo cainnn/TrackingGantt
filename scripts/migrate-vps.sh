@@ -27,11 +27,16 @@ echo "对 ${VPS_USER}@${VPS_HOST}:${VPS_PORT}/${VPS_DB} 执行迁移..."
 PGPASSWORD="$VPS_PASSWORD" psql \
   -h "$VPS_HOST" -p "$VPS_PORT" -U "$VPS_USER" -d "$VPS_DB" \
   -v ON_ERROR_STOP=1 <<'SQL'
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS rollup           BOOLEAN     DEFAULT false;
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS inactive         BOOLEAN     DEFAULT false;
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS project_boundary VARCHAR(20) DEFAULT 'ask';
-ALTER TABLE dependencies ADD COLUMN IF NOT EXISTS active           BOOLEAN     DEFAULT true;
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date DATE;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS rollup              BOOLEAN     DEFAULT false;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS inactive            BOOLEAN     DEFAULT false;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS project_boundary    VARCHAR(20) DEFAULT 'ask';
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS baseline_end_date   DATE;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS deadline            DATE;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS status              VARCHAR(40);
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS original_start_date DATE;
+ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS original_end_date   DATE;
+ALTER TABLE dependencies     ADD COLUMN IF NOT EXISTS active              BOOLEAN     DEFAULT true;
+ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS is_autosave         BOOLEAN     DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS task_change_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

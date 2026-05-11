@@ -11,9 +11,7 @@
     "doc-pdf": "node scripts/generate-doc-pdf.js",
     "deploy:vps": "bash scripts/deploy-vps.sh",
     "deploy:fast": "SKIP_BACKUP=1 SKIP_MIGRATE=1 bash scripts/deploy-vps.sh",
-    "deploy:local": "LOCAL_BUILD=1 bash scripts/deploy-vps.sh",
-    "sync:db": "bash scripts/sync-db-to-vps.sh",
-    "sync:db:data": "bash scripts/sync-db-to-vps.sh --data-only"
+    "deploy:local": "LOCAL_BUILD=1 bash scripts/deploy-vps.sh"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.11.2",

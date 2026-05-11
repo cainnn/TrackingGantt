@@ -37,6 +37,7 @@ export interface ImportTask {
   inactive?: boolean
   project_boundary?: string | null
   status?: string | null
+  deadline?: string | null
   baseline_end_date?: string | null
 }
 
@@ -45,6 +46,7 @@ export interface ImportDep {
   to_task_code: string
   type: number
   lag: number
+  active?: boolean
 }
 
 function fmtD(d: Date): string {
@@ -74,8 +76,9 @@ function parseDateCell(v: unknown): string | null {
   return null
 }
 
-// Parse predecessor strings like "3FS+2d,5SS-1d" or "T-003FS+2d,T-005SS-1d"
-const PRED_RE = /([A-Za-z]*-?\d+)(SS|SF|FS|FF)?([+-]\d+d)?/g
+// Parse predecessor strings like "3FS+2d,5SS-1d" or "!T-003FS+2d,T-005SS-1d"
+// Leading "!" marks the dependency as disabled (active=false)
+const PRED_RE = /(!?)([A-Za-z]*-?\d+)(SS|SF|FS|FF)?([+-]\d+d)?/g
 
 function parsePredecessors(s: string, toTaskCode: string): ImportDep[] {
   if (!s || !s.trim()) return []
@@ -83,10 +86,11 @@ function parsePredecessors(s: string, toTaskCode: string): ImportDep[] {
   let m: RegExpExecArray | null
   PRED_RE.lastIndex = 0
   while ((m = PRED_RE.exec(s)) !== null) {
-    const fromCode = m[1]
-    const type = m[2] ? DEP_TYPE_MAP[m[2]] ?? 2 : 2
-    const lag = m[3] ? parseInt(m[3].replace('d', '')) : 0
-    deps.push({ from_task_code: fromCode, to_task_code: toTaskCode, type, lag })
+    const active = m[1] !== '!'
+    const fromCode = m[2]
+    const type = m[3] ? DEP_TYPE_MAP[m[3]] ?? 2 : 2
+    const lag = m[4] ? parseInt(m[4].replace('d', '')) : 0
+    deps.push({ from_task_code: fromCode, to_task_code: toTaskCode, type, lag, active })
   }
   return deps
 }
@@ -317,7 +321,9 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
       rollup: String(row['汇总'] ?? '').trim() === '是',
       inactive: String(row['非激活'] ?? '').trim() === '是',
       project_boundary: String(row['项目边界'] ?? '').trim() || null,
-      status: String(row['状态'] ?? '').trim() || null,
+      // 状态为派生字段：由 baseline_end_date + end_date 重新计算，不从 Excel 读取
+      status: null,
+      deadline: parseDateCell(row['截止日期']),
       baseline_end_date: parseDateCell(row['基线结束']),
     }
     tasks.push(task)

@@ -14,12 +14,16 @@ import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
-import { parseExcelFile, validateImportData, type ImportTask } from '@/lib/client/excelImport'
+import { parseExcelFile, validateImportData, type ImportTask, type ImportDep, type ImportProjectLine } from '@/lib/client/excelImport'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsConfig } from './GanttChart'
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
+import { runFullCascade } from '@/lib/clientScheduling'
+import { buildSaveDiff, hasAnyDiff } from '@/lib/clientSave'
+import { uuid } from '@/lib/uuid'
+import type { Dependency } from '@/types'
 
 // ── Flat tree order ───────────────────────────────────────────────────────
 function getFlatOrder(tasks: Task[]): Task[] {
@@ -117,10 +121,11 @@ const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="
 
 // 年-月-日顺序的日期输入：显示 YYYY-MM-DD，点击触发原生日历选择
 function YmdDateInput({
-  value, max, onChange,
+  value, max, min, onChange,
 }: {
   value: string
   max?: string
+  min?: string
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
 }) {
   const ref = useRef<HTMLInputElement>(null)
@@ -154,6 +159,7 @@ function YmdDateInput({
         type="date"
         value={value}
         max={max}
+        min={min}
         onChange={onChange}
         className="absolute inset-0 opacity-0 pointer-events-none"
         tabIndex={-1}
@@ -182,8 +188,6 @@ interface GanttToolbarProps {
   showComparison?: boolean
   onToggleComparison?: () => void
   onShowComparison?: () => void
-  compareLock?: boolean
-  onToggleCompareLock?: (next: boolean) => void
   visibleCols?: OptionalCol[]
   onVisibleColsChange?: (cols: OptionalCol[]) => void
   indicators?: IndicatorsConfig
@@ -205,32 +209,21 @@ export default function GanttToolbar({
   showComparison,
   onToggleComparison,
   onShowComparison,
-  compareLock,
-  onToggleCompareLock,
   visibleCols,
   onVisibleColsChange,
   indicators,
   onIndicatorsChange,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
-  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
+  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, editDescriptions, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
 
-  // 上一版本的状态日期（用于限制新版本必须严格大于旧版本）
+  // 上一版本带状态日期的快照（保存时校验：新版本状态日期必须严格大于旧版本）
   const lastVersionDate = React.useMemo(() => {
-    if (!versions.length) return null
-    const latest = versions[0]
-    return latest.status_date?.split('T')[0] ?? null
+    const latest = versions.find(v => !v.is_autosave && v.status_date)
+    return latest?.status_date?.split('T')[0] ?? null
   }, [versions])
-
-  // 日期选择器的最小可选日期（上一版本日期+1天）
-  const minSelectableDate = React.useMemo(() => {
-    if (!lastVersionDate) return null
-    const d = new Date(lastVersionDate)
-    d.setDate(d.getDate() + 1)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  }, [lastVersionDate])
 
   // Column settings dropdown
   const [colSettingsOpen, setColSettingsOpen] = useState(false)
@@ -258,26 +251,69 @@ export default function GanttToolbar({
 
   const hasSelection = selectedIds.length > 0
 
+
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [retroLogOpen, setRetroLogOpen] = useState(false)
+  const [viewVersionOpen, setViewVersionOpen] = useState(false)
+  const viewVersionRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!viewVersionOpen) return
+    const close = (e: MouseEvent) => {
+      if (viewVersionRef.current && !viewVersionRef.current.contains(e.target as Node)) setViewVersionOpen(false)
+    }
+    setTimeout(() => document.addEventListener('mousedown', close), 0)
+    return () => document.removeEventListener('mousedown', close)
+  }, [viewVersionOpen])
+
+  // 切换到指定历史版本（只读浏览）
+  const handleEnterViewSnapshot = useCallback(async (versionId: string) => {
+    const v = versions.find(x => x.id === versionId)
+    if (!v) return
+    try {
+      const r = await authFetch(`/api/versions/${projectId}?id=${versionId}`)
+      const d = await r.json()
+      if (d.ok && d.value?.snapshot) {
+        dispatch(setViewSnapshot({
+          tasks: Array.isArray(d.value.snapshot.tasks) ? d.value.snapshot.tasks : [],
+          dependencies: Array.isArray(d.value.snapshot.dependencies) ? d.value.snapshot.dependencies : [],
+          versionId: v.id,
+          versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
+        }))
+      }
+    } catch { /* ignore */ }
+    setViewVersionOpen(false)
+  }, [versions, projectId, dispatch])
 
   // ── 变更检测（纯本地，不依赖 API）──────────────────────────────────
-  // 基线：首次加载任务时捕获，不做任何 API 调用
+  // 基线：首次加载任务时捕获快照，作为"上次入库状态"。所有编辑只改 Redux，
+  // "保存版本"时与基线 diff 出增删改，批量落库后基线重置为当前状态。
   const [baseline, setBaseline] = useState<SnapshotTask[] | null>(null)
+  const [baselineTasks, setBaselineTasks] = useState<Task[]>([])
+  const [baselineDeps, setBaselineDeps] = useState<Dependency[]>([])
 
   // 任务首次加载完成时，捕获当前状态作为基线
   const baselineCapturedRef = useRef(false)
   useEffect(() => {
-    if (baselineCapturedRef.current || tasks.length === 0) return
+    if (tasks.length === 0) {
+      baselineCapturedRef.current = false
+      setBaseline(null)
+      setBaselineTasks([])
+      setBaselineDeps([])
+      return
+    }
+    if (baselineCapturedRef.current) return
     baselineCapturedRef.current = true
-    setBaseline(tasks.filter(t => !t.is_deleted).map(t => ({
+    const livingTasks = tasks.filter(t => !t.is_deleted)
+    setBaseline(livingTasks.map(t => ({
       id: t.id, task_code: t.task_code, name: t.name,
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
       parent_id: t.parent_id,
     })))
+    setBaselineTasks(livingTasks.map(t => ({ ...t })))
+    setBaselineDeps(dependencies.map(d => ({ ...d })))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.length])
 
@@ -294,53 +330,114 @@ export default function GanttToolbar({
     return diffSnapshots(baseline, currentSnap)
   }, [baseline, tasks])
 
-  const hasChanges = changeDiffs.length > 0
+  // 依赖变更检测：添加/删除/修改 lag/type/active（任务字段 diff 不包含依赖）
+  const DEP_TYPE_LABEL = ['SS', 'SF', 'FS', 'FF']
+  interface DepChangeItem {
+    id: string
+    type: 'added' | 'removed' | 'updated'
+    fromCode: string; fromName: string
+    toCode: string; toName: string
+    depTypeLabel: string
+    changes?: { field: string; old: string; new: string }[]
+  }
+  const depDiff = React.useMemo(() => {
+    const baseMap = new Map(baselineDeps.map(d => [d.id, d]))
+    const curMap = new Map(dependencies.map(d => [d.id, d]))
+    // 用 baselineTasks + 当前 tasks 联合查询任务名/编码（删除的任务也能找到）
+    const taskInfoMap = new Map<string, { code: string; name: string }>()
+    for (const t of baselineTasks) taskInfoMap.set(t.id, { code: t.task_code, name: t.name })
+    for (const t of tasks) taskInfoMap.set(t.id, { code: t.task_code, name: t.name })
+    const lookup = (id: string) => taskInfoMap.get(id) ?? { code: '?', name: '(未知任务)' }
+
+    const items: DepChangeItem[] = []
+    for (const [id, cur] of curMap) {
+      const old = baseMap.get(id)
+      const fi = lookup(cur.from_task_id), ti = lookup(cur.to_task_id)
+      const tLabel = DEP_TYPE_LABEL[cur.type ?? 2] ?? 'FS'
+      if (!old) {
+        items.push({
+          id, type: 'added',
+          fromCode: fi.code, fromName: fi.name,
+          toCode: ti.code, toName: ti.name,
+          depTypeLabel: tLabel,
+        })
+        continue
+      }
+      const changes: { field: string; old: string; new: string }[] = []
+      if ((old.type ?? null) !== (cur.type ?? null))
+        changes.push({ field: '类型', old: DEP_TYPE_LABEL[old.type ?? 2] ?? 'FS', new: tLabel })
+      if ((old.lag ?? 0) !== (cur.lag ?? 0))
+        changes.push({ field: '延迟', old: `${old.lag ?? 0}d`, new: `${cur.lag ?? 0}d` })
+      if ((old.active ?? true) !== (cur.active ?? true))
+        changes.push({ field: '状态', old: (old.active ?? true) ? '启用' : '禁用', new: (cur.active ?? true) ? '启用' : '禁用' })
+      if (old.from_task_id !== cur.from_task_id || old.to_task_id !== cur.to_task_id) {
+        const ofI = lookup(old.from_task_id), otI = lookup(old.to_task_id)
+        changes.push({ field: '端点', old: `${ofI.code}→${otI.code}`, new: `${fi.code}→${ti.code}` })
+      }
+      if (changes.length > 0) {
+        items.push({
+          id, type: 'updated',
+          fromCode: fi.code, fromName: fi.name,
+          toCode: ti.code, toName: ti.name,
+          depTypeLabel: tLabel,
+          changes,
+        })
+      }
+    }
+    for (const [id, old] of baseMap) {
+      if (curMap.has(id)) continue
+      const fi = lookup(old.from_task_id), ti = lookup(old.to_task_id)
+      items.push({
+        id, type: 'removed',
+        fromCode: fi.code, fromName: fi.name,
+        toCode: ti.code, toName: ti.name,
+        depTypeLabel: DEP_TYPE_LABEL[old.type ?? 2] ?? 'FS',
+      })
+    }
+    const added = items.filter(i => i.type === 'added').length
+    const updated = items.filter(i => i.type === 'updated').length
+    const removed = items.filter(i => i.type === 'removed').length
+    return { items, added, updated, removed, total: items.length }
+  }, [baselineDeps, dependencies, baselineTasks, tasks])
+
+  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0
 
   // 变更审核弹窗状态
   const [reviewOpen, setReviewOpen] = useState(false)
   // 每个变更项的原因（key = task_code）
   const [reasons, setReasons] = useState<Record<string, string>>({})
 
-  // 对比模式：进入时默认对比最近快照，目标可在历史版本面板切换
+  // 对比模式：仅以"上一次状态日期快照"作为基准条覆盖在当前主视图下方。
+  // 不再切换主视图——查看历史版本请使用版本面板中的"查看"按钮。
   const handleToggleCompareLock = useCallback(async () => {
     if (comparison) {
       dispatch(clearComparison())
-      dispatch(clearViewSnapshot())
-      onToggleCompareLock?.(false)
       return
     }
-    if (!versions.length) {
-      alert('还没有历史快照可供对比')
+    const snapshots = versions.filter(v => !v.is_autosave && v.status_date)
+    if (snapshots.length === 0) {
+      alert('还没有带状态日期的快照可供对比')
       return
     }
-    const latest = versions[0]
+    const baseline = snapshots.length >= 2 ? snapshots[1] : snapshots[0]
     try {
-      const r = await authFetch(`/api/versions/${projectId}?id=${latest.id}`)
+      const r = await authFetch(`/api/versions/${projectId}?id=${baseline.id}`)
       const d = await r.json()
       if (d.ok && d.value?.snapshot?.tasks) {
         dispatch(setComparison({
           tasks: d.value.snapshot.tasks,
-          versionName: latest.name || latest.status_date?.split('T')[0] || `快照 #${latest.version_number}`,
+          versionName: baseline.name || baseline.status_date?.split('T')[0] || `快照 #${baseline.version_number}`,
         }))
-        onShowComparison?.()
-        onToggleCompareLock?.(true)
       }
-    } catch { /* ignore */ }
-  }, [comparison, versions, projectId, dispatch, onShowComparison, onToggleCompareLock])
-
-  // 同步对比锁定与 comparison 状态：面板里选别的版本对比时，也触发编辑锁
-  useEffect(() => {
-    if (comparison && !compareLock) {
-      onToggleCompareLock?.(true)
       onShowComparison?.()
-    } else if (!comparison && compareLock) {
-      onToggleCompareLock?.(false)
-    }
-  }, [comparison, compareLock, onToggleCompareLock, onShowComparison])
+    } catch { /* ignore */ }
+  }, [comparison, versions, projectId, dispatch, onShowComparison])
   // 区分主动/被动变更：
   // - 添加/删除 → 主动
+  // - 添加/删除 → 主动
   // - 仅顺序（order_index）变化 → 被动，自动填「由于 {主动项} 调整引发」
-  // - 字段变更且该任务存在上游依赖（from→to 链中的 from 也在变更集里） → 被动，自动填「由 {前置 task_code} 调整引发」
+  // - 字段变更且该任务存在上游依赖（from→to 链中的 from 也在变更集里） → 被动
+  // - 字段变更但任务不在 dirtyIds 中（非用户显式编辑） → 被动，自动填「由其他任务调整引发」
   // - 其余字段变更 → 主动
   // - 特例：全部都是顺序变化 → 位移最大的那项视为主动
   const { primaryCodes, passiveReasonMap } = React.useMemo(() => {
@@ -349,6 +446,13 @@ export default function GanttToolbar({
     for (const t of tasks) {
       idByCode.set(t.task_code, t.id)
       codeById.set(t.id, t.task_code)
+    }
+
+    // dirtyIds 中的 task_code 集合——用户显式编辑过的任务
+    const dirtyCodeSet = new Set<string>()
+    for (const id of dirtyIds) {
+      const code = codeById.get(id)
+      if (code) dirtyCodeSet.add(code)
     }
 
     const addedRemoved = new Set<string>()
@@ -367,7 +471,6 @@ export default function GanttToolbar({
     }
 
     // 依赖级联：沿依赖链向上追溯源头——只有无变更前置的节点才是主动
-    // 例：1→2→3，1、2、3 都变了，2 和 3 的源头都追溯到 1
     const changedPredsOf = (code: string): string[] => {
       const id = idByCode.get(code)
       if (!id) return []
@@ -378,7 +481,7 @@ export default function GanttToolbar({
     }
     const cascadeReason: Record<string, string> = {}
     for (const code of fieldChangedCodes) {
-      if (changedPredsOf(code).length === 0) continue // 本身是源头
+      if (changedPredsOf(code).length === 0) continue
       const roots = new Set<string>()
       const visited = new Set<string>()
       const stack = [code]
@@ -398,11 +501,25 @@ export default function GanttToolbar({
       }
     }
 
+    // 非 dirtyIds 中的字段变更 → 被动（用户未显式编辑，属于间接影响）
+    const indirectReason: Record<string, string> = {}
+    for (const code of fieldChangedCodes) {
+      if (cascadeReason[code]) continue          // 已由依赖链标记
+      if (dirtyCodeSet.has(code)) continue        // 用户显式编辑过
+      // 找出用户显式编辑的 task_code 作为归因来源
+      const dirtyCodes = Array.from(dirtyCodeSet).filter(c => fieldChangedCodes.has(c) || addedRemoved.has(c))
+      indirectReason[code] = dirtyCodes.length > 0
+        ? `由 ${dirtyCodes.join(', ')} 的调整引发`
+        : '由其他任务调整引发'
+    }
+
     const primary = new Set<string>()
     for (const c of addedRemoved) primary.add(c)
-    for (const c of fieldChangedCodes) if (!cascadeReason[c]) primary.add(c)
+    for (const c of fieldChangedCodes) {
+      if (!cascadeReason[c] && !indirectReason[c]) primary.add(c)
+    }
 
-    const passive: Record<string, string> = { ...cascadeReason }
+    const passive: Record<string, string> = { ...cascadeReason, ...indirectReason }
     if (primary.size === 0 && orderOnly.length > 0) {
       orderOnly.sort((a, b) => b.delta - a.delta)
       primary.add(orderOnly[0].code)
@@ -414,13 +531,21 @@ export default function GanttToolbar({
       }
     }
     return { primaryCodes: primary, passiveReasonMap: passive }
-  }, [changeDiffs, tasks, dependencies])
+  }, [changeDiffs, tasks, dependencies, dirtyIds])
 
   const openReview = useCallback(() => {
-    setReasons({})
+    // 用自动描述预填主动变更的原因
+    const prefilled: Record<string, string> = {}
+    for (const [taskId, desc] of Object.entries(editDescriptions)) {
+      const t = tasks.find(t => t.id === taskId)
+      if (t && primaryCodes.has(t.task_code)) {
+        prefilled[t.task_code] = desc
+      }
+    }
+    setReasons(prefilled)
     setReviewOpen(true)
-  }, [])
-  const allReasonsFilled = changeDiffs.length > 0 &&
+  }, [editDescriptions, tasks, primaryCodes])
+  const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0) &&
     changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
   // 初始加载时，拉取版本列表
@@ -431,38 +556,29 @@ export default function GanttToolbar({
       .catch(() => {})
   }, [projectId, dispatch])
 
-  // 用户编辑产生变更后，自动加载最近版本快照并显示对比基线
-  // 只要 hasChanges 为 true 且当前未显示对比，就补上；不再用 once-ref 锁死
-  const comparisonShownRef = useRef(false)
+  // ── 自动保存快照（5 分钟间隔，仅在有未保存编辑时触发） ──
   useEffect(() => {
-    if (!hasChanges) { comparisonShownRef.current = false; return }
-    if (comparison) return
-    if (comparisonShownRef.current) return
-    if (!baseline || baseline.length === 0) return
-    comparisonShownRef.current = true
-    // 直接用本地基线（进入项目时的状态）作为对比基线——与当前任务 id 完全匹配
-    const byId = new Map(tasks.map(t => [t.id, t]))
-    const snap = baseline.map(b => {
-      const t = byId.get(b.id)
-      if (!t) return null
-      return {
-        ...t,
-        start_date: b.start_date,
-        end_date: b.end_date,
-        duration: b.duration,
-        percent_done: b.percent_done,
-        is_milestone: b.is_milestone,
-        parent_id: b.parent_id,
-      }
-    }).filter((x): x is NonNullable<typeof x> => !!x)
-    if (snap.length === 0) { comparisonShownRef.current = false; return }
-    const versionName = versions[0]?.status_date?.split('T')[0]
-      ?? versions[0]?.name
-      ?? '进入时状态'
-    dispatch(setComparison({ tasks: snap, versionName }))
-    onShowComparison?.()
-  }, [hasChanges, comparison, baseline, tasks, versions, dispatch, onShowComparison])
-
+    if (readOnly) return
+    const timer = setInterval(() => {
+      if (dirtyIds.length === 0) return
+      authFetch(`/api/versions/${projectId}`, {
+        method: 'POST',
+        headers: authFetchHeaders(true),
+        body: JSON.stringify({ tasks, dependencies, is_autosave: true }),
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) {
+            // 刷新版本列表
+            authFetch(`/api/versions/${projectId}?list=1`)
+              .then(r => r.json())
+              .then(d2 => { if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value)) })
+          }
+        })
+        .catch(() => {})
+    }, 5 * 60 * 1000)
+    return () => clearInterval(timer)
+  }, [projectId, readOnly, dirtyIds, tasks, dependencies, dispatch])
 
   // ── Export ─────────────────────────────────────────────────────────────
   const projectLines = useAppSelector(s => s.projectLines.lines)
@@ -478,10 +594,38 @@ export default function GanttToolbar({
     return () => window.removeEventListener('mousedown', close)
   }, [exportDropdown])
 
+  // 加载上期状态日期快照（用于导出时识别新任务 + 延期归因）
+  const [prevSnapshotMap, setPrevSnapshotMap] = useState<{ ids: Set<string>; ends: Map<string, string> }>({ ids: new Set(), ends: new Map() })
+  useEffect(() => {
+    const snapshots = versions.filter(v => !v.is_autosave && v.status_date)
+    const baseline = snapshots.length >= 2 ? snapshots[1] : snapshots[0]
+    if (!baseline) { setPrevSnapshotMap({ ids: new Set(), ends: new Map() }); return }
+    let cancelled = false
+    authFetch(`/api/versions/${projectId}?id=${baseline.id}`)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return
+        if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
+          const ids = new Set<string>()
+          const ends = new Map<string, string>()
+          for (const t of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
+            ids.add(t.id)
+            if (t.end_date) ends.set(t.id, String(t.end_date).split('T')[0])
+          }
+          setPrevSnapshotMap({ ids, ends })
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, versions])
+
   const handleExportExcel = useCallback(() => {
-    exportToExcel(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines)
+    exportToExcel(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines, {
+      prevTaskIds: prevSnapshotMap.ids,
+      prevEndMap: prevSnapshotMap.ends,
+    })
     setExportDropdown(false)
-  }, [tasks, dependencies, currentProject, projectLines])
+  }, [tasks, dependencies, currentProject, projectLines, prevSnapshotMap])
 
   const handleExportJpeg = useCallback(async () => {
     setExportDropdown(false)
@@ -534,56 +678,113 @@ export default function GanttToolbar({
       }
 
       setImporting(true)
-      // Ensure all dates are YYYY-MM-DD or null before sending
       const safeDateRe = /^\d{4}-\d{2}-\d{2}$/
       const safeTasks = parsed.tasks.map((t: ImportTask) => ({
         ...t,
         start_date: typeof t.start_date === 'string' && safeDateRe.test(t.start_date) ? t.start_date : null,
         end_date: typeof t.end_date === 'string' && safeDateRe.test(t.end_date) ? t.end_date : null,
       }))
-      const res = await authFetch(`/api/import/${projectId}`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({
-          tasks: safeTasks,
-          dependencies: parsed.dependencies,
-          mode,
-          status_date: parsed.statusDate ?? undefined,
-          project_lines: parsed.projectLines ?? undefined,
-        }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        dispatch(setTasks({ tasks: data.value.tasks, dependencies: data.value.dependencies }))
-        // Update status_date if returned
-        if (data.value.status_date !== undefined) {
-          dispatch(setStatusDate({ projectId, statusDate: data.value.status_date }))
-        }
-        // Update project lines if returned
-        if (data.value.project_lines) {
-          dispatch(setProjectLines(data.value.project_lines))
-        }
-        // 导入后刷新版本列表 + 自动加载对比基线
-        if (data.value.version) {
-          authFetch(`/api/versions/${projectId}?list=1`)
-            .then(r => r.json())
-            .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
-            .catch(() => {})
-          dispatch(setComparison({
-            tasks: data.value.tasks.map((t: Task) => ({ ...t })),
-            versionName: data.value.version.name ?? '导入版本',
-          }))
-        }
-        alert(`导入成功！${data.value.message}`)
-      } else {
-        alert(`导入失败：${data.error ?? '未知错误'}`)
+
+      // 客户端构建任务/依赖（保存版本时统一落库）
+      const codeToId = new Map<string, string>()
+      const baseOrder = mode === 'merge' ? tasks.reduce((m, t) => Math.max(m, t.order_index), -1) + 1 : 0
+
+      // 合并模式下，先按 task_code 匹配现有任务（用于覆盖更新而非新建）
+      const existingByCode = new Map<string, Task>()
+      if (mode === 'merge') for (const t of tasks) existingByCode.set(t.task_code, t)
+
+      // 第一遍：分配 ID
+      for (const it of safeTasks) {
+        const existing = existingByCode.get(it.task_code)
+        if (existing) codeToId.set(it.task_code, existing.id)
+        else codeToId.set(it.task_code, uuid())
       }
+
+      const importedTasks: Task[] = safeTasks.map((it, i) => {
+        const id = codeToId.get(it.task_code)!
+        const parent = it.parent_task_code ? codeToId.get(it.parent_task_code) ?? null : null
+        const existing = existingByCode.get(it.task_code)
+        return {
+          id, project_id: projectId, task_code: it.task_code,
+          name: it.name,
+          parent_id: parent,
+          assignee: it.assignee,
+          start_date: it.start_date, end_date: it.end_date,
+          duration: it.duration ?? 0, duration_unit: 'day',
+          percent_done: it.percent_done ?? 0,
+          is_milestone: it.is_milestone,
+          note: it.note,
+          order_index: existing?.order_index ?? (baseOrder + i),
+          auto_schedule: it.auto_schedule,
+          constraint_type: it.constraint_type ?? 'asap',
+          constraint_date: it.constraint_date ?? null,
+          status: it.status ?? null,
+          rollup: it.rollup ?? false,
+          inactive: it.inactive ?? false,
+          project_boundary: it.project_boundary ?? 'ask',
+          baseline_end_date: it.baseline_end_date ?? null,
+          original_start_date: null,
+          original_end_date: null,
+          deadline: it.deadline ?? null,
+          is_deleted: false,
+          deleted_at: null,
+          created_at: existing?.created_at ?? new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }
+      })
+
+      const importedDeps: Dependency[] = []
+      for (const d of parsed.dependencies as ImportDep[]) {
+        const fromId = codeToId.get(d.from_task_code)
+        const toId = codeToId.get(d.to_task_code)
+        if (!fromId || !toId) continue
+        importedDeps.push({
+          id: uuid(),
+          project_id: projectId,
+          from_task_id: fromId,
+          to_task_id: toId,
+          type: d.type, lag: d.lag,
+          active: d.active ?? true,
+        })
+      }
+
+      let nextTasks: Task[]
+      let nextDeps: Dependency[]
+      if (mode === 'replace') {
+        nextTasks = importedTasks
+        nextDeps = importedDeps
+      } else {
+        // merge：保留未在 Excel 中出现的现有任务
+        const importedIds = new Set(importedTasks.map(t => t.id))
+        const keptTasks = tasks.filter(t => !importedIds.has(t.id))
+        nextTasks = [...keptTasks, ...importedTasks]
+        nextDeps = [...dependencies, ...importedDeps]
+      }
+
+      dispatch(setTasks({ tasks: nextTasks, dependencies: nextDeps }))
+      dispatch(markDirty(nextTasks.map(t => t.id)))
+
+      if (parsed.statusDate) {
+        dispatch(setStatusDate({ projectId, statusDate: parsed.statusDate }))
+      }
+      if (parsed.projectLines) {
+        const lines = parsed.projectLines.map((l: ImportProjectLine) => ({
+          id: uuid(),
+          project_id: projectId,
+          name: l.name,
+          line_date: l.line_date,
+          color: l.color,
+          visible: l.visible,
+        }))
+        dispatch(setProjectLines(lines))
+      }
+      alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，"保存版本"时入库。`)
     } catch (err) {
       alert(`解析 Excel 文件失败：${err instanceof Error ? err.message : '未知错误'}`)
     } finally {
       setImporting(false)
     }
-  }, [dispatch, projectId])
+  }, [dispatch, projectId, tasks, dependencies])
 
   // ── Navigate prev/next task ───────────────────────────────────────────
   const flatOrder = getFlatOrder(tasks)
@@ -601,50 +802,71 @@ export default function GanttToolbar({
     dispatch(setSelectedIds([flatOrder[selectedIdx + 1].id]))
   }, [dispatch, flatOrder, selectedIdx])
 
-  // ── Create task ───────────────────────────────────────────────────────
-  const handleAddTask = useCallback(async () => {
+  // ── Create task（本地，保存版本时入库）────────────────────────────────
+  const handleAddTask = useCallback(() => {
     const fmtD = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-    const projStartStr = currentProject?.start_date?.split('T')[0] ?? null
-    const startD = projStartStr ? new Date(projStartStr + 'T00:00:00') : new Date()
+    const statusDateStr = currentProject?.status_date?.split('T')[0] ?? null
+    const startD = statusDateStr ? new Date(statusDateStr + 'T00:00:00') : new Date()
     startD.setHours(0, 0, 0, 0)
     const startStr = fmtD(startD)
     const endD = new Date(startD); endD.setDate(endD.getDate() + 1)
     const endStr = fmtD(endD)
 
     const rootTasks = tasks.filter(t => t.parent_id === null)
-    const nextIndex = rootTasks.length > 0
-      ? Math.max(...rootTasks.map(t => t.order_index)) + 1 : 0
-
-    const res = await authFetch(`/api/tasks/${projectId}`, {
-      method: 'POST',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({
-        parent_id: null, name: 'New Task',
-        start_date: startStr, end_date: endStr,
-        duration: 1, duration_unit: 'day',
-        percent_done: 0, is_milestone: false, note: null, order_index: nextIndex,
-      }),
-    })
-    const data = await res.json()
-    if (data.ok && data.value?.length > 0) {
-      dispatch(addTasks(data.value))
-      dispatch(setSelectedIds([data.value[0].id]))
+    const nextIndex = rootTasks.length > 0 ? Math.max(...rootTasks.map(t => t.order_index)) + 1 : 0
+    const maxCode = tasks.reduce((m, t) => {
+      const n = parseInt(t.task_code, 10)
+      return !isNaN(n) && n > m ? n : m
+    }, 0)
+    const newTask: Task = {
+      id: uuid(),
+      project_id: projectId,
+      task_code: String(maxCode + 1),
+      name: 'New Task',
+      parent_id: null,
+      assignee: null,
+      start_date: startStr, end_date: endStr,
+      duration: 1, duration_unit: 'day',
+      percent_done: 0, is_milestone: false, note: null,
+      order_index: nextIndex,
+      auto_schedule: true,
+      constraint_type: 'asap',
+      constraint_date: null,
+      status: null,
+      rollup: false,
+      inactive: false,
+      project_boundary: 'ask',
+      baseline_end_date: null,
+      original_start_date: null,
+      original_end_date: null,
+      deadline: null,
+      is_deleted: false,
+      deleted_at: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     }
+    dispatch(addTasks([newTask]))
+    dispatch(markDirty([newTask.id]))
+    dispatch(setSelectedIds([newTask.id]))
   }, [dispatch, projectId, tasks, currentProject])
 
-  // ── Delete ────────────────────────────────────────────────────────────
-  const handleDeleteTasks = useCallback(async () => {
+  // ── Delete（本地）────────────────────────────────────────────────────────
+  const handleDeleteTasks = useCallback(() => {
     if (!hasSelection) return
     if (!confirm(`确定删除 ${selectedIds.length} 个任务？`)) return
-
-    const res = await authFetch(`/api/tasks/${projectId}`, {
-      method: 'DELETE',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ ids: selectedIds }),
-    })
-    const data = await res.json()
-    if (data.ok) dispatch(deleteTasks(data.value.deleted))
-  }, [dispatch, projectId, selectedIds, hasSelection])
+    // 同时移除关联依赖
+    const ids = new Set(selectedIds)
+    const relatedDeps = dependencies.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
+    dispatch(deleteTasks(selectedIds))
+    const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
+    const remainTasks = tasks.filter(t => !ids.has(t.id))
+    const cascaded = runFullCascade(remainTasks, remainDeps)
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
+    }
+  }, [dispatch, selectedIds, hasSelection, tasks, dependencies])
 
   // ── Promote (升级) ────────────────────────────────────────────────────
   const handlePromote = useCallback(async () => {
@@ -691,21 +913,14 @@ export default function GanttToolbar({
     }
 
 
-    // 升级时删除被升级任务与旧父任务之间的依赖关系
+    // 升级时删除被升级任务与旧父任务之间的依赖关系（本地）
     const promotedIds = new Set(toPromote.map(t => t.id))
     const oldParentIdsForDeps = new Set(toPromote.map(t => t.parent_id!))
     const depsToRemove = dependencies.filter(d =>
       (promotedIds.has(d.from_task_id) && oldParentIdsForDeps.has(d.to_task_id)) ||
       (promotedIds.has(d.to_task_id) && oldParentIdsForDeps.has(d.from_task_id))
     )
-    for (const dep of depsToRemove) {
-      dispatch(removeDependency(dep.id))
-      authFetch(`/api/dependencies/${projectId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: dep.id }),
-      })
-    }
+    for (const dep of depsToRemove) dispatch(removeDependency(dep.id))
 
     const movedTasks = allUpdates.map(u => ({ ...tasks.find(t => t.id === u.id)!, ...u }))
     dispatch(updateTasks(movedTasks))
@@ -770,25 +985,15 @@ export default function GanttToolbar({
     if (allUpdates.length === 0) return
 
 
-    // 降级时：删除被降级任务与新父任务之间的依赖，
-    // 并且当 anchor 变为父级任务时，取消 anchor 上的所有依赖（父级任务不允许依赖）
+    // 降级时：删除被降级任务与新父任务之间的依赖（本地）
     const demotedIds = new Set(allUpdates.map(u => u.id))
     const newParentIds = new Set(allUpdates.map(u => u.parent_id).filter(Boolean) as string[])
     const depsToRemove = dependencies.filter(d =>
-      // 被降级任务与新父任务之间的依赖
       (demotedIds.has(d.from_task_id) && newParentIds.has(d.to_task_id)) ||
       (demotedIds.has(d.to_task_id) && newParentIds.has(d.from_task_id)) ||
-      // 新父任务上的所有依赖（父级任务不允许有依赖）
       newParentIds.has(d.from_task_id) || newParentIds.has(d.to_task_id)
     )
-    for (const dep of depsToRemove) {
-      dispatch(removeDependency(dep.id))
-      authFetch(`/api/dependencies/${projectId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: dep.id }),
-      })
-    }
+    for (const dep of depsToRemove) dispatch(removeDependency(dep.id))
 
     // 乐观更新：降级的任务 + 新父任务日期
     const movedTasks = allUpdates.map(u => ({ ...tasks.find(t => t.id === u.id)!, ...u }))
@@ -856,10 +1061,11 @@ export default function GanttToolbar({
           id: s.id, order_index: anchorOrder + 1 + clipboard.length + i,
         }))
         if (shiftPayload.length > 0) {
-          dispatch(updateTasks(shiftPayload.map(p => {
+          const shiftedTasks = shiftPayload.map(p => {
             const orig = tasks.find(t => t.id === p.id)!
             return { ...orig, order_index: p.order_index }
-          })))
+          })
+          dispatch(updateTasks(shiftedTasks))
           dispatch(markDirty(shiftPayload.map(p => p.id)))
         }
       } else {
@@ -873,101 +1079,106 @@ export default function GanttToolbar({
 
     // 清理 parent_id：如果 parent 不在剪贴板中，则使用插入点的 parent_id
     const clipIds = new Set(clipboard.map(t => t.id))
-    const pastedTasks = clipboard.map((t, i) => ({
-      ...t,
-      name: `${t.name} (copy)`,
-      id: undefined,
-      created_at: undefined,
-      updated_at: undefined,
-      parent_id: t.parent_id && clipIds.has(t.parent_id) ? t.parent_id : insertParentId,
-      order_index: insertOrderBase + i,
-    }))
-    try {
-      const res = await authFetch(`/api/tasks/${projectId}`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify(pastedTasks),
-      })
-      const data = await res.json()
-      if (data.ok && Array.isArray(data.value)) {
-        dispatch(addTasks(data.value))
-        const newTasks: Task[] = data.value
-        const newIds = newTasks.map(t => t.id)
-        dispatch(setSelectedIds(newIds))
+    const idMap = new Map<string, string>()
+    const maxCode = tasks.reduce((m, t) => {
+      const n = parseInt(t.task_code, 10)
+      return !isNaN(n) && n > m ? n : m
+    }, 0)
+    const pastedTasks: Task[] = clipboard.map((t, i) => {
+      const newId = uuid()
+      idMap.set(t.id, newId)
+      return {
+        ...t,
+        id: newId,
+        task_code: String(maxCode + 1 + i),
+        name: `${t.name} (copy)`,
+        parent_id: t.parent_id && clipIds.has(t.parent_id) ? t.parent_id : insertParentId,
+        order_index: insertOrderBase + i,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Task
+    })
+    // 将引用旧 ID 的 parent_id 替换为新 ID
+    for (const pt of pastedTasks) {
+      if (pt.parent_id && idMap.has(pt.parent_id)) pt.parent_id = idMap.get(pt.parent_id)!
+    }
+    dispatch(addTasks(pastedTasks))
+    dispatch(markDirty(pastedTasks.map(t => t.id)))
+    dispatch(setSelectedIds(pastedTasks.map(t => t.id)))
 
-        // 构建 旧ID → 新ID 映射（按 clipboard 顺序一一对应）
-        if (clipboardDeps.length > 0) {
-          const oldIds = clipboard.map(t => t.id)
-          const idMap = new Map<string, string>()
-          oldIds.forEach((oldId, i) => {
-            if (i < newTasks.length) idMap.set(oldId, newTasks[i].id)
-          })
-
-          // 逐条创建依赖（复用已有 API）
-          for (const dep of clipboardDeps) {
-            const newFrom = idMap.get(dep.from_task_id)
-            const newTo = idMap.get(dep.to_task_id)
-            if (!newFrom || !newTo) continue
-            try {
-              const depRes = await authFetch(`/api/dependencies/${projectId}`, {
-                method: 'POST',
-                headers: authFetchHeaders(true),
-                body: JSON.stringify({
-                  from_task_id: newFrom,
-                  to_task_id: newTo,
-                  type: dep.type,
-                  lag: dep.lag,
-                }),
-              })
-              const depData = await depRes.json()
-              if (depData.ok && depData.value?.dependency) {
-                dispatch(addDependency(depData.value.dependency))
-                // 同步级联后更新的任务
-                if (Array.isArray(depData.value.updatedTasks)) {
-                  dispatch(updateTasks(depData.value.updatedTasks))
-                }
-              }
-            } catch { /* ignore single dep failure */ }
-          }
+    // 复制依赖
+    if (clipboardDeps.length > 0) {
+      const newDeps: Dependency[] = []
+      for (const dep of clipboardDeps) {
+        const newFrom = idMap.get(dep.from_task_id)
+        const newTo = idMap.get(dep.to_task_id)
+        if (!newFrom || !newTo) continue
+        const newDep: Dependency = {
+          id: uuid(),
+          project_id: projectId,
+          from_task_id: newFrom,
+          to_task_id: newTo,
+          type: dep.type,
+          lag: dep.lag,
+          active: dep.active ?? true,
         }
-
-        requestAnimationFrame(() => onFocusTask())
+        newDeps.push(newDep)
+        dispatch(addDependency(newDep))
       }
-    } catch { /* ignore network errors */ }
-  }, [dispatch, projectId, clipboard, clipboardDeps, onFocusTask])
+      const cascaded = runFullCascade(
+        [...tasks, ...pastedTasks],
+        [...dependencies, ...newDeps],
+      )
+      if (cascaded.length > 0) {
+        dispatch(updateTasks(cascaded))
+        dispatch(markDirty(cascaded.map(t => t.id)))
+      }
+    }
+    requestAnimationFrame(() => onFocusTask())
+  }, [dispatch, projectId, clipboard, clipboardDeps, onFocusTask, tasks, dependencies])
 
   // ── Status date: free movement + separate confirm button ────────
   const [statusDateSaving, setStatusDateSaving] = useState(false)
 
   // 自由移动状态日期（仅更新 Redux + 后端，不创建版本）
+  // 允许任意历史日期以便查看进展；保存版本时再做合规校验
   const handleStatusDatePick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value || null
-    // 禁止选择未来日期
-    if (val) {
-      const now = new Date()
-      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-      if (val > today) {
-        alert(`状态日期不能晚于今天 (${today})`)
-        e.target.value = currentProject?.status_date?.split('T')[0] ?? ''
-        return
-      }
-    }
     dispatch(setStatusDate({ projectId, statusDate: val }))
     await authFetch(`/api/projects/${projectId}`, {
       method: 'PUT',
       headers: authFetchHeaders(true),
       body: JSON.stringify({ status_date: val }),
     })
-  }, [dispatch, projectId, currentProject?.status_date])
+  }, [dispatch, projectId])
 
-  // 确认变更：保存所有改动 + 重算完成度 + 创建版本快照
+  // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
     const sd = currentProject?.status_date?.split('T')[0] ?? null
     if (!sd || statusDateSaving) return
+
+    // 保存时校验状态日期：1) 不晚于今天 2) 不早于今天-3 3) 严格大于上一版本
+    const now = new Date()
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    const today = fmt(now)
+    if (sd > today) {
+      alert(`无法保存：状态日期 ${sd} 晚于今天 (${today})`)
+      return
+    }
+    const earliest = new Date(now); earliest.setDate(earliest.getDate() - 3)
+    const earliestStr = fmt(earliest)
+    if (sd < earliestStr) {
+      alert(`无法保存：状态日期 ${sd} 早于 ${earliestStr}（仅允许保存最近 3 天内的状态日期）`)
+      return
+    }
+    if (lastVersionDate && sd <= lastVersionDate) {
+      alert(`无法保存：状态日期必须晚于上一版本 (${lastVersionDate})`)
+      return
+    }
+
     setStatusDateSaving(true)
 
-    // 1. Recalculate percent_done + 快照 baseline_end_date
-    //    baseline 取"上一期版本快照"的 end_date；若无上期，则用当前 end（首期无法比较）
+    // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
     const sdDate = new Date(sd)
     const prevEndByTaskId = new Map<string, string | null>()
     const prevVersion = versions[0]
@@ -982,54 +1193,97 @@ export default function GanttToolbar({
         }
       } catch { /* ignore, 退化为当前 end */ }
     }
-    const updated = tasks
+    const recomputed = tasks
       .filter(t => t.start_date && t.end_date)
       .map(t => {
         const prevEnd = prevEndByTaskId.get(t.id) ?? null
-        // 上期有该任务 → baseline = 上期 end；上期无（新增任务）或首期 → baseline = 当前 end
-        const baseline = prevEnd ?? ((t.end_date ?? '').split('T')[0] || null)
+        const baselineEnd = prevEnd ?? ((t.end_date ?? '').split('T')[0] || null)
         return {
           ...t,
           percent_done: calcPercent(t, sdDate),
-          baseline_end_date: baseline,
+          baseline_end_date: baselineEnd,
         }
       })
-    if (updated.length > 0) {
-      dispatch(updateTasks(updated))
-      const payload = updated.map(t => ({
-        id: t.id,
-        percent_done: t.percent_done,
-        baseline_end_date: t.baseline_end_date,
-      }))
-      await authFetch(`/api/tasks/${projectId}`, {
-        method: 'PUT',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify(payload),
-      })
-      dispatch(clearDirty())
+    if (recomputed.length > 0) dispatch(updateTasks(recomputed))
+    // 用 recomputed 后的状态作为本次保存的快照
+    const finalTasks = tasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
+
+    // 2. 与基线 diff，生成批量操作
+    const diff = buildSaveDiff(baselineTasks, baselineDeps, finalTasks, dependencies)
+    let saveError: string | null = null
+    try {
+      // 删除依赖必须先于删除任务，避免外键级联删除丢失审计
+      for (const depId of diff.depsToDelete) {
+        const r = await authFetch(`/api/dependencies/${projectId}`, {
+          method: 'DELETE', headers: authFetchHeaders(true),
+          body: JSON.stringify({ id: depId }),
+        })
+        if (!r.ok) throw new Error(`删除依赖失败 (${r.status})`)
+      }
+      // 删除任务
+      if (diff.tasksToDelete.length > 0) {
+        const r = await authFetch(`/api/tasks/${projectId}`, {
+          method: 'DELETE', headers: authFetchHeaders(true),
+          body: JSON.stringify({ ids: diff.tasksToDelete }),
+        })
+        if (!r.ok) throw new Error(`删除任务失败 (${r.status})`)
+      }
+      // 新增任务（连同 client id / task_code）
+      if (diff.tasksToAdd.length > 0) {
+        const r = await authFetch(`/api/tasks/${projectId}`, {
+          method: 'POST', headers: authFetchHeaders(true),
+          body: JSON.stringify(diff.tasksToAdd),
+        })
+        if (!r.ok) throw new Error(`新增任务失败 (${r.status})`)
+      }
+      // 更新任务
+      if (diff.tasksToUpdate.length > 0) {
+        const payload = diff.tasksToUpdate.map(t => ({
+          id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
+          duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
+          order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
+          assignee: t.assignee, note: t.note,
+          constraint_type: t.constraint_type, constraint_date: t.constraint_date,
+          status: t.status, deadline: t.deadline,
+          rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
+          baseline_end_date: t.baseline_end_date, task_code: t.task_code,
+        }))
+        const r = await authFetch(`/api/tasks/${projectId}`, {
+          method: 'PUT', headers: authFetchHeaders(true),
+          body: JSON.stringify(payload),
+        })
+        if (!r.ok) throw new Error(`更新任务失败 (${r.status})`)
+      }
+      // 新增依赖
+      for (const dep of diff.depsToAdd) {
+        const r = await authFetch(`/api/dependencies/${projectId}`, {
+          method: 'POST', headers: authFetchHeaders(true),
+          body: JSON.stringify({
+            id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
+            type: dep.type, lag: dep.lag, active: dep.active ?? true,
+          }),
+        })
+        if (!r.ok) throw new Error(`新增依赖失败 (${r.status})`)
+      }
+      // 更新依赖
+      for (const dep of diff.depsToUpdate) {
+        const r = await authFetch(`/api/dependencies/${projectId}`, {
+          method: 'PUT', headers: authFetchHeaders(true),
+          body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true }),
+        })
+        if (!r.ok) throw new Error(`更新依赖失败 (${r.status})`)
+      }
+    } catch (err) {
+      saveError = err instanceof Error ? err.message : String(err)
     }
 
-    // 2. Save any dirty tasks
-    if (dirtyIds.length > 0) {
-      const dirtyTasks = tasks.filter(t => dirtyIds.includes(t.id))
-      const dirtyPayload = dirtyTasks.map(t => ({
-        id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
-        duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
-        order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
-        assignee: t.assignee, note: t.note,
-        constraint_type: t.constraint_type, constraint_date: t.constraint_date,
-        status: t.status,
-        rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
-      }))
-      await authFetch(`/api/tasks/${projectId}`, {
-        method: 'PUT',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify(dirtyPayload),
-      })
-      dispatch(clearDirty())
+    if (saveError) {
+      setStatusDateSaving(false)
+      alert(`保存失败：${saveError}`)
+      return
     }
 
-    // 3. Create version snapshot（2个状态日期间的变更都算在这个版本上）
+    // 3. 创建版本快照
     const reasonMap: Record<string, string> = {}
     for (const d of changeDiffs) {
       if (primaryCodes.has(d.task_code)) {
@@ -1043,7 +1297,7 @@ export default function GanttToolbar({
       method: 'POST',
       headers: authFetchHeaders(true),
       body: JSON.stringify({
-        tasks, dependencies,
+        tasks: finalTasks, dependencies,
         status_date: sd,
         reasons: reasonMap,
       }),
@@ -1054,49 +1308,50 @@ export default function GanttToolbar({
 
     if (snapshotData.ok) {
       dispatch(clearDirty())
-
-      // 重置基线为当前任务，使 changeDiffs 变空 → hasChanges = false
-      setBaseline(tasks.filter(t => !t.is_deleted).map(t => ({
+      // 重置基线为已落库的当前状态
+      const livingTasks = finalTasks.filter(t => !t.is_deleted)
+      setBaseline(livingTasks.map(t => ({
         id: t.id, task_code: t.task_code, name: t.name,
         start_date: t.start_date, end_date: t.end_date,
         duration: t.duration, assignee: t.assignee,
         percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
         parent_id: t.parent_id,
       })))
-
-      // 自动将当前状态设为对比基线，后续编辑可立即看到计划偏差
-      dispatch(setComparison({ tasks: tasks.map(t => ({ ...t })), versionName: sd }))
-      comparisonShownRef.current = false
+      setBaselineTasks(livingTasks.map(t => ({ ...t })))
+      setBaselineDeps(dependencies.map(d => ({ ...d })))
 
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
         .catch(() => {})
+    } else {
+      alert(`版本保存失败：${snapshotData.error ?? '未知错误'}`)
     }
-  }, [currentProject, lastVersionDate, statusDateSaving, dispatch, projectId, tasks, dependencies, dirtyIds, changeDiffs, onAutoAI, versions, reasons, primaryCodes, passiveReasonMap])
+  }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
+      changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
+      baselineTasks, baselineDeps, lastVersionDate])
 
-  // ── 放弃更改：重新加载任务（等同于返回项目列表再进入）
+  // ── 放弃更改：重新加载 DB 状态（所有本地编辑被丢弃，因为它们从未入库）
   const handleRefresh = useCallback(async () => {
     try {
       const res = await authFetch(`/api/tasks/${projectId}`)
       const data = await res.json()
       if (data.ok && data.value) {
-        dispatch(setTasks({
-          tasks: Array.isArray(data.value.tasks) ? data.value.tasks : [],
-          dependencies: Array.isArray(data.value.dependencies) ? data.value.dependencies : [],
-        }))
-        dispatch(clearDirty())
-        comparisonShownRef.current = false
-        dispatch(clearComparison())
-        // 用刚加载的任务重建基线
         const freshTasks = Array.isArray(data.value.tasks) ? data.value.tasks : []
-        setBaseline(freshTasks.filter((t: any) => !t.is_deleted).map((t: any) => ({
+        const freshDeps = Array.isArray(data.value.dependencies) ? data.value.dependencies : []
+        dispatch(setTasks({ tasks: freshTasks, dependencies: freshDeps }))
+        dispatch(clearDirty())
+        dispatch(clearComparison())
+        const livingTasks = freshTasks.filter((t: Task) => !t.is_deleted)
+        setBaseline(livingTasks.map((t: Task) => ({
           id: t.id, task_code: t.task_code, name: t.name,
           start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, assignee: t.assignee,
           percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
           parent_id: t.parent_id,
         })))
+        setBaselineTasks(livingTasks.map((t: Task) => ({ ...t })))
+        setBaselineDeps(freshDeps.map((d: Dependency) => ({ ...d })))
       }
     } catch { /* ignore */ }
   }, [dispatch, projectId])
@@ -1199,11 +1454,9 @@ export default function GanttToolbar({
             <div className="flex items-center gap-1.5 relative">
               <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
               {(() => {
-                const now = new Date()
-                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
                 const v = currentProject?.status_date?.split('T')[0] ?? ''
                 return (
-                  <YmdDateInput value={v} max={today} onChange={handleStatusDatePick} />
+                  <YmdDateInput value={v} onChange={handleStatusDatePick} />
                 )
               })()}
               {(() => {
@@ -1211,15 +1464,12 @@ export default function GanttToolbar({
                 const now = new Date()
                 const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
                 const isFuture = !!sd && sd > today
-                const statusDateAdvanced = !!sd && (!lastVersionDate || sd > lastVersionDate)
-                const canSubmit = !!currentProject?.status_date && !statusDateSaving && !isFuture && (hasChanges || statusDateAdvanced)
-                const label = hasChanges ? '确认变更' : '保存状态日期'
-                const tip = !currentProject?.status_date
+                const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
+                const tip = !sd
                   ? '请先设置状态日期'
                   : isFuture ? `状态日期不能晚于今天 (${today})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
-                  : statusDateAdvanced ? '没有任务变更，直接为当前状态日期保存一个快照'
-                  : '状态日期未变化，无需保存'
+                  : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
@@ -1230,22 +1480,19 @@ export default function GanttToolbar({
                       if (lastVersionDate && sd < lastVersionDate) {
                         alert(`状态日期不能早于上一版本 (${lastVersionDate})`); return
                       }
-                      if (hasChanges) openReview()
-                      else handleConfirmChanges()
+                      openReview()
                     }}
                     disabled={!canSubmit}
                     title={tip}
                     className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
                       ${canSubmit
-                        ? hasChanges
-                          ? 'border-green-500 text-green-700 bg-green-50 hover:bg-green-100 cursor-pointer'
-                          : 'border-blue-400 text-blue-700 bg-blue-50 hover:bg-blue-100 cursor-pointer'
+                        ? 'border-green-500 text-green-700 bg-green-50 hover:bg-green-100 cursor-pointer'
                         : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
                   >
                     <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
-                    {statusDateSaving ? '保存中...' : label}
+                    {statusDateSaving ? '保存中...' : '确认变更'}
                   </button>
                 )
               })()}
@@ -1265,7 +1512,7 @@ export default function GanttToolbar({
               )}
               <button
                 onClick={handleToggleCompareLock}
-                title={comparison ? `退出对比模式（当前对比：${comparison.versionName}）` : '进入对比模式，默认对比最近一次快照；可在历史版本面板切换对比目标'}
+                title={comparison ? `退出对比模式（当前对比：${comparison.versionName}）` : '进入对比模式，默认对比最近 2 次状态日期快照；可在历史版本面板切换对比目标'}
                 className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
                   ${comparison
                     ? 'border-orange-500 text-orange-700 bg-orange-50 hover:bg-orange-100 cursor-pointer'
@@ -1275,8 +1522,49 @@ export default function GanttToolbar({
                   <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" strokeLinecap="round" strokeLinejoin="round"/>
                   <circle cx="8" cy="8" r="2.5"/>
                 </svg>
-                {comparison ? `对比中: ${comparison.versionName}` : '对比模式'}
+                {comparison ? '退出对比' : '对比模式'}
               </button>
+              <div ref={viewVersionRef} className="relative">
+                <button
+                  onClick={() => {
+                    if (viewSnapshot) { dispatch(clearViewSnapshot()); return }
+                    setViewVersionOpen(v => !v)
+                  }}
+                  title={viewSnapshot ? `退出查看历史版本「${viewSnapshot.versionName}」` : '查看历史版本（只读，状态/延期回到当时）'}
+                  className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
+                    ${viewSnapshot
+                      ? 'border-amber-500 text-amber-700 bg-amber-50 hover:bg-amber-100 cursor-pointer'
+                      : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50 cursor-pointer'}`}
+                >
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M8 3v5l3 2" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M2 8a6 6 0 1 0 2-4.5" strokeLinecap="round"/>
+                    <path d="M2 2v3h3" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  {viewSnapshot ? `查看中: ${viewSnapshot.versionName}` : '查看历史'}
+                </button>
+                {viewVersionOpen && !viewSnapshot && (
+                  <div className="absolute top-full right-0 mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-xl py-1 min-w-[200px] max-h-[320px] overflow-y-auto">
+                    {versions.filter(v => !v.is_autosave).length === 0 && (
+                      <div className="px-3 py-3 text-[12px] text-gray-400 text-center">暂无历史版本</div>
+                    )}
+                    {versions.filter(v => !v.is_autosave).map(v => {
+                      const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+                      const sd = v.status_date ? String(v.status_date).split('T')[0] : null
+                      return (
+                        <button
+                          key={v.id}
+                          onClick={() => handleEnterViewSnapshot(v.id)}
+                          className="w-full px-3 py-1.5 text-left text-[12px] text-gray-700 hover:bg-amber-50 hover:text-amber-700 flex items-center justify-between gap-2 cursor-pointer"
+                        >
+                          <span className="font-medium truncate">{label}</span>
+                          {sd && <span className="text-[10px] text-gray-400 shrink-0">{sd}</span>}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
               <div className="relative">
                 <button
                   onClick={() => setVersionPanelOpen(v => !v)}
@@ -1323,6 +1611,8 @@ export default function GanttToolbar({
               <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M2 8h12M8 2v12" strokeLinecap="round"/>
               </svg>
+              <span className="text-[11px] text-orange-700 font-semibold">当前</span>
+              <span className="text-orange-400">vs</span>
               <span className="text-[11px] text-orange-500">基准</span>
               <select
                 value={versions.find(v => (v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`) === comparison.versionName)?.id ?? ''}
@@ -1349,39 +1639,6 @@ export default function GanttToolbar({
                   return <option key={v.id} value={v.id}>{label}</option>
                 })}
               </select>
-              <span className="text-orange-400">vs</span>
-              <select
-                value={viewSnapshot?.versionId ?? '__current__'}
-                onChange={async e => {
-                  const vid = e.target.value
-                  if (vid === '__current__') {
-                    dispatch(clearViewSnapshot())
-                    return
-                  }
-                  const v = versions.find(x => x.id === vid)
-                  if (!v) return
-                  try {
-                    const r = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
-                    const d = await r.json()
-                    if (d.ok && d.value?.snapshot) {
-                      dispatch(setViewSnapshot({
-                        tasks: d.value.snapshot.tasks ?? [],
-                        dependencies: d.value.snapshot.dependencies ?? [],
-                        versionId: v.id,
-                        versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
-                      }))
-                    }
-                  } catch { /* ignore */ }
-                }}
-                className="bg-transparent border-none text-orange-700 text-[12px] font-medium focus:outline-none cursor-pointer pr-4"
-                title="对比目标（作为主视图显示）"
-              >
-                <option value="__current__">当前</option>
-                {versions.map(v => {
-                  const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
-                  return <option key={v.id} value={v.id}>{label}</option>
-                })}
-              </select>
             </span>
             {onToggleComparison && (
               <button
@@ -1403,7 +1660,7 @@ export default function GanttToolbar({
               </button>
             )}
             <button
-              onClick={() => { dispatch(clearComparison()); dispatch(clearViewSnapshot()) }}
+              onClick={() => dispatch(clearComparison())}
               title="取消对比"
               className="inline-flex items-center px-1.5 h-full text-orange-400 hover:text-orange-600 hover:bg-orange-100 rounded-r border-l border-orange-200 cursor-pointer">
               ×
@@ -1636,7 +1893,12 @@ export default function GanttToolbar({
                     {added > 0 && <span className="text-green-600">+ 新增 {added}</span>}
                     {changed > 0 && <span className="text-blue-600">~ 修改 {changed}</span>}
                     {removed > 0 && <span className="text-red-600">- 删除 {removed}</span>}
-                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length} 项变更</span>
+                    {depDiff.total > 0 && (
+                      <span className="text-purple-600">
+                        依赖 {depDiff.added > 0 ? `+${depDiff.added} ` : ''}{depDiff.updated > 0 ? `~${depDiff.updated} ` : ''}{depDiff.removed > 0 ? `-${depDiff.removed}` : ''}
+                      </span>
+                    )}
+                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total} 项变更</span>
                   </>
                 )
               })()}
@@ -1644,60 +1906,98 @@ export default function GanttToolbar({
 
             {/* Diff list */}
             <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 min-h-0">
-              {changeDiffs.length === 0 ? (
+              {changeDiffs.length === 0 && depDiff.total === 0 && (
                 <div className="text-center text-gray-400 py-8 text-sm">没有检测到变更</div>
-              ) : (
-                changeDiffs.map((d, i) => (
-                  <div key={i} className={`rounded border px-3 py-2 text-[13px] ${
-                    d.type === 'added' ? 'border-green-200 bg-green-50'
-                    : d.type === 'removed' ? 'border-red-200 bg-red-50'
-                    : 'border-blue-200 bg-blue-50'
-                  }`}>
-                    <div className="flex items-center gap-2">
-                      <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-medium ${
-                        d.type === 'added' ? 'bg-green-200 text-green-800'
-                        : d.type === 'removed' ? 'bg-red-200 text-red-800'
-                        : 'bg-blue-200 text-blue-800'
-                      }`}>
-                        {d.type === 'added' ? '新增' : d.type === 'removed' ? '删除' : '修改'}
-                      </span>
-                      <span className="text-gray-500 text-xs">{d.task_code}</span>
-                      <span className="font-medium text-gray-800">{d.task_name}</span>
+              )}
+              {changeDiffs.map((d, i) => (
+                <div key={`task-${i}`} className={`rounded border px-3 py-2 text-[13px] ${
+                  d.type === 'added' ? 'border-green-200 bg-green-50'
+                  : d.type === 'removed' ? 'border-red-200 bg-red-50'
+                  : 'border-blue-200 bg-blue-50'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-medium ${
+                      d.type === 'added' ? 'bg-green-200 text-green-800'
+                      : d.type === 'removed' ? 'bg-red-200 text-red-800'
+                      : 'bg-blue-200 text-blue-800'
+                    }`}>
+                      {d.type === 'added' ? '新增' : d.type === 'removed' ? '删除' : '修改'}
+                    </span>
+                    <span className="text-gray-500 text-xs">{d.task_code}</span>
+                    <span className="font-medium text-gray-800">{d.task_name}</span>
+                  </div>
+                  {d.changes && d.changes.length > 0 && (
+                    <div className="mt-1.5 space-y-0.5 pl-2 border-l-2 border-blue-200">
+                      {d.changes.map((c, j) => (
+                        <div key={j} className="text-xs text-gray-600">
+                          <span className="text-gray-400">{c.field}:</span>{' '}
+                          <span className="line-through text-red-500/70">{c.old}</span>
+                          {' → '}
+                          <span className="text-green-700">{c.new}</span>
+                        </div>
+                      ))}
                     </div>
-                    {d.changes && d.changes.length > 0 && (
-                      <div className="mt-1.5 space-y-0.5 pl-2 border-l-2 border-blue-200">
-                        {d.changes.map((c, j) => (
-                          <div key={j} className="text-xs text-gray-600">
-                            <span className="text-gray-400">{c.field}:</span>{' '}
-                            <span className="line-through text-red-500/70">{c.old}</span>
-                            {' → '}
-                            <span className="text-green-700">{c.new}</span>
-                          </div>
-                        ))}
+                  )}
+                  <div className="mt-2">
+                    {primaryCodes.has(d.task_code) ? (
+                      <textarea
+                        value={reasons[d.task_code] ?? ''}
+                        onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
+                        placeholder="变更原因（必填）"
+                        rows={2}
+                        className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
+                          (reasons[d.task_code] ?? '').trim().length === 0
+                            ? 'border-red-300 focus:border-red-400'
+                            : 'border-gray-300 focus:border-blue-400'
+                        }`}
+                      />
+                    ) : (
+                      <div className="text-xs text-gray-500 italic px-2 py-1 rounded border border-dashed border-gray-200 bg-gray-50">
+                        {passiveReasonMap[d.task_code] ?? '被动变更'}
                       </div>
                     )}
-                    <div className="mt-2">
-                      {primaryCodes.has(d.task_code) ? (
-                        <textarea
-                          value={reasons[d.task_code] ?? ''}
-                          onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
-                          placeholder="变更原因（必填）"
-                          rows={2}
-                          className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
-                            (reasons[d.task_code] ?? '').trim().length === 0
-                              ? 'border-red-300 focus:border-red-400'
-                              : 'border-gray-300 focus:border-blue-400'
-                          }`}
-                        />
-                      ) : (
-                        <div className="text-xs text-gray-500 italic px-2 py-1 rounded border border-dashed border-gray-200 bg-gray-50">
-                          {passiveReasonMap[d.task_code] ?? '被动变更'}
-                        </div>
-                      )}
-                    </div>
                   </div>
-                ))
-              )}
+                </div>
+              ))}
+              {depDiff.items.map(item => (
+                <div key={`dep-${item.id}`} className={`rounded border px-3 py-2 text-[13px] ${
+                  item.type === 'added' ? 'border-green-200 bg-green-50'
+                  : item.type === 'removed' ? 'border-red-200 bg-red-50'
+                  : 'border-blue-200 bg-blue-50'
+                }`}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-medium ${
+                      item.type === 'added' ? 'bg-green-200 text-green-800'
+                      : item.type === 'removed' ? 'bg-red-200 text-red-800'
+                      : 'bg-blue-200 text-blue-800'
+                    }`}>
+                      依赖{item.type === 'added' ? '新增' : item.type === 'removed' ? '删除' : '修改'}
+                    </span>
+                    <span className="inline-block px-1.5 py-0.5 rounded text-[11px] font-mono bg-gray-100 text-gray-600 border border-gray-200">
+                      {item.depTypeLabel}
+                    </span>
+                    <span className="text-gray-700">
+                      <span className="text-gray-400 text-xs">{item.fromCode}</span>{' '}
+                      <span className="font-medium">{item.fromName}</span>
+                      <span className="mx-1.5 text-gray-400">→</span>
+                      <span className="text-gray-400 text-xs">{item.toCode}</span>{' '}
+                      <span className="font-medium">{item.toName}</span>
+                    </span>
+                  </div>
+                  {item.changes && item.changes.length > 0 && (
+                    <div className="mt-1.5 space-y-0.5 pl-2 border-l-2 border-blue-200">
+                      {item.changes.map((c, j) => (
+                        <div key={j} className="text-xs text-gray-600">
+                          <span className="text-gray-400">{c.field}:</span>{' '}
+                          <span className="line-through text-red-500/70">{c.old}</span>
+                          {' → '}
+                          <span className="text-green-700">{c.new}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
 
             {/* Actions */}

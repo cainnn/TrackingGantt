@@ -10,8 +10,10 @@ import {
 } from '@/store/slices/tasksSlice'
 import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
-import { markDirty } from '@/store/slices/tasksSlice'
+import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
+import { runFullCascade } from '@/lib/clientScheduling'
+import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
 const ROW_H    = 40
@@ -62,7 +64,12 @@ function isEndExtended(t: Pick<Task, 'end_date' | 'baseline_end_date'>): boolean
 export function computeTaskStatus(
   t: Task,
   statusDate: Date | null,
-  ctx?: { allTasks: Task[]; deps: { from_task_id: string; to_task_id: string; active?: boolean; lag?: number }[] },
+  ctx?: {
+    allTasks: Task[]
+    deps: { from_task_id: string; to_task_id: string; active?: boolean; lag?: number }[]
+    prevTaskIds?: Set<string>  // 上期快照存在的任务 ID 集合，用于识别"新增任务"
+    seqMap?: Map<string, number>  // 左列"编号"的 DFS 序号映射，用于归因显示
+  },
 ): { status: AutoStatus; reason: string } {
   const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
   const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : null
@@ -73,39 +80,133 @@ export function computeTaskStatus(
     return { status: 'completed', reason: '' }
   }
   if (isEndExtended(t)) {
-    // 区分"被前置拖累"(pushed) vs "自己延期"(late)：
-    // 条件：尚未开工 + 至少一个激活前置任务自身也延长了
+    // 归因：
+    // 1. 沿依赖链递归向上，找出所有"根源"延期任务（自身被延长的最上游祖先）
+    // 2. 未开工 + 有上游原因 → pushed（受影响）
+    // 3. 已开工 + 有上游原因 → late（延期），原因含上游来源
+    // 4. 未开工 + 无上游检测到 → pushed，原因兜底为"受上游任务影响"
+    // 5. 已开工 + 无上游 → late，原因=自身工期延长
+    const started = !!(t.start_date && new Date(t.start_date) <= ref)
     if (ctx) {
-      const started = t.start_date && new Date(t.start_date) <= ref
-      if (!started) {
-        const byId = new Map(ctx.allTasks.map(x => [x.id, x] as const))
-        // 找到导致 pushed 的前置任务（自身延长或有 lag）
-        const delayedPredDeps = ctx.deps.filter(d =>
-          d.to_task_id === t.id
-          && d.active !== false
-          && (() => { const p = byId.get(d.from_task_id); return p ? isEndExtended(p) : false })()
-        )
-        const lagPredDeps = ctx.deps.filter(d =>
-          d.to_task_id === t.id
-          && d.active !== false
-          && (d.lag ?? 0) > 0
-        )
-        if (delayedPredDeps.length > 0 || lagPredDeps.length > 0) {
-          const reasons: string[] = []
-          if (delayedPredDeps.length > 0) {
-            const names = delayedPredDeps.map(d => byId.get(d.from_task_id)?.name ?? '?').slice(0, 3)
-            reasons.push(`前置任务延期: ${names.join('、')}`)
+      const byId = new Map(ctx.allTasks.map(x => [x.id, x] as const))
+      const childrenOf = new Map<string, Task[]>()
+      for (const x of ctx.allTasks) {
+        if (!x.parent_id) continue
+        if (!childrenOf.has(x.parent_id)) childrenOf.set(x.parent_id, [])
+        childrenOf.get(x.parent_id)!.push(x)
+      }
+      const prevIds = ctx.prevTaskIds
+      const isNew = (id: string) => !!prevIds && !prevIds.has(id)
+      const isDelaySource = (p: Task) => isEndExtended(p) || isNew(p.id)
+      // 影响工期：延期任务 = 自身 end_delta；新增任务 = 自身 duration（它往链里插了这么多天）
+      const endDeltaDays = (tk: Task): number => {
+        const b = tk.baseline_end_date ? String(tk.baseline_end_date).split('T')[0] : null
+        const e = tk.end_date ? String(tk.end_date).split('T')[0] : null
+        if (!b || !e) return 0
+        return Math.round((new Date(e).getTime() - new Date(b).getTime()) / 86_400_000)
+      }
+      const impactOf = (p: Task): number => isNew(p.id) ? (p.duration ?? 0) : endDeltaDays(p)
+
+      // 编号显示优先用左列 seq（可视位置）；没传 seqMap 时 fallback 到 task_code
+      const displayCode = (p: Task): string => {
+        const seq = ctx.seqMap?.get(p.id)
+        return seq != null ? String(seq) : p.task_code
+      }
+
+      type Root = { name: string; code: string; kind: 'extended' | 'new'; impact: number }
+      const rootsMap = new Map<string, Root>()
+      const walkedUp = new Set<string>()
+      const walkUp = (id: string) => {
+        if (walkedUp.has(id)) return
+        walkedUp.add(id)
+        const inDeps = ctx.deps.filter(d => d.to_task_id === id && d.active !== false)
+        for (const d of inDeps) {
+          const p = byId.get(d.from_task_id)
+          if (!p) continue
+          if (isDelaySource(p)) {
+            rootsMap.set(p.id, {
+              name: p.name,
+              code: displayCode(p),
+              kind: isNew(p.id) ? 'new' : 'extended',
+              impact: impactOf(p),
+            })
           }
-          if (lagPredDeps.length > 0) {
-            const lagDescs = lagPredDeps.map(d => {
-              const pName = byId.get(d.from_task_id)?.name ?? '?'
-              return `${pName}(lag=${d.lag}天)`
-            }).slice(0, 3)
-            reasons.push(`依赖延迟: ${lagDescs.join('、')}`)
-          }
-          return { status: 'pushed', reason: reasons.join('; ') }
+          walkUp(p.id)
         }
       }
+      // 对当前任务自身走一次依赖链；若是汇总任务，再向下对每个后代都走一次
+      walkUp(t.id)
+      const walkedDown = new Set<string>()
+      const walkDown = (id: string) => {
+        if (walkedDown.has(id)) return
+        walkedDown.add(id)
+        const kids = childrenOf.get(id) ?? []
+        for (const c of kids) {
+          // 后代自身若是延期根源，也直接记入（支持"汇总任务下直接延期的子任务"这种场景）
+          if (isDelaySource(c)) {
+            rootsMap.set(c.id, {
+              name: c.name,
+              code: displayCode(c),
+              kind: isNew(c.id) ? 'new' : 'extended',
+              impact: impactOf(c),
+            })
+          }
+          walkUp(c.id)
+          walkDown(c.id)
+        }
+      }
+      walkDown(t.id)
+
+      // 过滤"真正根源"：没有更上游依赖的根源节点
+      const trueRoots: Root[] = Array.from(rootsMap.entries()).filter(([id]) => {
+        const check = new Set<string>()
+        let hasUpstreamRoot = false
+        const dfs = (curId: string) => {
+          if (check.has(curId) || hasUpstreamRoot) return
+          check.add(curId)
+          const inDeps = ctx.deps.filter(d => d.to_task_id === curId && d.active !== false)
+          for (const d of inDeps) {
+            const p = byId.get(d.from_task_id)
+            if (!p) continue
+            if (rootsMap.has(p.id)) { hasUpstreamRoot = true; return }
+            dfs(p.id)
+          }
+        }
+        dfs(id)
+        return !hasUpstreamRoot
+      }).map(([, v]) => v)
+
+      const lagPredDeps = ctx.deps.filter(d =>
+        d.to_task_id === t.id
+        && d.active !== false
+        && (d.lag ?? 0) > 0
+      )
+
+      if (trueRoots.length > 0 || lagPredDeps.length > 0) {
+        const reasonParts: string[] = []
+        if (trueRoots.length > 0) {
+          // 按影响工期从大到小排，只取最大的一个
+          trueRoots.sort((a, b) => b.impact - a.impact)
+          const top = trueRoots[0]
+          const label = `${top.code} ${top.name}`
+          const impactStr = top.impact !== 0 ? `（${top.impact > 0 ? '+' : ''}${top.impact}天）` : ''
+          if (top.kind === 'new') {
+            reasonParts.push(`受新增任务「${label}」插入影响${impactStr}`)
+          } else {
+            reasonParts.push(`受「${label}」任务延期影响${impactStr}`)
+          }
+        }
+        if (lagPredDeps.length > 0) {
+          const top = lagPredDeps.sort((a, b) => (b.lag ?? 0) - (a.lag ?? 0))[0]
+          const p = byId.get(top.from_task_id)
+          const pName = p?.name ?? '?'
+          const pCode = p ? displayCode(p) : ''
+          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${top.lag}天)`)
+        }
+        if (!started) return { status: 'pushed', reason: reasonParts.join('; ') }
+        return { status: 'late', reason: `${reasonParts.join('; ')}；自身工期也延长` }
+      }
+      if (!started) return { status: 'pushed', reason: '受上游任务影响' }
     }
     return { status: 'late', reason: '自身工期延长' }
   }
@@ -116,6 +217,7 @@ export function computeTaskStatus(
 export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive'
 export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
   { key: 'assignee',   label: '责任人',   width: COL_ASSIGN },
+  { key: 'status',     label: '状态',     width: COL_STATUS },
   { key: 'pct',        label: '完成',     width: COL_PCT },
   { key: 'duration',   label: '持续时间', width: COL_DUR },
   { key: 'start',      label: '开始时间', width: COL_START },
@@ -126,10 +228,9 @@ export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number
   { key: 'ctype',      label: '限制类型', width: COL_CTYPE },
   { key: 'cdate',      label: '限制日期', width: COL_CDATE },
   { key: 'ddate',      label: '截止日期', width: COL_DDATE },
-  { key: 'status',     label: '状态',     width: COL_STATUS },
   { key: 'inactive',   label: '无效',     width: 60 },
 ]
-export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'ddate', 'status']
+export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'status', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'ddate']
 
 // 指示器配置：在任务条上绘制附加标记
 export interface IndicatorsConfig {
@@ -351,6 +452,7 @@ interface Props {
   focusSignal?: number
   showCriticalPath?: boolean
   visibleCols?: OptionalCol[]
+  onVisibleColsChange?: (cols: OptionalCol[]) => void
   indicators?: IndicatorsConfig
   readOnly?: boolean
   showComparison?: boolean
@@ -365,6 +467,7 @@ export default function GanttChart({
   focusSignal = 0,
   showCriticalPath = false,
   visibleCols = DEFAULT_VISIBLE_COLS,
+  onVisibleColsChange,
   indicators = DEFAULT_INDICATORS,
   readOnly = false,
   showComparison = true,
@@ -381,6 +484,86 @@ export default function GanttChart({
   const diffFilter  = useAppSelector(s => s.tasks.diffFilter)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const projectLines   = useAppSelector(s => s.projectLines.lines)
+  const versions       = useAppSelector(s => s.versions.versions)
+
+  // ── 当期延期原因（task_code → reason） ─────────────────────────────────
+  // 取"本期"那个版本的 changes.diffs[i].reason —— 即与主视图对应的版本：
+  // 浏览历史时（viewSnapshot），当期 = 被浏览的版本本身；
+  // 否则 = 最近一次非自动保存的状态日期版本。
+  const filledReasonByCode = useMemo(() => {
+    const m = new Map<string, string>()
+    const snapshotsDesc = versions.filter(v => !v.is_autosave && v.status_date)
+    const current = viewSnapshot
+      ? snapshotsDesc.find(v => v.id === viewSnapshot.versionId)
+      : snapshotsDesc[0]
+    const diffs = current?.changes?.diffs
+    if (!Array.isArray(diffs)) return m
+    for (const d of diffs as Array<{ task_code: string; reason?: string }>) {
+      if (d.reason && d.reason.trim()) m.set(d.task_code, d.reason.trim())
+    }
+    return m
+  }, [versions, viewSnapshot])
+
+  // 点击状态列时显示填报原因的 popover
+  const [reasonPopup, setReasonPopup] = useState<{ x: number; y: number; reason: string; taskName: string } | null>(null)
+  useEffect(() => {
+    if (!reasonPopup) return
+    const close = () => setReasonPopup(null)
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [reasonPopup])
+
+  // ── 上一次状态日期快照的 end_date（用于状态列比对） ─────────────────────
+  // 取 versions 中"最近的前一次"状态日期快照：若有 >=2 个 status_date 快照，
+  // 取第二新的（因为第一新的可能就是当前"确认变更"刚创建的、与当前状态一致）；
+  // 若只有一个，用它作为 baseline
+  const [latestSnapshotEnds, setLatestSnapshotEnds] = useState<Map<string, string>>(new Map())
+  // 上期快照存在的任务 ID 集合（用于检测"本期新增"的任务作为延期根源）
+  const [prevSnapshotTaskIds, setPrevSnapshotTaskIds] = useState<Set<string>>(new Set())
+
+  // 用快照 baseline 批量覆盖所有任务的 baseline_end_date，供 computeTaskStatus 检测上游延期用
+  const tasksWithSnapshotBaseline = useMemo(() => {
+    if (latestSnapshotEnds.size === 0) return tasks
+    return tasks.map(t => {
+      const be = latestSnapshotEnds.get(t.id)
+      return be ? { ...t, baseline_end_date: be } : t
+    })
+  }, [tasks, latestSnapshotEnds])
+  useEffect(() => {
+    const snapshots = versions.filter(v => !v.is_autosave && v.status_date)
+    // 浏览历史版本时：基线 = 被浏览版本之前的那个状态快照
+    // 默认：基线 = 倒数第二个状态快照（首选第二新；若只有一个就用它）
+    let baseline: typeof snapshots[number] | undefined
+    if (viewSnapshot) {
+      const idx = snapshots.findIndex(v => v.id === viewSnapshot.versionId)
+      baseline = idx >= 0 ? snapshots[idx + 1] : undefined
+    } else {
+      baseline = snapshots.length >= 2 ? snapshots[1] : snapshots[0]
+    }
+    if (!baseline) {
+      setLatestSnapshotEnds(new Map())
+      setPrevSnapshotTaskIds(new Set())
+      return
+    }
+    let cancelled = false
+    authFetch(`/api/versions/${projectId}?id=${baseline.id}`)
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return
+        if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
+          const m = new Map<string, string>()
+          const ids = new Set<string>()
+          for (const t of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
+            ids.add(t.id)
+            if (t.end_date) m.set(t.id, String(t.end_date).split('T')[0])
+          }
+          setLatestSnapshotEnds(m)
+          setPrevSnapshotTaskIds(ids)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, versions, viewSnapshot])
 
   const colW = colWProp ?? DEF_COLW
   const prevColWRef = useRef(colW)
@@ -519,6 +702,24 @@ export default function GanttChart({
   const [colFilters, setColFilters] = useState<Partial<Record<OptionalCol, Set<string>>>>({})
   const [colDropdown, setColDropdown] = useState<OptionalCol | null>(null)
   const colDropdownRef = useRef<HTMLDivElement>(null)
+
+  // 列拖动重排（visibleCols 顺序即渲染顺序，通过 CSS flex order 反映）
+  const [draggedCol, setDraggedCol] = useState<OptionalCol | null>(null)
+  const [dragOverCol, setDragOverCol] = useState<OptionalCol | null>(null)
+  const colOrderMap = useMemo(() => {
+    const m = new Map<OptionalCol, number>()
+    visibleCols.forEach((k, i) => m.set(k, i))
+    return m
+  }, [visibleCols])
+  const colOrderOf = useCallback((k: OptionalCol) => colOrderMap.get(k) ?? 999, [colOrderMap])
+  const handleColReorder = useCallback((fromKey: OptionalCol, toKey: OptionalCol) => {
+    if (fromKey === toKey || !onVisibleColsChange) return
+    const next = visibleCols.filter(k => k !== fromKey)
+    const idx = next.indexOf(toKey)
+    if (idx === -1) return
+    next.splice(idx, 0, fromKey)
+    onVisibleColsChange(next)
+  }, [visibleCols, onVisibleColsChange])
 
   const toggleSort = useCallback((col: OptionalCol) => {
     if (sortCol === col) {
@@ -772,7 +973,14 @@ export default function GanttChart({
     const activeFilterEntries = Object.entries(colFilters).filter(([, v]) => v && (v as Set<string>).size > 0) as [OptionalCol, Set<string>][]
     if (activeFilterEntries.length > 0) {
       const sdForStatus = statusDate ? new Date(statusDate) : null
-      const statusCtx = { allTasks: tasks, deps }
+      const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
+      const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds }
+      const statusValue = (t: Task): string => {
+        const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
+        const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+        if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
+        return st
+      }
       const colVal = (t: Task, k: OptionalCol): string => {
         switch (k) {
           case 'assignee':   return t.assignee ?? ''
@@ -786,7 +994,7 @@ export default function GanttChart({
           case 'ctype':      return t.constraint_type ?? 'asap'
           case 'cdate':      return (t.constraint_date ?? '').split('T')[0]
           case 'ddate':      return (t.deadline ?? '').split('T')[0]
-          case 'status':     return computeTaskStatus(t, sdForStatus, statusCtx).status
+          case 'status':     return statusValue(t)
           case 'inactive':   return t.inactive ? '是' : '否'
         }
       }
@@ -1097,20 +1305,25 @@ export default function GanttChart({
       const mouseX = getSvgX(e.clientX)
       const EDGE_SIZE = 15
 
-      if (mouseX < taskX + EDGE_SIZE) {
-        mode = 'resize-left'
-      } else if (mouseX > taskX + taskW - EDGE_SIZE) {
-        mode = 'resize-right'
+      // 短条（宽度不足 2*EDGE_SIZE）：整体平移，不做 resize
+      if (taskW > EDGE_SIZE * 2) {
+        if (mouseX < taskX + EDGE_SIZE) {
+          mode = 'resize-left'
+        } else if (mouseX > taskX + taskW - EDGE_SIZE) {
+          mode = 'resize-right'
+        }
       }
 
-      // auto_schedule 任务根据依赖类型限制拖动方向
+      // auto_schedule 任务根据依赖类型限制拖动方向（无依赖则不限制）
       if (task.auto_schedule !== false) {
         const incoming = deps.filter(d => d.to_task_id === task.id)
-        const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
-        if (depType === 3 || depType === 1) {
-          if (mode !== 'resize-left') return
-        } else {
-          if (mode !== 'resize-right') return
+        if (incoming.length > 0) {
+          const depType = incoming[0].type ?? 2
+          if (depType === 3 || depType === 1) {
+            if (mode !== 'resize-left') return
+          } else {
+            if (mode !== 'resize-right') return
+          }
         }
       }
     }
@@ -1456,7 +1669,7 @@ export default function GanttChart({
           const rect = leftRef.current?.getBoundingClientRect()
           if (rect) {
             const rel = e.clientY - rect.top + (leftRef.current?.scrollTop ?? 0)
-            setDropIdx(Math.min(Math.max(0, Math.round(rel / ROW_H)), flatRows.length))
+            setDropIdx(Math.min(Math.max(0, Math.round(rel / ROW_H)), displayRows.length))
           }
         }
       }
@@ -1485,7 +1698,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, flatRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1598,6 +1811,15 @@ export default function GanttChart({
           dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
           // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
           dispatch(markDirty(dirtyList.map(t => t.id)))
+          // 自动描述：拖动任务
+          const draggedTask = tasks.find(t => t.id === drag.taskId)
+          if (draggedTask) {
+            const desc = drag.mode === 'move'
+              ? `移动了任务「${draggedTask.name}」`
+              : `调整了「${draggedTask.name}」的工期`
+            dispatch(setEditDescription({ taskId: drag.taskId, description: desc }))
+          }
+          // 立即持久化到数据库（服务端自动级联下游）
         }
       }
 
@@ -1606,7 +1828,8 @@ export default function GanttChart({
         const rect = svgRef.current?.getBoundingClientRect()
         const svgY = rect ? e.clientY - rect.top : 0
         const rowI = Math.floor(svgY / ROW_H)
-        const toRow = flatRows[rowI]
+        // 渲染时用的是 displayRows（应用了搜索/列筛选/差异筛选/排序），命中也必须查 displayRows
+        const toRow = displayRows[rowI]
 
         if (toRow && toRow.task.id !== connect.fromTaskId) {
           const toTask = toRow.task
@@ -1619,29 +1842,24 @@ export default function GanttChart({
             if (svgX >= hitX && svgX <= hitX+tw) {
               const dup = deps.some(d => d.from_task_id===connect.fromTaskId && d.to_task_id===toTask.id)
               if (!dup) {
-            
-                const tempId = `temp-${Date.now()}-${connect.fromTaskId}-${toTask.id}`
-                dispatch(addDependency({ id: tempId, project_id: projectId, from_task_id: connect.fromTaskId, to_task_id: toTask.id, type: 2, lag: 0 }))
-                // 添加依赖时，后继任务自动切换为自动排程
-                if (toTask.auto_schedule === false) {
-                  dispatch(updateTasks([{ ...toTask, auto_schedule: true }]))
-                  dispatch(markDirty([toTask.id]))
+                const newDep: Dependency = {
+                  id: uuid(), project_id: projectId,
+                  from_task_id: connect.fromTaskId, to_task_id: toTask.id,
+                  type: 2, lag: 0, active: true,
                 }
-                const res = await authFetch(`/api/dependencies/${projectId}`, {
-                  method:'POST', headers:{'Content-Type':'application/json'},
-                  body: JSON.stringify({ from_task_id:connect.fromTaskId, to_task_id:toTask.id }),
-                })
-                const text = await res.text()
-                let data: { ok?: boolean; value?: { dependency?: Dependency; updatedTask?: Task; updatedTasks?: Task[] } } = {}
-                try { data = text ? JSON.parse(text) : {} } catch { dispatch(removeDependency(tempId)); data = {} }
-                if (data.ok && data.value) {
-                  const v = data.value as { dependency?: Dependency; updatedTasks?: Task[] }
-                  dispatch(removeDependency(tempId))
-                  if (v.dependency) dispatch(addDependency(v.dependency))
-                  if (Array.isArray(v.updatedTasks) && v.updatedTasks.length > 0)
-                    dispatch(updateTasks(v.updatedTasks))
-                } else {
-                  dispatch(removeDependency(tempId))
+                dispatch(addDependency(newDep))
+                // 添加依赖时，后继任务自动切换为自动排程
+                let nextTasks = tasks
+                if (toTask.auto_schedule === false) {
+                  const updatedTo = { ...toTask, auto_schedule: true }
+                  dispatch(updateTasks([updatedTo]))
+                  dispatch(markDirty([toTask.id]))
+                  nextTasks = tasks.map(t => t.id === toTask.id ? updatedTo : t)
+                }
+                const cascaded = runFullCascade(nextTasks, [...deps, newDep])
+                if (cascaded.length > 0) {
+                  dispatch(updateTasks(cascaded))
+                  dispatch(markDirty(cascaded.map(t => t.id)))
                 }
               }
             }
@@ -1652,10 +1870,10 @@ export default function GanttChart({
 
       if (rowDrag) {
         if (rowDrag.dragging && dropIdx !== null) {
-          const dIdx = flatRows.findIndex(r => r.task.id === rowDrag.taskId)
+          const dIdx = displayRows.findIndex(r => r.task.id === rowDrag.taskId)
           if (dIdx !== -1 && dropIdx !== dIdx && dropIdx !== dIdx + 1) {
-            const dTask = flatRows[dIdx].task
-            const without = flatRows.filter((_, i) => i !== dIdx)
+            const dTask = displayRows[dIdx].task
+            const without = displayRows.filter((_, i) => i !== dIdx)
             const adj = dropIdx > dIdx ? dropIdx - 1 : dropIdx
 
             const newPid: string | null = adj < without.length
@@ -1716,7 +1934,7 @@ export default function GanttChart({
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, rowDrag, dropIdx, previewMap, flatRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag])
+  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -1728,9 +1946,10 @@ export default function GanttChart({
     if (!orig) { setEditId(null); return }
     if (orig.name !== name) {
       const updated = { ...orig, name }
-  
+
       dispatch(updateTasks([updated]))
       dispatch(markDirty([editId]))
+      dispatch(setEditDescription({ taskId: editId, description: `重命名「${orig.name}」→「${name}」` }))
     }
     setEditId(null)
   }, [editId, tasks, dispatch])
@@ -1790,6 +2009,9 @@ export default function GanttChart({
     const cascaded = cascadeLocal(updated, tasks, deps)
     dispatch(updateTasks([updated, ...cascaded]))
     dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
+    // 自动描述：单元格编辑
+    const fieldLabels: Record<string, string> = { assignee: '责任人', duration: '工期', start_date: '开始日期', end_date: '结束日期' }
+    dispatch(setEditDescription({ taskId: orig.id, description: `修改了「${orig.name}」的${fieldLabels[cellEdit.field] ?? cellEdit.field}` }))
     setCellEdit(null)
   }, [cellEdit, tasks, deps, dispatch])
 
@@ -1798,8 +2020,13 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
 
-    dispatch(updateTasks([{ ...t, ...patch }]))
+    const updated = { ...t, ...patch }
+    dispatch(updateTasks([updated]))
     dispatch(markDirty([taskId]))
+    const fields = Object.keys(patch)
+    const fieldLabels: Record<string, string> = { constraint_type: '限制类型', constraint_date: '限制日期', status: '状态', deadline: '截止日期' }
+    const label = fields.map(f => fieldLabels[f] ?? f).join('、')
+    dispatch(setEditDescription({ taskId, description: `修改了「${t.name}」的${label}` }))
   }, [tasks, dispatch])
 
   // ── 自动排程开关 ────────────────────────────────────────────────────────
@@ -1807,35 +2034,27 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
 
-    dispatch(updateTasks([{ ...t, auto_schedule: autoSchedule }]))
+    const updated = { ...t, auto_schedule: autoSchedule }
+    dispatch(updateTasks([updated]))
     dispatch(markDirty([taskId]))
+    dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
   }, [tasks, dispatch])
 
-  // ── 依赖变更后，用 PUT 返回的级联结果局部更新任务，不做全量刷新 ──────
-  const applyDepPutResult = useCallback(async (res: Response) => {
-    if (!res.ok) return
-    try {
-      const d = await res.json()
-      if (d.ok && d.value) {
-        const cascaded = (d.value.updatedTasks ?? []) as Task[]
-        if (cascaded.length > 0) {
-          dispatch(updateTasks(cascaded))
-          dispatch(markDirty(cascaded.map(t => t.id)))
-        }
-      }
-    } catch { /* ignore */ }
-  }, [dispatch])
+  // ── 本地依赖变更后重算级联 + 摘要 ──────────────────────────────────────
+  const recascade = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
+    const cascaded = runFullCascade(nextTasks ?? tasks, nextDeps)
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
+    }
+  }, [dispatch, tasks])
 
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
-
     dispatch(updateDependency({ id: depId, lag: newLag }))
-    const res = await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId, lag: newLag }),
-    })
-    await applyDepPutResult(res)
-  }, [dispatch, projectId, applyDepPutResult])
+    const nextDeps = deps.map(d => d.id === depId ? { ...d, lag: newLag } : d)
+    recascade(nextDeps)
+  }, [dispatch, deps, recascade])
   // 同步 ref，供全局 mouseup 使用
   handleDepLagChangeRef.current = handleDepLagChange
 
@@ -1859,14 +2078,10 @@ export default function GanttChart({
 
   // ── Change dependency type ──────────────────────────────────────────────
   const handleDepTypeChange = useCallback(async (depId: string, newType: number) => {
-
     dispatch(updateDependency({ id: depId, type: newType }))
-    const res = await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId, type: newType }),
-    })
-    await applyDepPutResult(res)
-  }, [dispatch, projectId, applyDepPutResult])
+    const nextDeps = deps.map(d => d.id === depId ? { ...d, type: newType } : d)
+    recascade(nextDeps)
+  }, [dispatch, deps, recascade])
 
   // ── 切换任务调度模式：空/手动/依赖类型 ─────────────────────────────────
   const handleScheduleModeChange = useCallback(async (taskId: string, value: string) => {
@@ -1876,133 +2091,80 @@ export default function GanttChart({
     if (value === 'empty') {
       // 空：删除所有入依赖，auto_schedule=true，开始日期设为项目最早任务开始日期
       const incoming = deps.filter(d => d.to_task_id === taskId)
-  
-      for (const dep of incoming) {
-        dispatch(removeDependency(dep.id))
-        await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: dep.id }),
-        })
-      }
+      for (const dep of incoming) dispatch(removeDependency(dep.id))
+      const remainDeps = deps.filter(d => !incoming.some(x => x.id === d.id))
       const dur = t.duration ?? 0
-      // "空"类型始终使用项目开始日期（子任务的父级是摘要任务，日期由子任务决定，不能反向引用）
       const emptyStart = projectStartDate
       const newEnd = fmtDate(addDays(new Date(emptyStart), dur))
-      dispatch(updateTasks([{ ...t, auto_schedule: true, start_date: emptyStart, end_date: newEnd, duration: dur }]))
+      const updatedEmpty = { ...t, auto_schedule: true, start_date: emptyStart, end_date: newEnd, duration: dur }
+      dispatch(updateTasks([updatedEmpty]))
       dispatch(markDirty([taskId]))
+      dispatch(setEditDescription({ taskId, description: `「${t.name}」排程模式改为无约束` }))
+      recascade(remainDeps, tasks.map(x => x.id === taskId ? updatedEmpty : x))
     } else if (value === 'manual') {
       // 手动：删除所有入依赖，auto_schedule=false
       const incoming = deps.filter(d => d.to_task_id === taskId)
-  
-      for (const dep of incoming) {
-        dispatch(removeDependency(dep.id))
-        authFetch(`/api/dependencies/${projectId}`, {
-          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: dep.id }),
-        })
-      }
-      dispatch(updateTasks([{ ...t, auto_schedule: false }]))
+      for (const dep of incoming) dispatch(removeDependency(dep.id))
+      const remainDeps = deps.filter(d => !incoming.some(x => x.id === d.id))
+      const updatedManual = { ...t, auto_schedule: false }
+      dispatch(updateTasks([updatedManual]))
       dispatch(markDirty([taskId]))
+      dispatch(setEditDescription({ taskId, description: `「${t.name}」排程模式改为手动` }))
+      recascade(remainDeps, tasks.map(x => x.id === taskId ? updatedManual : x))
     }
-  }, [tasks, deps, dispatch, projectId, projectStartDate])
+  }, [tasks, deps, dispatch, projectStartDate, recascade])
 
-  // ── Toggle predecessor via popup（乐观更新，参考 Bryntum 示例）────────────────
+  // ── Toggle predecessor via popup（本地操作）────────────────
   const togglePredecessor = useCallback(async (fromTaskId: string, toTaskId: string) => {
     const existing = deps.find(d => d.from_task_id === fromTaskId && d.to_task_id === toTaskId)
     if (existing) {
-  
       dispatch(removeDependency(existing.id))
       setPredPopup(null)
-      try {
-        const res = await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: existing.id }),
-        })
-        if (!res.ok) {
-          dispatch(addDependency(existing))
-          throw new Error('删除依赖失败')
-        }
-      } catch (err) {
-        console.error('togglePredecessor DELETE:', err)
-      }
+      const remainDeps = deps.filter(d => d.id !== existing.id)
+      recascade(remainDeps)
       return
     }
 
-    // 添加：乐观更新，先更新 UI 再同步后端（与 Bryntum 示例一致）
-
-    const tempId = `temp-${Date.now()}-${fromTaskId}-${toTaskId}`
-    const tempDep: Dependency = {
-      id: tempId,
-      project_id: projectId,
-      from_task_id: fromTaskId,
-      to_task_id: toTaskId,
-      type: 2,
-      lag: 0,
+    const newDep: Dependency = {
+      id: uuid(), project_id: projectId,
+      from_task_id: fromTaskId, to_task_id: toTaskId,
+      type: 2, lag: 0, active: true,
     }
-    dispatch(addDependency(tempDep))
-    // 添加依赖时，后继任务自动切换为自动排程
+    dispatch(addDependency(newDep))
+    let nextTasks = tasks
     const toTask_ = tasks.find(x => x.id === toTaskId)
     if (toTask_ && toTask_.auto_schedule === false) {
-      dispatch(updateTasks([{ ...toTask_, auto_schedule: true }]))
+      const updatedTo = { ...toTask_, auto_schedule: true }
+      dispatch(updateTasks([updatedTo]))
       dispatch(markDirty([toTaskId]))
+      nextTasks = tasks.map(t => t.id === toTaskId ? updatedTo : t)
     }
     setPredPopup(null)
-
-    try {
-      const res = await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from_task_id: fromTaskId, to_task_id: toTaskId }),
-      })
-      const text = await res.text()
-      let data: { ok?: boolean; value?: { dependency?: Dependency; updatedTask?: Task; updatedTasks?: Task[] }; error?: string }
-      try {
-        data = text ? JSON.parse(text) : {}
-      } catch {
-        dispatch(removeDependency(tempId))
-        throw new Error(res.ok ? '响应格式错误' : `请求失败 (${res.status})`)
-      }
-      if (data.ok && data.value) {
-        const v = data.value as { dependency?: Dependency; updatedTasks?: Task[] }
-        dispatch(removeDependency(tempId))
-        if (v.dependency) dispatch(addDependency(v.dependency))
-        if (Array.isArray(v.updatedTasks) && v.updatedTasks.length > 0)
-          dispatch(updateTasks(v.updatedTasks))
-      } else {
-        dispatch(removeDependency(tempId))
-        throw new Error(data.error ?? '添加依赖失败')
-      }
-    } catch (err) {
-      console.error('togglePredecessor POST:', err)
-    }
-  }, [deps, dispatch, projectId])
+    recascade([...deps, newDep], nextTasks)
+  }, [deps, tasks, dispatch, projectId, recascade])
 
   // ── Delete selected dependency ──────────────────────────────────────────
   useEffect(() => {
-    const onKey = async (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDep && document.activeElement?.tagName !== 'INPUT') {
-    
         dispatch(removeDependency(selectedDep))
-        await authFetch(`/api/dependencies/${projectId}`, {
-          method:'DELETE', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ id: selectedDep }),
-        })
+        const remainDeps = deps.filter(d => d.id !== selectedDep)
+        recascade(remainDeps)
         setSelectedDep(null)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDep, dispatch, projectId])
+  }, [selectedDep, deps, dispatch, recascade])
 
-  // ── Context menu: add task helper ───────────────────────────────────────
-  const addTask = useCallback(async (
+  // ── Context menu: add task helper（本地新建，保存版本时入库）────────────
+  const addTask = useCallback((
     name: string,
     parent_id: string | null,
     order_index: number,
     extra: { is_milestone?: boolean; start_date?: string | null; end_date?: string | null; auto_schedule?: boolean } = {}
-  ): Promise<Task | null> => {
-    // Default start: later of earliest task start and status date
+  ): Task | null => {
     const startDate = extra.start_date !== undefined ? extra.start_date : defaultStart
-    // Default end: start + 1 day (milestones: same as start)
     const endDate = extra.end_date !== undefined
       ? extra.end_date
       : startDate
@@ -2016,131 +2178,133 @@ export default function GanttChart({
       dispatch(updateTasks(shifted))
       dispatch(markDirty(shifted.map(t => t.id)))
     }
-    const res = await authFetch(`/api/tasks/${projectId}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name, parent_id, order_index,
-        is_milestone: extra.is_milestone ?? false,
-        start_date: startDate,
-        end_date: endDate,
-        duration,
-        ...(extra.auto_schedule !== undefined ? { auto_schedule: extra.auto_schedule } : {}),
-      }),
-    })
-    const data = await res.json()
-    if (data.ok && data.value?.length > 0) {
-      dispatch(addTasks(data.value))
-      return data.value[0] as Task
-    }
-    return null
+    // 客户端生成 id + task_code
+    const maxCode = tasks.reduce((m, t) => {
+      const n = parseInt(t.task_code, 10)
+      return !isNaN(n) && n > m ? n : m
+    }, 0)
+    const newTask: Task = {
+      id: uuid(),
+      project_id: projectId,
+      task_code: String(maxCode + 1),
+      name,
+      parent_id,
+      order_index,
+      assignee: null,
+      start_date: startDate,
+      end_date: endDate,
+      duration,
+      duration_unit: 'day',
+      percent_done: 0,
+      is_milestone: extra.is_milestone ?? false,
+      note: null,
+      auto_schedule: extra.auto_schedule !== undefined ? extra.auto_schedule : true,
+      constraint_type: 'asap',
+      constraint_date: null,
+      status: null,
+      rollup: false,
+      inactive: false,
+      project_boundary: 'ask',
+      baseline_end_date: null,
+      original_start_date: null,
+      original_end_date: null,
+      deadline: null,
+      is_deleted: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as Task
+    dispatch(addTasks([newTask]))
+    dispatch(markDirty([newTask.id]))
+    return newTask
   }, [tasks, dispatch, projectId, defaultStart])
 
   // ── Context menu: action handlers ────────────────────────────────────────
-  const handleCtxDeleteTask = useCallback(async (taskId: string) => {
+  const handleCtxDeleteTask = useCallback((taskId: string) => {
     setCtxMenu(null)
-
+    // 同时移除关联依赖（本地）
+    const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
     dispatch(deleteTasks([taskId]))
-    await authFetch(`/api/tasks/${projectId}`, {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: [taskId] }),
-    })
-  }, [dispatch, projectId])
+    const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
+    const remainTasks = tasks.filter(t => t.id !== taskId)
+    recascade(remainDeps, remainTasks)
+  }, [dispatch, tasks, deps, recascade])
 
-  const handleCtxAddAbove = useCallback(async (taskId: string) => {
+  const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    await addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate, auto_schedule: false })
-  }, [tasks, addTask, dispatch, defaultStart])
+    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate, auto_schedule: false })
+  }, [tasks, addTask, defaultStart])
 
-  const handleCtxAddBelow = useCallback(async (taskId: string) => {
+  const handleCtxAddBelow = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    await addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate, auto_schedule: false })
-  }, [tasks, addTask, dispatch, defaultStart])
+    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate, auto_schedule: false })
+  }, [tasks, addTask, defaultStart])
 
-  const handleCtxAddMilestone = useCallback(async (taskId: string) => {
+  const handleCtxAddMilestone = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-
-    const nt = await addTask('New Milestone', t.parent_id, t.order_index + 1, { is_milestone: true })
+    const nt = addTask('New Milestone', t.parent_id, t.order_index + 1, { is_milestone: true })
     if (nt) setEditModalTaskId(nt.id)
-  }, [tasks, addTask, dispatch])
+  }, [tasks, addTask])
 
-  const handleCtxAddSubtask = useCallback(async (taskId: string) => {
+  const handleCtxAddSubtask = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
     const childCount = tasks.filter(x => x.parent_id === taskId).length
-
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    await addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate, auto_schedule: false })
     setExpanded(prev => ({ ...prev, [taskId]: true }))
-  }, [tasks, addTask, dispatch, defaultStart])
+  }, [tasks, addTask, defaultStart])
 
-  const handleCtxAddSuccessor = useCallback(async (taskId: string) => {
+  const handleCtxAddSuccessor = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-
-    const newTask = await addTask('New Task', t.parent_id, t.order_index + 1)
+    const newTask = addTask('New Task', t.parent_id, t.order_index + 1)
     if (!newTask) return
-    const res = await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from_task_id: taskId, to_task_id: newTask.id }),
-    })
-    const text = await res.text()
-    let data: { ok?: boolean; value?: { dependency?: Dependency; updatedTask?: Task; updatedTasks?: Task[] } } = {}
-    try { data = text ? JSON.parse(text) : {} } catch { /* ignore */ }
-    if (data.ok && data.value) {
-      const v = data.value
-      if (v.dependency) dispatch(addDependency(v.dependency))
-      const tasksToUpdate = v.updatedTasks ?? (v.updatedTask ? [v.updatedTask] : [])
-      if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
+    const newDep: Dependency = {
+      id: uuid(), project_id: projectId,
+      from_task_id: taskId, to_task_id: newTask.id,
+      type: 2, lag: 0, active: true,
     }
+    dispatch(addDependency(newDep))
+    recascade([...deps, newDep], [...tasks, newTask])
     setEditModalTaskId(newTask.id)
-  }, [tasks, addTask, dispatch, projectId])
+  }, [tasks, deps, addTask, dispatch, projectId, recascade])
 
-  const handleCtxAddPredecessor = useCallback(async (taskId: string) => {
+  const handleCtxAddPredecessor = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-
-    const newTask = await addTask('New Task', t.parent_id, t.order_index)
+    const newTask = addTask('New Task', t.parent_id, t.order_index)
     if (!newTask) return
-    const res = await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from_task_id: newTask.id, to_task_id: taskId }),
-    })
-    const text = await res.text()
-    let data: { ok?: boolean; value?: { dependency?: Dependency; updatedTask?: Task; updatedTasks?: Task[] } } = {}
-    try { data = text ? JSON.parse(text) : {} } catch { /* ignore */ }
-    if (data.ok && data.value) {
-      const v = data.value
-      if (v.dependency) dispatch(addDependency(v.dependency))
-      const tasksToUpdate = v.updatedTasks ?? (v.updatedTask ? [v.updatedTask] : [])
-      if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
+    const newDep: Dependency = {
+      id: uuid(), project_id: projectId,
+      from_task_id: newTask.id, to_task_id: taskId,
+      type: 2, lag: 0, active: true,
     }
+    dispatch(addDependency(newDep))
+    recascade([...deps, newDep], [...tasks, newTask])
     setEditModalTaskId(newTask.id)
-  }, [tasks, addTask, dispatch, projectId])
+  }, [tasks, deps, addTask, dispatch, projectId, recascade])
 
-  const handleCtxDeleteDep = useCallback(async (depId: string) => {
+  const handleCtxDeleteDep = useCallback((depId: string) => {
     setCtxMenu(null)
     dispatch(removeDependency(depId))
-    await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: depId }),
-    })
-  }, [dispatch, projectId])
+    const remainDeps = deps.filter(d => d.id !== depId)
+    recascade(remainDeps)
+  }, [dispatch, deps, recascade])
 
   const handleCtxEdit = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2152,31 +2316,35 @@ export default function GanttChart({
     dispatch(copyTasks([taskId]))
   }, [dispatch])
 
-  const handleCtxCut = useCallback(async (taskId: string) => {
+  const handleCtxCut = useCallback((taskId: string) => {
     setCtxMenu(null)
-
     dispatch(copyTasks([taskId]))
+    const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
     dispatch(deleteTasks([taskId]))
-    await authFetch(`/api/tasks/${projectId}`, {
-      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: [taskId] }),
-    })
-  }, [dispatch, projectId])
+    const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
+    const remainTasks = tasks.filter(t => t.id !== taskId)
+    recascade(remainDeps, remainTasks)
+  }, [dispatch, tasks, deps, recascade])
 
-  const handleCtxPaste = useCallback(async () => {
+  const handleCtxPaste = useCallback(() => {
     setCtxMenu(null)
     if (!clipboard.length) return
-
-    const pastedTasks = clipboard.map(t => ({
-      ...t, name: `${t.name} (副本)`, id: undefined, created_at: undefined, updated_at: undefined,
-    }))
-    const res = await authFetch(`/api/tasks/${projectId}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pastedTasks),
-    })
-    const data = await res.json()
-    if (data.ok) dispatch(addTasks(data.value))
-  }, [dispatch, projectId, clipboard])
+    const maxCode = tasks.reduce((m, t) => {
+      const n = parseInt(t.task_code, 10)
+      return !isNaN(n) && n > m ? n : m
+    }, 0)
+    const pasted: Task[] = clipboard.map((t, i) => ({
+      ...t,
+      id: uuid(),
+      task_code: String(maxCode + 1 + i),
+      name: `${t.name} (副本)`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as Task))
+    dispatch(addTasks(pasted))
+    dispatch(markDirty(pasted.map(t => t.id)))
+  }, [dispatch, clipboard, tasks])
 
   const handleCtxConvertMilestone = useCallback(async (taskId: string) => {
     setCtxMenu(null)
@@ -2200,7 +2368,7 @@ export default function GanttChart({
     dispatch(markDirty([taskId]))
   }, [dispatch, tasks])
 
-  const handleCtxIndent = useCallback(async (taskId: string) => {
+  const handleCtxIndent = useCallback((taskId: string) => {
     setCtxMenu(null)
     const task = tasks.find(t => t.id === taskId)
     if (!task) return
@@ -2209,173 +2377,102 @@ export default function GanttChart({
       .sort((a, b) => b.order_index - a.order_index)[0]
     if (!anchor) return
 
-
-    // 降级时删除被降级任务与新父任务之间的依赖关系
-    // 降级时取消 anchor（新父任务）上的所有依赖（父级任务不允许有依赖）
-    const depsToRemove = deps.filter(d =>
-      d.from_task_id === anchor.id || d.to_task_id === anchor.id
-    )
-    for (const dep of depsToRemove) {
-      dispatch(removeDependency(dep.id))
-      await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: dep.id }),
-      })
-    }
-
+    // anchor 变父级：取消 anchor 的所有依赖
+    const depsToRemove = deps.filter(d => d.from_task_id === anchor.id || d.to_task_id === anchor.id)
+    for (const dep of depsToRemove) dispatch(removeDependency(dep.id))
     const existingChildren = tasks.filter(t => t.parent_id === anchor.id)
     const newOrder = existingChildren.length > 0 ? Math.max(...existingChildren.map(t => t.order_index)) + 1 : 0
     const movedTask = { ...task, parent_id: anchor.id, order_index: newOrder }
     dispatch(updateTasks([movedTask]))
-    // 乐观更新 anchor（新父任务）的日期范围
-    const allKids = [...existingChildren, movedTask]
-    const starts = allKids.map(k => k.start_date).filter(Boolean) as string[]
-    const ends = allKids.map(k => k.end_date).filter(Boolean) as string[]
-    if (starts.length > 0 && ends.length > 0) {
-      const minS = starts.sort()[0], maxE = ends.sort().reverse()[0]
-      const dur = Math.round((new Date(maxE).getTime() - new Date(minS).getTime()) / 86400000)
-      dispatch(updateTasks([{ ...anchor, start_date: minS, end_date: maxE, duration: dur }]))
-    }
     dispatch(markDirty([taskId]))
-  }, [dispatch, tasks, deps])
+    const remainDeps = deps.filter(d => !depsToRemove.some(x => x.id === d.id))
+    const nextTasks = tasks.map(t => t.id === taskId ? movedTask : t)
+    recascade(remainDeps, nextTasks)
+  }, [dispatch, tasks, deps, recascade])
 
-  const handleCtxOutdent = useCallback(async (taskId: string) => {
+  const handleCtxOutdent = useCallback((taskId: string) => {
     setCtxMenu(null)
     const task = tasks.find(t => t.id === taskId)
     if (!task || !task.parent_id) return
     const parent = tasks.find(t => t.id === task.parent_id)!
-
 
     // 升级时删除被升级任务与旧父任务之间的依赖关系
     const depsToRemove = deps.filter(d =>
       (d.from_task_id === taskId && d.to_task_id === parent.id) ||
       (d.from_task_id === parent.id && d.to_task_id === taskId)
     )
-    for (const dep of depsToRemove) {
-      dispatch(removeDependency(dep.id))
-      await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: dep.id }),
-      })
-    }
+    for (const dep of depsToRemove) dispatch(removeDependency(dep.id))
 
     const siblingsAfterParent = tasks
       .filter(t => t.parent_id === parent.parent_id && t.order_index > parent.order_index)
-    siblingsAfterParent.forEach(s => {
-      dispatch(updateTasks([{ ...s, order_index: s.order_index + 1 }]))
-    })
+    const shifted = siblingsAfterParent.map(s => ({ ...s, order_index: s.order_index + 1 }))
     const updated = { ...task, parent_id: parent.parent_id, order_index: parent.order_index + 1 }
-    dispatch(updateTasks([updated]))
-    // 乐观更新：旧父任务日期收缩
-    const remainKids = tasks.filter(t => t.parent_id === parent.id && t.id !== taskId)
-    if (remainKids.length > 0) {
-      const starts = remainKids.map(k => k.start_date).filter(Boolean) as string[]
-      const ends = remainKids.map(k => k.end_date).filter(Boolean) as string[]
-      if (starts.length > 0 && ends.length > 0) {
-        const minS = starts.sort()[0], maxE = ends.sort().reverse()[0]
-        const dur = Math.round((new Date(maxE).getTime() - new Date(minS).getTime()) / 86400000)
-        dispatch(updateTasks([{ ...parent, start_date: minS, end_date: maxE, duration: dur }]))
-      }
-    }
-    const payload = [
-      { id: taskId, parent_id: parent.parent_id, order_index: parent.order_index + 1 },
-      ...siblingsAfterParent.map(s => ({ id: s.id, parent_id: s.parent_id, order_index: s.order_index + 1 })),
-    ]
-    dispatch(updateTasks(payload.map(p => ({ ...tasks.find(t => t.id === p.id)!, ...p }))))
-    dispatch(markDirty(payload.map(p => p.id)))
-  }, [dispatch, projectId, tasks, deps])
+    const allUpdates = [updated, ...shifted]
+    dispatch(updateTasks(allUpdates))
+    dispatch(markDirty([taskId, ...shifted.map(s => s.id)]))
+    const remainDeps = deps.filter(d => !depsToRemove.some(x => x.id === d.id))
+    const nextTasks = tasks.map(t => {
+      const u = allUpdates.find(x => x.id === t.id)
+      return u ?? t
+    })
+    recascade(remainDeps, nextTasks)
+  }, [dispatch, tasks, deps, recascade])
 
-  const handleCtxAddDep = useCallback(async (fromId: string, toId: string) => {
+  const handleCtxAddDep = useCallback((fromId: string, toId: string) => {
     setCtxMenu(null)
     const already = deps.find(d => d.from_task_id === fromId && d.to_task_id === toId)
     if (already) return
-
-    const tempId = `temp-${Date.now()}-${fromId}-${toId}`
-    dispatch(addDependency({ id: tempId, project_id: projectId, from_task_id: fromId, to_task_id: toId, type: 2, lag: 0 }))
-    // 添加依赖时，后继任务自动切换为自动排程
+    const newDep: Dependency = {
+      id: uuid(), project_id: projectId,
+      from_task_id: fromId, to_task_id: toId,
+      type: 2, lag: 0, active: true,
+    }
+    dispatch(addDependency(newDep))
+    let nextTasks = tasks
     const toTask__ = tasks.find(x => x.id === toId)
     if (toTask__ && toTask__.auto_schedule === false) {
-      dispatch(updateTasks([{ ...toTask__, auto_schedule: true }]))
+      const updatedTo = { ...toTask__, auto_schedule: true }
+      dispatch(updateTasks([updatedTo]))
       dispatch(markDirty([toId]))
+      nextTasks = tasks.map(t => t.id === toId ? updatedTo : t)
     }
-    const res = await authFetch(`/api/dependencies/${projectId}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from_task_id: fromId, to_task_id: toId }),
-    })
-    const text = await res.text()
-    let data: { ok?: boolean; value?: { dependency?: Dependency; updatedTask?: Task; updatedTasks?: Task[] } } = {}
-    try { data = text ? JSON.parse(text) : {} } catch { dispatch(removeDependency(tempId)); return }
-    if (data.ok && data.value) {
-      const v = data.value as { dependency?: Dependency; updatedTasks?: Task[] }
-      dispatch(removeDependency(tempId))
-      if (v.dependency) dispatch(addDependency(v.dependency))
-      if (Array.isArray(v.updatedTasks) && v.updatedTasks.length > 0)
-        dispatch(updateTasks(v.updatedTasks))
-    } else {
-      dispatch(removeDependency(tempId))
-    }
-  }, [dispatch, projectId, deps])
+    recascade([...deps, newDep], nextTasks)
+  }, [dispatch, projectId, deps, tasks, recascade])
 
-  const handleCtxRemoveAllDeps = useCallback(async (taskId: string) => {
+  const handleCtxRemoveAllDeps = useCallback((taskId: string) => {
     setCtxMenu(null)
     const taskDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
+    for (const d of taskDeps) dispatch(removeDependency(d.id))
+    const remainDeps = deps.filter(d => !taskDeps.some(x => x.id === d.id))
+    recascade(remainDeps)
+  }, [dispatch, deps, recascade])
 
-    for (const d of taskDeps) {
-      dispatch(removeDependency(d.id))
-      await authFetch(`/api/dependencies/${projectId}`, {
-        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: d.id }),
-      })
-    }
-  }, [dispatch, projectId, deps])
-
-  const handleEnableAutoSchedule = useCallback(async () => {
+  const handleEnableAutoSchedule = useCallback(() => {
     setCtxMenu(null)
     if (!confirm('将为所有有依赖关系的任务启用自动排程，确认？')) return
-    try {
-      const response = await authFetch(`/api/tasks/enable-auto-schedule/${projectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      })
-      const data = await response.json()
-      if (data.ok) {
-        alert(`已启用 ${data.value?.updated ?? 0} 个任务的自动排程`)
-        const taskRes = await authFetch(`/api/tasks/${projectId}`)
-        const taskData = await taskRes.json()
-        if (taskData.ok) dispatch(setTasks(taskData.value))
-      } else {
-        alert('启用失败：' + (data.error || '未知错误'))
-      }
-    } catch (err) {
-      console.error('启用自动排程失败:', err)
-      alert('启用失败，请检查网络连接')
-    }
-  }, [projectId, dispatch])
+    const idsWithDeps = new Set<string>()
+    for (const d of deps) idsWithDeps.add(d.to_task_id)
+    const updates = tasks
+      .filter(t => idsWithDeps.has(t.id) && t.auto_schedule === false)
+      .map(t => ({ ...t, auto_schedule: true }))
+    if (updates.length === 0) { alert('没有需要启用的任务'); return }
+    dispatch(updateTasks(updates))
+    dispatch(markDirty(updates.map(t => t.id)))
+    const nextTasks = tasks.map(t => updates.find(u => u.id === t.id) ?? t)
+    recascade(deps, nextTasks)
+    alert(`已启用 ${updates.length} 个任务的自动排程`)
+  }, [tasks, deps, dispatch, recascade])
 
-  const handleFixProjectDates = useCallback(async () => {
+  const handleFixProjectDates = useCallback(() => {
     setCtxMenu(null)
     if (!confirm('将根据依赖关系重新计算所有任务日期，确认？')) return
-    try {
-      const response = await authFetch(`/api/tasks/fix-project/${projectId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      })
-      const data = await response.json()
-      if (data.ok) {
-        alert(data.value?.message ?? '修复完成')
-        const taskRes = await authFetch(`/api/tasks/${projectId}`)
-        const taskData = await taskRes.json()
-        if (taskData.ok) dispatch(setTasks(taskData.value))
-      } else {
-        alert('修复失败：' + (data.error || '未知错误'))
-      }
-    } catch (err) {
-      console.error('修复项目失败:', err)
-      alert('修复失败，请检查网络连接')
+    const cascaded = runFullCascade(tasks, deps)
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [projectId, dispatch])
+    alert(`已重算 ${cascaded.length} 个任务的日期`)
+  }, [tasks, deps, dispatch])
 
   const toggle = useCallback((id: string) => {
     setExpanded(prev=>({ ...prev, [id]:!(prev[id]??true) }))
@@ -2491,7 +2588,14 @@ export default function GanttChart({
     const pred = (t: Task) => deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
     const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
     const sdForStatus = statusDate ? new Date(statusDate) : null
-    const statusCtx = { allTasks: tasks, deps }
+    const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
+    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds }
+    const statusValue = (t: Task): string => {
+      const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
+      const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+      if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
+      return st
+    }
     const builder: Record<OptionalCol, (t: Task) => string> = {
       assignee:   t => t.assignee ?? '',
       pct:        t => String(t.percent_done ?? 0),
@@ -2507,7 +2611,7 @@ export default function GanttChart({
       ctype:      t => t.constraint_type ?? 'asap',
       cdate:      t => fmt(t.constraint_date),
       ddate:      t => fmt(t.deadline),
-      status:     t => computeTaskStatus(t, sdForStatus, statusCtx).status,
+      status:     statusValue,
       inactive:   t => t.inactive ? '是' : '否',
     }
     const out = {} as Record<OptionalCol, string[]>
@@ -2517,12 +2621,18 @@ export default function GanttChart({
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps, statusDate])
+  }, [tasks, deps, statusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
     if (k === 'ctype') return CONSTRAINT_TYPES.find(c => c.value === v)?.label ?? v
-    if (k === 'status') return STATUS_META[v as keyof typeof STATUS_META]?.label ?? v
+    if (k === 'status') {
+      if (v.startsWith('new:')) {
+        const base = v.slice(4)
+        return `新任务，${STATUS_META[base as keyof typeof STATUS_META]?.label ?? base}`
+      }
+      return STATUS_META[v as keyof typeof STATUS_META]?.label ?? v
+    }
     return v
   }, [])
 
@@ -2532,14 +2642,33 @@ export default function GanttChart({
     const filterSet  = colFilters[colKey]
     const hasFilter  = !!filterSet && filterSet.size > 0
     const values     = distinctValues[colKey] ?? []
+    const isDragging = draggedCol === colKey
+    const isDragOver = dragOverCol === colKey && draggedCol !== null && draggedCol !== colKey
     return (
-      <div style={{ width, position: 'relative' }}
-           className="h-full flex items-end pb-1 px-1 border-r border-gray-200 flex-none overflow-visible select-none">
+      <div style={{ width, position: 'relative', order: colOrderOf(colKey),
+                    opacity: isDragging ? 0.4 : 1,
+                    boxShadow: isDragOver ? 'inset 3px 0 0 #3b82f6' : undefined }}
+           draggable={!readOnly}
+           onDragStart={e => {
+             setDraggedCol(colKey)
+             e.dataTransfer.effectAllowed = 'move'
+             try { e.dataTransfer.setData('text/plain', colKey) } catch { /* ignore */ }
+           }}
+           onDragEnd={() => { setDraggedCol(null); setDragOverCol(null) }}
+           onDragEnter={e => { if (draggedCol && draggedCol !== colKey) { e.preventDefault(); setDragOverCol(colKey) } }}
+           onDragOver={e => { if (draggedCol && draggedCol !== colKey) { e.preventDefault(); e.dataTransfer.dropEffect = 'move' } }}
+           onDragLeave={() => { if (dragOverCol === colKey) setDragOverCol(null) }}
+           onDrop={e => {
+             e.preventDefault()
+             if (draggedCol) handleColReorder(draggedCol, colKey)
+             setDraggedCol(null); setDragOverCol(null)
+           }}
+           className="h-full flex items-end pb-1 px-1 border-r border-gray-200 flex-none overflow-visible select-none cursor-grab active:cursor-grabbing">
         {width >= 24 && (
           <div className="flex items-center w-full gap-0.5">
             <span className="text-[11px] truncate flex-1 cursor-pointer"
                   onClick={e => { e.stopPropagation(); toggleSort(colKey) }}
-                  title="点击排序">{label}</span>
+                  title="点击排序，拖动表头可调整列顺序">{label}</span>
             <button type="button" className="flex-none p-0.5 hover:bg-gray-200 rounded cursor-pointer"
                     onClick={e => { e.stopPropagation(); toggleSort(colKey) }}
                     title="排序">
@@ -2651,7 +2780,7 @@ export default function GanttChart({
             </div>
           </div>
           {renderColHeader('assignee', '责任人', colAssignW)}
-          {renderColHeader('pct', '完成', colPctW)}
+          {renderColHeader('status', '状态', colStatusW)}
           {renderColHeader('duration', '持续时间', colDurW)}
           {renderColHeader('start', '开始', colStartW)}
           {renderColHeader('end', '完成时间', colEndW)}
@@ -2661,7 +2790,7 @@ export default function GanttChart({
           {renderColHeader('ctype', '限制类型', colCtypeW)}
           {renderColHeader('cdate', '限制日期', colCdateW)}
           {renderColHeader('ddate', '截止日期', colDDateW)}
-          {renderColHeader('status', '状态', colStatusW)}
+          {renderColHeader('pct', '完成', colPctW)}
           {renderColHeader('inactive', '无效', colInactiveW)}
         </div>
 
@@ -2756,7 +2885,7 @@ export default function GanttChart({
 
                   {/* ── Name cell ─────────────────────────────────── */}
                   <div style={{ width: nameColW, minWidth: MIN_NAME_W, paddingLeft: 4 + row.level * 16 }}
-                       className={`flex items-center border-r border-gray-100 h-full flex-none overflow-hidden ${cellRing('name')}`}
+                       className={`flex items-center border-r border-gray-100 h-full flex-none overflow-hidden ${isEditing ? '' : cellRing('name')}`}
                        onClick={pickCell('name')}
                        onDoubleClick={() => { if (!readOnly) { setEditId(t.id); setEditName(t.name) } }}>
                     {row.hasChildren
@@ -2770,7 +2899,7 @@ export default function GanttChart({
                     }
                     {isEditing
                       ? <input ref={nameInputRef}
-                               className="flex-1 border border-blue-400 rounded px-1 text-[12px] outline-none min-w-0"
+                               className="flex-1 border border-blue-300 rounded px-1 text-[12px] outline-none min-w-0 focus:border-blue-400"
                                value={editName}
                                onChange={e => setEditName(e.target.value)}
                                onBlur={commitName}
@@ -2788,7 +2917,7 @@ export default function GanttChart({
 
                   {/* ── Assignee cell ─────────────────────────────── */}
                   {colAssignW > 0 && (
-                  <div style={{ width: colAssignW }}
+                  <div style={{ width: colAssignW, order: colOrderOf('assignee') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('assignee')}`}
                        onClick={pickCell('assignee')}
                        onDoubleClick={e => {
@@ -2814,20 +2943,71 @@ export default function GanttChart({
                   </div>
                   )}
 
-                  {/* ── Percent done cell (read-only, based on status date) ── */}
-                  {colPctW > 0 && (
-                  <div style={{ width: colPctW }}
-                       className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('pct')}`}
-                       onClick={pickCell('pct')}>
-                    <span className="text-[11px] text-gray-600">
-                      {t.is_milestone ? 100 : row.hasChildren ? (summaryProgressMap.get(t.id) ?? 0) : timeBasedPercent(t, statusDateObj)}%
-                    </span>
-                  </div>
-                  )}
+                  {/* ── 状态（自动计算；与"完成"换位） ───────────────── */}
+                  {colStatusW > 0 && (() => {
+                    const snapshotEnd = latestSnapshotEnds.get(t.id) ?? null
+                    const baselineEnd = snapshotEnd
+                      ?? (t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null)
+                    const taskForStatus = baselineEnd !== (t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null)
+                      ? { ...t, baseline_end_date: baselineEnd }
+                      : t
+                    // 所有前置任务也需要覆盖 baseline，否则 isEndExtended 无法识别上游延期
+                    // prevTaskIds 用于识别"本期新增任务"作为延期根源
+                    // seqMap 让归因文案里的编号与左列"编号"一致
+                    const { status: st, reason: statusReason } = computeTaskStatus(
+                      taskForStatus,
+                      statusDate ? new Date(statusDate) : null,
+                      { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap },
+                    )
+                    const meta = STATUS_META[st]
+                    let deltaText = ''
+                    {
+                      const e = t.end_date ? String(t.end_date).split('T')[0] : null
+                      if (baselineEnd && e) {
+                        const days = diffDays(new Date(baselineEnd), new Date(e))
+                        if (days !== 0) deltaText = ` ${days > 0 ? '+' : ''}${days}天`
+                      }
+                    }
+                    // 本期新增（上期快照没有）且当前仍是普通状态 → 前缀"新任务，"
+                    const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+                    const labelText = (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed'))
+                      ? `新任务，${meta.label}`
+                      : meta.label
+                    const filledReason = filledReasonByCode.get(t.task_code) ?? ''
+                    const tooltipParts: string[] = [`${labelText}${deltaText}`]
+                    if (statusReason) tooltipParts.push(`延期原因: ${statusReason}`)
+                    if (filledReason) tooltipParts.push(`填报原因: ${filledReason}`)
+                    const tooltip = tooltipParts.length > 1 || statusReason || filledReason ? tooltipParts.join('\n') : ''
+                    return (
+                      <div style={{ width: colStatusW, order: colOrderOf('status') }}
+                           className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('status')} ${filledReason ? 'cursor-pointer' : ''}`}
+                           onClick={e => {
+                             pickCell('status')()
+                             if (filledReason) {
+                               e.stopPropagation()
+                               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                               setReasonPopup({
+                                 x: rect.left,
+                                 y: rect.bottom + 4,
+                                 reason: filledReason,
+                                 taskName: t.name,
+                               })
+                             }
+                           }}
+                           title={tooltip}>
+                        <span className="inline-flex items-center gap-1 text-[11px] truncate"
+                              style={{ color: meta.color }}>
+                          <span className="inline-block rounded-full" style={{ width: 8, height: 8, background: meta.color }} />
+                          {labelText}{deltaText}
+                          {filledReason && <span className="text-orange-500 ml-0.5">*</span>}
+                        </span>
+                      </div>
+                    )
+                  })()}
 
                   {/* ── Duration cell ─────────────────────────────── */}
                   {colDurW > 0 && (
-                  <div style={{ width: colDurW }}
+                  <div style={{ width: colDurW, order: colOrderOf('duration') }}
                        className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('duration')}`}
                        onClick={pickCell('duration')}
                        onDoubleClick={e => {
@@ -2855,7 +3035,7 @@ export default function GanttChart({
 
                   {/* ── Start date cell ───────────────────────────── */}
                   {colStartW > 0 && (
-                  <div style={{ width: colStartW }}
+                  <div style={{ width: colStartW, order: colOrderOf('start') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('start')}`}
                        onClick={pickCell('start')}
                        onDoubleClick={e => {
@@ -2888,7 +3068,7 @@ export default function GanttChart({
 
                   {/* ── End date cell ────────────────────────────── */}
                   {colEndW > 0 && (
-                  <div style={{ width: colEndW }}
+                  <div style={{ width: colEndW, order: colOrderOf('end') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('end')}`}
                        onClick={pickCell('end')}
                        onDoubleClick={e => {
@@ -2922,7 +3102,7 @@ export default function GanttChart({
 
                   {/* ── Predecessors cell (clickable popup) ───────── */}
                   {colPredW > 0 && (
-                  <div style={{ width: colPredW }}
+                  <div style={{ width: colPredW, order: colOrderOf('pred') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('pred')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'pred' }) }}
                        onDoubleClick={e => {
@@ -2942,7 +3122,7 @@ export default function GanttChart({
 
                   {/* ── Successors cell (clickable popup) ────── */}
                   {colSuccW > 0 && (
-                  <div style={{ width: colSuccW }}
+                  <div style={{ width: colSuccW, order: colOrderOf('succ') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('succ')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'succ' }) }}
                        onDoubleClick={e => {
@@ -2962,7 +3142,7 @@ export default function GanttChart({
 
                   {/* ── 延迟 cell ── */}
                   {colLagW > 0 && (
-                  <div style={{ width: colLagW }}
+                  <div style={{ width: colLagW, order: colOrderOf('lag') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('lag')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'lag' }) }}
                        onDoubleClick={e => {
@@ -2994,7 +3174,7 @@ export default function GanttChart({
 
                   {/* ── 限制类型 ─────────────────────────────────── */}
                   {colCtypeW > 0 && (
-                  <div style={{ width: colCtypeW }}
+                  <div style={{ width: colCtypeW, order: colOrderOf('ctype') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ctype')}`}
                        onClick={pickCell('ctype')}
                        onDoubleClick={e => { e.stopPropagation(); if (!row.hasChildren) setActiveEditor({ taskId: t.id, col: 'ctype' }) }}>
@@ -3026,7 +3206,7 @@ export default function GanttChart({
                     const dv = (t.constraint_date ?? '').split('T')[0]
                     const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'cdate'
                     return (
-                      <div style={{ width: colCdateW }}
+                      <div style={{ width: colCdateW, order: colOrderOf('cdate') }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('cdate')}`}
                            onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'cdate' }) }}
                            onDoubleClick={e => { e.stopPropagation(); if (needsDate) setActiveEditor({ taskId: t.id, col: 'cdate' }) }}>
@@ -3052,7 +3232,7 @@ export default function GanttChart({
                   {colDDateW > 0 && (() => {
                     if (row.hasChildren) {
                       return (
-                        <div style={{ width: colDDateW }}
+                        <div style={{ width: colDDateW, order: colOrderOf('ddate') }}
                              className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
                              onClick={pickCell('ddate')}>
                           <span className="text-[11px] text-gray-300 w-full text-center">—</span>
@@ -3064,7 +3244,7 @@ export default function GanttChart({
                     const overdue = !!(dv && ev && ev > dv)
                     const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'ddate'
                     return (
-                      <div style={{ width: colDDateW }}
+                      <div style={{ width: colDDateW, order: colOrderOf('ddate') }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
                            onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'ddate' }) }}
                            onDoubleClick={e => { e.stopPropagation(); setActiveEditor({ taskId: t.id, col: 'ddate' }) }}
@@ -3089,36 +3269,19 @@ export default function GanttChart({
                       </div>
                     )
                   })()}
-                  {/* ── 状态（自动计算） ─────────────────────────── */}
-                  {colStatusW > 0 && (() => {
-                    const { status: st, reason: statusReason } = computeTaskStatus(t, statusDate ? new Date(statusDate) : null, { allTasks: tasks, deps })
-                    const meta = STATUS_META[st]
-                    let deltaText = ''
-                    if (st === 'late' || st === 'pushed' || st === 'ahead') {
-                      const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-                      const e = t.end_date ? String(t.end_date).split('T')[0] : null
-                      if (b && e) {
-                        const days = diffDays(new Date(b), new Date(e))
-                        if (days !== 0) deltaText = ` ${days > 0 ? '+' : ''}${days}天`
-                      }
-                    }
-                    const tooltip = statusReason ? `${meta.label}${deltaText}\n原因: ${statusReason}` : ''
-                    return (
-                      <div style={{ width: colStatusW }}
-                           className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('status')}`}
-                           onClick={pickCell('status')}
-                           title={tooltip}>
-                        <span className="inline-flex items-center gap-1 text-[11px] truncate"
-                              style={{ color: meta.color }}>
-                          <span className="inline-block rounded-full" style={{ width: 8, height: 8, background: meta.color }} />
-                          {meta.label}{deltaText}
-                        </span>
-                      </div>
-                    )
-                  })()}
+                  {/* ── Percent done cell（与"状态"换位；read-only, based on status date） ── */}
+                  {colPctW > 0 && (
+                  <div style={{ width: colPctW, order: colOrderOf('pct') }}
+                       className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('pct')}`}
+                       onClick={pickCell('pct')}>
+                    <span className="text-[11px] text-gray-600">
+                      {t.is_milestone ? 100 : row.hasChildren ? (summaryProgressMap.get(t.id) ?? 0) : timeBasedPercent(t, statusDateObj)}%
+                    </span>
+                  </div>
+                  )}
                   {/* ── 无效 ────────────────────────────────────── */}
                   {colInactiveW > 0 && (
-                  <div style={{ width: colInactiveW }}
+                  <div style={{ width: colInactiveW, order: colOrderOf('inactive') }}
                        className={`flex items-center justify-center h-full flex-none px-1 overflow-hidden ${cellRing('inactive')}`}
                        onClick={pickCell('inactive')}>
                     <input type="checkbox"
@@ -3322,6 +3485,16 @@ export default function GanttChart({
                         fill="#dc2626" fontWeight={600}>结束日期</text>
                 )
               }
+              for (const pl of projectLines) {
+                if (!pl.visible) continue
+                const dateStr = (pl.line_date ?? '').split('T')[0]
+                if (!dateStr) continue
+                const x = dateToX(new Date(dateStr + 'T00:00:00'))
+                nodes.push(
+                  <text key={`lbl-pl-${pl.id}`} x={x+3} y={LBL_Y} fontSize={10}
+                        fill={pl.color} fontWeight={600}>{pl.name}</text>
+                )
+              }
               return nodes
             })()}
           </svg>
@@ -3472,6 +3645,135 @@ export default function GanttChart({
             )
           })}
 
+          {/* Dependency arrows — 渲染在 bar 之前，避免 10px 命中带覆盖任务条阻挡拖拽 */}
+          {deps.map(dep => {
+            let fi = rowIdx[dep.from_task_id]
+            let ti = rowIdx[dep.to_task_id]
+            // 如果任务不在可见行中（被折叠），找其最近可见祖先（防止循环引用）
+            if (fi === undefined) {
+              const seen = new Set<string>()
+              let pid = tasks.find(t => t.id === dep.from_task_id)?.parent_id ?? null
+              while (pid && !seen.has(pid)) {
+                seen.add(pid)
+                if (rowIdx[pid] !== undefined) { fi = rowIdx[pid]; break }
+                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
+              }
+            }
+            if (ti === undefined) {
+              const seen = new Set<string>()
+              let pid = tasks.find(t => t.id === dep.to_task_id)?.parent_id ?? null
+              while (pid && !seen.has(pid)) {
+                seen.add(pid)
+                if (rowIdx[pid] !== undefined) { ti = rowIdx[pid]; break }
+                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
+              }
+            }
+            if (fi===undefined||ti===undefined) return null
+            const ft = displayRows[fi].task
+            const tt = displayRows[ti].task
+            if (!ft.start_date||!ft.end_date||!tt.start_date||!tt.end_date) return null
+
+            // 根据依赖类型选择起终点 X 坐标
+            // 里程碑或日期异常时，确保 end >= start
+            const fromStart = dateToX(new Date(ft.start_date))
+            const fromEndRaw = dateToX(new Date(ft.end_date))
+            const fromEnd   = Math.max(fromStart, fromEndRaw)
+            const toStart   = dateToX(new Date(tt.start_date))
+            const toEndRaw  = dateToX(new Date(tt.end_date))
+            const toEnd     = Math.max(toStart, toEndRaw)
+
+            let x1: number, x2: number
+            const depType = Number(dep.type ?? 2)  // 确保数值类型，默认 FS
+            if (depType === 0)      { x1 = fromStart; x2 = toStart }  // SS
+            else if (depType === 1) { x1 = fromStart; x2 = toEnd   }  // SF
+            else if (depType === 3) { x1 = fromEnd;   x2 = toEnd   }  // FF
+            else                    { x1 = fromEnd;   x2 = toStart }  // FS (default)
+
+            const y1   = fi*ROW_H + ROW_H/2
+            const y2   = ti*ROW_H + ROW_H/2
+            const bend = 10
+            const isSel = selectedDep === dep.id
+
+            // 起点从左侧出发时向左弯，从右侧出发时向右弯
+            const exitRight = depType === 2 || depType === 3  // FS/FF 从 end 出发 → 向右
+            const enterLeft = depType === 0 || depType === 2  // SS/FS 到 start → 从左进入
+            const dx1 = exitRight ? bend : -bend
+            const dx2 = enterLeft ? -bend : bend
+
+            let d: string
+            if ((exitRight && x2 > x1+bend*2) || (!exitRight && x2 > x1)) {
+              // 目标在右侧 — 简单路径
+              d = `M${x1},${y1} H${x1+dx1} V${y2} H${x2}`
+            } else {
+              // 目标在左侧 — 绕行路径
+              const midY = Math.min(y1,y2)-8
+              d = `M${x1},${y1} H${x1+dx1} V${midY} H${x2+dx2} V${y2} H${x2}`
+            }
+
+            const midPtX = (x1+x2)/2
+            const midPtY = (y1+y2)/2
+            const isDragTarget = depDrag?.depId === dep.id && depDrag.dragging
+            return (
+              <g key={dep.id}>
+                <path d={d} stroke="transparent" strokeWidth={10} fill="none"
+                      style={{ cursor: readOnly ? 'pointer' : 'ew-resize' }}
+                      onClick={e=>{
+                        e.stopPropagation()
+                        // 若刚完成拖拽则不触发选中切换
+                        if (depDragJustEndedRef.current) {
+                          depDragJustEndedRef.current = false
+                          return
+                        }
+                        setSelectedDep(isSel?null:dep.id)
+                      }}
+                      onMouseDown={e=>onDepLineMouseDown(e, dep, midPtX, midPtY)} />
+                <path d={d}
+                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '#ef4444' : '#9ca3af'}
+                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? 2 : 1.5}
+                      strokeDasharray={isDragTarget ? '5 3' : undefined}
+                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '-sel' : ''})`}
+                      style={{ pointerEvents:'none' }} />
+                {isSel && (() => {
+                  const mx = (x1+x2)/2, my = (y1+y2)/2
+                  const lag = dep.lag ?? 0
+                  const lagLabel = `延迟 ${lag >= 0 ? '+' : ''}${lag} 天`
+                  const badgeW = Math.max(72, lagLabel.length * 8 + 12)
+                  const badgeH = 20
+                  const bx = mx - badgeW / 2
+                  const by = my - 28
+                  return (
+                    <>
+                      {/* 延迟标签（只读展示，点击不触发删除） */}
+                      <g style={{ pointerEvents:'none' }}>
+                        <rect x={bx} y={by} width={badgeW} height={badgeH} rx={4}
+                              fill="#1e40af" opacity={0.92} />
+                        <text x={mx} y={by + 14} textAnchor="middle"
+                              fontSize={11} fill="white" fontWeight="bold">
+                          {lagLabel}
+                        </text>
+                      </g>
+                      {/* 删除按钮 */}
+                      <g style={{ cursor:'pointer' }}
+                         onClick={e=>{
+                           e.stopPropagation()
+                           dispatch(removeDependency(dep.id))
+                           const remainDeps = deps.filter(d => d.id !== dep.id)
+                           recascade(remainDeps)
+                           setSelectedDep(null)
+                         }}>
+                        <circle cx={mx} cy={my} r={9} fill="#ef4444" />
+                        <text x={mx} y={my+4} textAnchor="middle" fontSize={12}
+                              fill="white" fontWeight="bold" style={{ pointerEvents:'none' }}>
+                          ×
+                        </text>
+                      </g>
+                    </>
+                  )
+                })()}
+              </g>
+            )
+          })}
+
           {/* Task bars */}
           {displayRows.map((row,i) => {
             const t = row.task
@@ -3605,8 +3907,11 @@ export default function GanttChart({
                    const mouseX = getSvgX(e.clientX)
                    const EDGE_SIZE = 15
                    let cursor = 'grab'
-                   if (mouseX < x + EDGE_SIZE) cursor = 'ew-resize'
-                   else if (mouseX > x + w - EDGE_SIZE) cursor = 'ew-resize'
+                   // 短条整体平移，不显示 resize 光标
+                   if (w > EDGE_SIZE * 2) {
+                     if (mouseX < x + EDGE_SIZE) cursor = 'ew-resize'
+                     else if (mouseX > x + w - EDGE_SIZE) cursor = 'ew-resize'
+                   }
                    e.currentTarget.style.cursor = cursor
                  }}>
                 {/* 任务名称（条左侧） */}
@@ -3647,138 +3952,6 @@ export default function GanttChart({
                 )}
                 {deadlineMarker}
                 {constraintMarker}
-              </g>
-            )
-          })}
-
-          {/* Dependency arrows — 根据类型选择锚点: SS(0)=start→start, SF(1)=start→end, FS(2)=end→start, FF(3)=end→end */}
-          {deps.map(dep => {
-            let fi = rowIdx[dep.from_task_id]
-            let ti = rowIdx[dep.to_task_id]
-            // 如果任务不在可见行中（被折叠），找其最近可见祖先（防止循环引用）
-            if (fi === undefined) {
-              const seen = new Set<string>()
-              let pid = tasks.find(t => t.id === dep.from_task_id)?.parent_id ?? null
-              while (pid && !seen.has(pid)) {
-                seen.add(pid)
-                if (rowIdx[pid] !== undefined) { fi = rowIdx[pid]; break }
-                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
-              }
-            }
-            if (ti === undefined) {
-              const seen = new Set<string>()
-              let pid = tasks.find(t => t.id === dep.to_task_id)?.parent_id ?? null
-              while (pid && !seen.has(pid)) {
-                seen.add(pid)
-                if (rowIdx[pid] !== undefined) { ti = rowIdx[pid]; break }
-                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
-              }
-            }
-            if (fi===undefined||ti===undefined) return null
-            const ft = displayRows[fi].task
-            const tt = displayRows[ti].task
-            if (!ft.start_date||!ft.end_date||!tt.start_date||!tt.end_date) return null
-
-            // 根据依赖类型选择起终点 X 坐标
-            // 里程碑或日期异常时，确保 end >= start
-            const fromStart = dateToX(new Date(ft.start_date))
-            const fromEndRaw = dateToX(new Date(ft.end_date))
-            const fromEnd   = Math.max(fromStart, fromEndRaw)
-            const toStart   = dateToX(new Date(tt.start_date))
-            const toEndRaw  = dateToX(new Date(tt.end_date))
-            const toEnd     = Math.max(toStart, toEndRaw)
-
-            let x1: number, x2: number
-            const depType = Number(dep.type ?? 2)  // 确保数值类型，默认 FS
-            if (depType === 0)      { x1 = fromStart; x2 = toStart }  // SS
-            else if (depType === 1) { x1 = fromStart; x2 = toEnd   }  // SF
-            else if (depType === 3) { x1 = fromEnd;   x2 = toEnd   }  // FF
-            else                    { x1 = fromEnd;   x2 = toStart }  // FS (default)
-
-            const y1   = fi*ROW_H + ROW_H/2
-            const y2   = ti*ROW_H + ROW_H/2
-            const bend = 10
-            const isSel = selectedDep === dep.id
-
-            // 起点从左侧出发时向左弯，从右侧出发时向右弯
-            const exitRight = depType === 2 || depType === 3  // FS/FF 从 end 出发 → 向右
-            const enterLeft = depType === 0 || depType === 2  // SS/FS 到 start → 从左进入
-            const dx1 = exitRight ? bend : -bend
-            const dx2 = enterLeft ? -bend : bend
-
-            let d: string
-            if ((exitRight && x2 > x1+bend*2) || (!exitRight && x2 > x1)) {
-              // 目标在右侧 — 简单路径
-              d = `M${x1},${y1} H${x1+dx1} V${y2} H${x2}`
-            } else {
-              // 目标在左侧 — 绕行路径
-              const midY = Math.min(y1,y2)-8
-              d = `M${x1},${y1} H${x1+dx1} V${midY} H${x2+dx2} V${y2} H${x2}`
-            }
-
-            const midPtX = (x1+x2)/2
-            const midPtY = (y1+y2)/2
-            const isDragTarget = depDrag?.depId === dep.id && depDrag.dragging
-            return (
-              <g key={dep.id}>
-                <path d={d} stroke="transparent" strokeWidth={10} fill="none"
-                      style={{ cursor: readOnly ? 'pointer' : 'ew-resize' }}
-                      onClick={e=>{
-                        e.stopPropagation()
-                        // 若刚完成拖拽则不触发选中切换
-                        if (depDragJustEndedRef.current) {
-                          depDragJustEndedRef.current = false
-                          return
-                        }
-                        setSelectedDep(isSel?null:dep.id)
-                      }}
-                      onMouseDown={e=>onDepLineMouseDown(e, dep, midPtX, midPtY)} />
-                <path d={d}
-                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '#ef4444' : '#9ca3af'}
-                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? 2 : 1.5}
-                      strokeDasharray={isDragTarget ? '5 3' : undefined}
-                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '-sel' : ''})`}
-                      style={{ pointerEvents:'none' }} />
-                {isSel && (() => {
-                  const mx = (x1+x2)/2, my = (y1+y2)/2
-                  const lag = dep.lag ?? 0
-                  const lagLabel = `延迟 ${lag >= 0 ? '+' : ''}${lag} 天`
-                  const badgeW = Math.max(72, lagLabel.length * 8 + 12)
-                  const badgeH = 20
-                  const bx = mx - badgeW / 2
-                  const by = my - 28
-                  return (
-                    <>
-                      {/* 延迟标签（只读展示，点击不触发删除） */}
-                      <g style={{ pointerEvents:'none' }}>
-                        <rect x={bx} y={by} width={badgeW} height={badgeH} rx={4}
-                              fill="#1e40af" opacity={0.92} />
-                        <text x={mx} y={by + 14} textAnchor="middle"
-                              fontSize={11} fill="white" fontWeight="bold">
-                          {lagLabel}
-                        </text>
-                      </g>
-                      {/* 删除按钮 */}
-                      <g style={{ cursor:'pointer' }}
-                         onClick={async e=>{
-                           e.stopPropagation()
-
-                           dispatch(removeDependency(dep.id))
-                           await authFetch(`/api/dependencies/${projectId}`, {
-                             method:'DELETE', headers:{'Content-Type':'application/json'},
-                             body: JSON.stringify({ id:dep.id }),
-                           })
-                           setSelectedDep(null)
-                         }}>
-                        <circle cx={mx} cy={my} r={9} fill="#ef4444" />
-                        <text x={mx} y={my+4} textAnchor="middle" fontSize={12}
-                              fill="white" fontWeight="bold" style={{ pointerEvents:'none' }}>
-                          ×
-                        </text>
-                      </g>
-                    </>
-                  )
-                })()}
               </g>
             )
           })}
@@ -3854,7 +4027,7 @@ export default function GanttChart({
             return nodes
           })()}
 
-          {/* Project lines */}
+          {/* Project lines (label is rendered in the header SVG, aligned with 开始日期/结束日期) */}
           {projectLines.filter(pl => pl.visible).map(pl => {
             const dateStr = (pl.line_date ?? '').split('T')[0]
             if (!dateStr) return null
@@ -3863,7 +4036,6 @@ export default function GanttChart({
               <g key={pl.id}>
                 <line x1={px} y1={0} x2={px} y2={totalH}
                       stroke={pl.color} strokeWidth={2} strokeDasharray="4 4" />
-                <text x={px+3} y={24} fontSize={10} fill={pl.color}>{pl.name}</text>
               </g>
             )
           })}
@@ -4005,6 +4177,17 @@ export default function GanttChart({
         )
       })()}
 
+      {/* ── 延期原因 popover (portal) ────────────────────────────────── */}
+      {reasonPopup && ReactDOM.createPortal(
+        <div className="fixed bg-white border border-orange-300 rounded-md shadow-lg p-2.5 text-[12px] max-w-[320px] z-[70]"
+             style={{ left: reasonPopup.x, top: reasonPopup.y }}
+             onMouseDown={e => e.stopPropagation()}>
+          <div className="text-[11px] text-gray-500 mb-1">填报原因 · {reasonPopup.taskName}</div>
+          <div className="text-gray-800 whitespace-pre-wrap break-words">{reasonPopup.reason}</div>
+        </div>,
+        document.body,
+      )}
+
       {/* ── Context submenu (portal) ─────────────────────────────────── */}
       {ctxMenu?.submenu && ctxMenu.subX != null && ctxMenu.subY != null && ReactDOM.createPortal(
         <div className="fixed bg-white border border-gray-200 rounded-lg shadow-2xl py-1 text-[13px] overflow-y-auto z-[60]"
@@ -4042,15 +4225,10 @@ export default function GanttChart({
 
       {/* ── Predecessor popup ────────────────────────────────────────── */}
       {predPopup && !summarySet.has(predPopup.taskId) && (() => {
-        const currentSeq = seqMap.get(predPopup.taskId) ?? 0
+        // 排序与左侧任务列表一致（按序号升序）
         const candidateTasks = tasks
           .filter(t => t.id !== predPopup.taskId && !t.is_deleted && !summarySet.has(t.id))
-          .sort((a, b) => {
-            const sa = seqMap.get(a.id) ?? 99999
-            const sb = seqMap.get(b.id) ?? 99999
-            // 按与当前任务序号距离排序，近的优先
-            return Math.abs(sa - currentSeq) - Math.abs(sb - currentSeq)
-          })
+          .sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
         const filterLower = predFilter.toLowerCase()
         const filtered = filterLower
           ? candidateTasks.filter(t =>
@@ -4114,14 +4292,9 @@ export default function GanttChart({
       })()}
       {/* ── Successor popup ──────────────────────────────────────────── */}
       {succPopup && !summarySet.has(succPopup.taskId) && (() => {
-        const currentSeq = seqMap.get(succPopup.taskId) ?? 0
         const candidateTasks = tasks
           .filter(t => t.id !== succPopup.taskId && !t.is_deleted && !summarySet.has(t.id))
-          .sort((a, b) => {
-            const sa = seqMap.get(a.id) ?? 99999
-            const sb = seqMap.get(b.id) ?? 99999
-            return Math.abs(sa - currentSeq) - Math.abs(sb - currentSeq)
-          })
+          .sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
         const filterLower = succFilter.toLowerCase()
         const filtered = filterLower
           ? candidateTasks.filter(t =>

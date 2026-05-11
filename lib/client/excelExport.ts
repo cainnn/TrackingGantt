@@ -3,6 +3,40 @@
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine } from '@/types'
+import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
+
+function diffDaysYMD(a: string, b: string): number {
+  const sa = new Date(a + 'T00:00:00').getTime()
+  const sb = new Date(b + 'T00:00:00').getTime()
+  return Math.round((sb - sa) / 86_400_000)
+}
+
+function buildStatusText(
+  t: Task,
+  statusDate: Date | null,
+  allTasks: Task[],
+  deps: Dependency[],
+  prevTaskIds?: Set<string>,
+  seqMap?: Map<string, number>,
+): string {
+  const { status: st, reason } = computeTaskStatus(t, statusDate, {
+    allTasks, deps, prevTaskIds, seqMap,
+  })
+  const baseLabel = STATUS_META[st]?.label ?? st
+  const isNewTask = !!prevTaskIds && prevTaskIds.size > 0 && !prevTaskIds.has(t.id)
+  const label = (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed'))
+    ? `新任务，${baseLabel}`
+    : baseLabel
+  const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
+  const e = t.end_date ? String(t.end_date).split('T')[0] : null
+  let delta = ''
+  if (b && e) {
+    const days = diffDaysYMD(b, e)
+    if (days !== 0) delta = ` ${days > 0 ? '+' : ''}${days}天`
+  }
+  const reasonSuffix = reason ? `（${reason}）` : ''
+  return `${label}${delta}${reasonSuffix}`
+}
 
 const DEP_TYPE_LABELS: Record<number, string> = { 0: 'SS', 1: 'SF', 2: 'FS', 3: 'FF' }
 const CTYPE_LABELS: Record<string, string> = {
@@ -47,7 +81,8 @@ function formatPredecessors(taskId: string, deps: Dependency[], codeMap: Map<str
     const code = codeMap.get(d.from_task_id) ?? d.from_task_id.slice(0, 8)
     const typeLabel = DEP_TYPE_LABELS[d.type] ?? 'FS'
     const lagStr = d.lag > 0 ? `+${d.lag}d` : d.lag < 0 ? `${d.lag}d` : ''
-    return `${code}${typeLabel}${lagStr}`
+    const disabledPrefix = d.active === false ? '!' : ''
+    return `${disabledPrefix}${code}${typeLabel}${lagStr}`
   }).join(',')
 }
 
@@ -80,6 +115,7 @@ const COLUMNS: Partial<ExcelJS.Column>[] = [
   { header: '非激活',   key: 'inactive',  width: 7 },
   { header: '项目边界', key: 'project_boundary', width: 10 },
   { header: '状态',     key: 'status',    width: 10 },
+  { header: '截止日期', key: 'deadline',  width: 13 },
   { header: '基线结束', key: 'baseline_end_date', width: 13 },
   { header: '备注',     key: 'note',      width: 22 },
 ]
@@ -112,6 +148,10 @@ function buildRowData(
   deps: Dependency[],
   codeMap: Map<string, string>,
   parentCodeMap: Map<string, string>,
+  allTasks: Task[],
+  statusDate: Date | null,
+  prevTaskIds?: Set<string>,
+  seqMap?: Map<string, number>,
 ) {
   const t = ft.task
   return {
@@ -133,7 +173,8 @@ function buildRowData(
     rollup: t.rollup ? '是' : '否',
     inactive: t.inactive ? '是' : '否',
     project_boundary: t.project_boundary ?? '',
-    status: t.status ?? '',
+    status: buildStatusText(t, statusDate, allTasks, deps, prevTaskIds, seqMap),
+    deadline: t.deadline?.split('T')[0] ?? '',
     baseline_end_date: t.baseline_end_date?.split('T')[0] ?? '',
     note: t.note ?? '',
   }
@@ -184,12 +225,16 @@ function populateSheet(
   deps: Dependency[],
   codeMap: Map<string, string>,
   parentCodeMap: Map<string, string>,
+  allTasks: Task[],
+  statusDate: Date | null,
+  prevTaskIds?: Set<string>,
+  seqMap?: Map<string, number>,
 ) {
   ws.columns = COLUMNS as ExcelJS.Column[]
   styleHeaderRow(ws)
 
   for (const ft of flatTasks) {
-    const data = buildRowData(ft, deps, codeMap, parentCodeMap)
+    const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap)
     const row = ws.addRow(data)
     styleDataRow(ws, row.number, summaryIds.has(ft.task.id), ft.level)
   }
@@ -229,32 +274,68 @@ export async function exportToExcel(
   projectName: string,
   statusDate?: string | null,
   projectLines?: ProjectLine[],
+  options?: {
+    prevTaskIds?: Set<string>       // 上期状态日期快照存在的任务 ID；缺失则视为"新任务"
+    prevEndMap?: Map<string, string> // 上期快照的 end_date 映射；覆盖 baseline 用
+  },
 ) {
   const activeTasks = tasks.filter(t => !t.is_deleted)
-  const allFlat = flattenTasks(activeTasks)
+  // 用上期快照覆盖 baseline_end_date，保证 computeTaskStatus 的上游检测正确
+  const tasksWithBaseline = options?.prevEndMap && options.prevEndMap.size > 0
+    ? activeTasks.map(t => {
+        const be = options.prevEndMap!.get(t.id)
+        return be ? { ...t, baseline_end_date: be } : t
+      })
+    : activeTasks
+  const allFlat = flattenTasks(tasksWithBaseline)
 
   const codeMap = new Map<string, string>()
-  activeTasks.forEach(t => codeMap.set(t.id, t.task_code))
+  tasksWithBaseline.forEach(t => codeMap.set(t.id, t.task_code))
   const parentCodeMap = new Map<string, string>()
-  activeTasks.forEach(t => { if (t.parent_id) parentCodeMap.set(t.id, codeMap.get(t.parent_id) ?? '') })
+  tasksWithBaseline.forEach(t => { if (t.parent_id) parentCodeMap.set(t.id, codeMap.get(t.parent_id) ?? '') })
 
   const summaryIds = new Set<string>()
-  activeTasks.forEach(t => { if (t.parent_id) summaryIds.add(t.parent_id) })
+  tasksWithBaseline.forEach(t => { if (t.parent_id) summaryIds.add(t.parent_id) })
 
   const taskMap = new Map<string, Task>()
-  activeTasks.forEach(t => taskMap.set(t.id, t))
+  tasksWithBaseline.forEach(t => taskMap.set(t.id, t))
+
+  // 构建 seq（DFS 序号），与左侧"编号"列一致
+  const seqMap = new Map<string, number>()
+  {
+    const kids: Record<string, Task[]> = {}
+    tasksWithBaseline.forEach(t => {
+      const k = t.parent_id ?? '__root__'
+      if (!kids[k]) kids[k] = []
+      kids[k].push(t)
+    })
+    let counter = 0
+    const visited = new Set<string>()
+    const walk = (pid: string | null) => {
+      const key = pid ?? '__root__'
+      ;(kids[key] ?? []).slice().sort((a, b) => a.order_index - b.order_index).forEach(t => {
+        if (visited.has(t.id)) return
+        visited.add(t.id)
+        seqMap.set(t.id, ++counter)
+        walk(t.id)
+      })
+    }
+    walk(null)
+  }
 
   const wb = new ExcelJS.Workbook()
   wb.creator = projectName
   wb.created = new Date()
 
+  const sdDate = statusDate ? new Date(statusDate.split('T')[0] + 'T00:00:00') : null
+
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
-  activeTasks.forEach(t => { if (t.assignee?.trim()) assignees.add(t.assignee!.trim()) })
+  tasksWithBaseline.forEach(t => { if (t.assignee?.trim()) assignees.add(t.assignee!.trim()) })
 
   for (const assignee of assignees) {
     const filtered = filterWithHierarchy(allFlat, taskMap, t => t.assignee?.trim() === assignee)
@@ -262,7 +343,7 @@ export async function exportToExcel(
     // Sheet name max 31 chars, no special chars
     const sheetName = assignee.slice(0, 31).replace(/[\\/*?:\[\]]/g, '_')
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap)
   }
 
   // ── Project settings sheet ─────────────────────────────────────────

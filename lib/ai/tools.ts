@@ -163,7 +163,9 @@ export function buildSystemPrompt(
   versionChanges?: VersionChangesSummary[],
   statusDate?: string | null,
   progress?: number | null,
+  prevTaskIds?: string[],  // 上期快照存在的任务 ID，缺失则视为本期新增
 ): string {
+  const prevIdSet = prevTaskIds ? new Set(prevTaskIds) : null
   const codeById = new Map(tasks.map(t => [t.id, t.task_code]))
   const taskById = new Map(tasks.map(t => [t.id, t] as const))
 
@@ -190,14 +192,30 @@ export function buildSystemPrompt(
     if (delayFlag && delayFlag.startsWith('延期')) {
       const inDeps = dependencies.filter(d => d.to_task_id === t.id && d.active !== false)
       const delayedPreds = inDeps.filter(d => { const p = taskById.get(d.from_task_id); return p ? isExtended(p) : false })
+      const newPreds = prevIdSet
+        ? inDeps.filter(d => !prevIdSet.has(d.from_task_id))
+        : []
       const lagPreds = inDeps.filter(d => (d.lag ?? 0) > 0)
       const reasons: string[] = []
       if (delayedPreds.length > 0) {
-        const names = delayedPreds.map(d => taskById.get(d.from_task_id)?.name ?? '?').slice(0, 3)
+        const names = delayedPreds.map(d => {
+          const p = taskById.get(d.from_task_id)
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}`
+        }).slice(0, 3)
         reasons.push(`前置任务延期(${names.join(',')})`)
       }
+      if (newPreds.length > 0) {
+        const names = newPreds.map(d => {
+          const p = taskById.get(d.from_task_id)
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}`
+        }).slice(0, 3)
+        reasons.push(`新增前置任务(${names.join(',')})`)
+      }
       if (lagPreds.length > 0) {
-        const descs = lagPreds.map(d => `${taskById.get(d.from_task_id)?.name ?? '?'}lag=${d.lag}天`).slice(0, 3)
+        const descs = lagPreds.map(d => {
+          const p = taskById.get(d.from_task_id)
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${d.lag}天)`
+        }).slice(0, 3)
         reasons.push(`依赖延迟(${descs.join(',')})`)
       }
       delayReason = reasons.length > 0 ? reasons.join('; ') : '自身工期延长'

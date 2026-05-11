@@ -393,9 +393,10 @@ function renderVerticalLines(cd: ChartData, topY: number, bottomY: number): stri
     parts.push(`<text x="${px - 2}" y="${topY + 8}" text-anchor="end" font-size="7" fill="#dc2626" font-weight="600">完工 ${escXml(peStr)}</text>`)
   }
   if (cd.statusDate) {
-    const sx = dateToX(sod(new Date(cd.statusDate)))
+    const sdStr = String(cd.statusDate).split('T')[0]
+    const sx = dateToX(sod(new Date(sdStr)))
     parts.push(`<line x1="${sx}" y1="${topY}" x2="${sx}" y2="${bottomY}" stroke="#ef4444" stroke-width="1" stroke-dasharray="3,2"/>`)
-    parts.push(`<text x="${sx}" y="${topY + 16}" text-anchor="middle" font-size="7" fill="#ef4444">状态日期</text>`)
+    parts.push(`<text x="${sx + 2}" y="${topY + 8}" font-size="7" fill="#ef4444" font-weight="600">状态 ${escXml(sdStr)}</text>`)
   }
   if (cd.projectLines) {
     for (const pl of cd.projectLines) {

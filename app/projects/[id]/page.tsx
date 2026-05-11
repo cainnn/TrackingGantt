@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setTasks, clearTasks } from '@/store/slices/tasksSlice'
+import { setTasks, clearTasks, clearViewSnapshot } from '@/store/slices/tasksSlice'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
@@ -33,10 +33,18 @@ export default function ProjectPage() {
   const dispatch  = useAppDispatch()
   const router    = useRouter()
   const { user, token }    = useAppSelector(s => s.auth)
-  const isViewOnly = user?.role === 'view'
   const { currentProject } = useAppSelector(s => s.project)
-  const { tasks, dirtyIds } = useAppSelector(s => s.tasks)
-  const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, currentProject?.status_date), [tasks, currentProject?.status_date])
+  const { versions } = useAppSelector(s => s.versions)
+  const { tasks, dirtyIds, viewSnapshot } = useAppSelector(s => s.tasks)
+  // 浏览历史版本时强制只读，防止误操作
+  const isViewOnly = user?.role === 'view' || !!viewSnapshot
+  // 浏览历史版本时，状态日期跟随被浏览版本（影响延期检测、当前线、进度计算）
+  const effectiveStatusDate = useMemo(() => {
+    if (!viewSnapshot) return currentProject?.status_date ?? null
+    const v = versions.find(x => x.id === viewSnapshot.versionId)
+    return v?.status_date ?? currentProject?.status_date ?? null
+  }, [viewSnapshot, versions, currentProject?.status_date])
+  const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, effectiveStatusDate), [tasks, effectiveStatusDate])
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
   const [searchQuery,       setSearchQuery]       = useState('')
@@ -47,12 +55,11 @@ export default function ProjectPage() {
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
   const [showProjectLines,  setShowProjectLines]  = useState(false)
   const [showComparison,    setShowComparison]    = useState(false)
-  const [compareLock,       setCompareLock]       = useState(false)
   const [pendingAIMessage,  setPendingAIMessage]  = useState<string | null>(null)
   const [visibleCols, setVisibleCols] = useState<OptionalCol[]>(() => {
     if (typeof window === 'undefined') return DEFAULT_VISIBLE_COLS
     try {
-      const saved = localStorage.getItem(`gantt-cols-${projectId}`)
+      const saved = localStorage.getItem(`gantt-cols-v2-${projectId}`)
       if (saved) {
         const parsed = JSON.parse(saved) as OptionalCol[]
         const validKeys = new Set(OPTIONAL_COL_META.map(c => c.key))
@@ -64,7 +71,7 @@ export default function ProjectPage() {
   })
   const handleVisibleColsChange = useCallback((cols: OptionalCol[]) => {
     setVisibleCols(cols)
-    try { localStorage.setItem(`gantt-cols-${projectId}`, JSON.stringify(cols)) } catch { /* ignore */ }
+    try { localStorage.setItem(`gantt-cols-v2-${projectId}`, JSON.stringify(cols)) } catch { /* ignore */ }
   }, [projectId])
 
   const [indicators, setIndicators] = useState<IndicatorsConfig>(() => {
@@ -154,6 +161,24 @@ export default function ProjectPage() {
         </h1>
       </header>
 
+      {viewSnapshot && (
+        <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-[13px] text-amber-800">
+          <span className="flex items-center gap-2">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="8" cy="8" r="6" />
+              <path d="M8 5v3l2 1" />
+            </svg>
+            正在查看历史版本「<span className="font-semibold">{viewSnapshot.versionName}</span>」（只读，不影响当前工作状态）
+          </span>
+          <button
+            onClick={() => dispatch(clearViewSnapshot())}
+            className="px-3 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-100 cursor-pointer"
+          >
+            退出查看
+          </button>
+        </div>
+      )}
+
       <GanttToolbar
         projectId={projectId}
         readOnly={isViewOnly}
@@ -179,8 +204,6 @@ export default function ProjectPage() {
         showComparison={showComparison}
         onToggleComparison={() => setShowComparison(v => !v)}
         onShowComparison={() => setShowComparison(true)}
-        compareLock={compareLock}
-        onToggleCompareLock={(next) => { setCompareLock(next); setShowComparison(next) }}
         visibleCols={visibleCols}
         onVisibleColsChange={handleVisibleColsChange}
         indicators={indicators}
@@ -195,7 +218,7 @@ export default function ProjectPage() {
         <div className="flex-1 overflow-hidden">
           <GanttChart
             projectId={projectId}
-            statusDate={currentProject?.status_date}
+            statusDate={effectiveStatusDate}
             colW={colW}
             searchQuery={searchQuery}
             expandAllSignal={expandAllSignal}
@@ -203,8 +226,9 @@ export default function ProjectPage() {
             focusSignal={focusSignal}
             showCriticalPath={showCriticalPath}
             visibleCols={visibleCols}
+            onVisibleColsChange={handleVisibleColsChange}
             indicators={indicators}
-            readOnly={compareLock}
+            readOnly={isViewOnly}
             showComparison={showComparison}
           />
         </div>

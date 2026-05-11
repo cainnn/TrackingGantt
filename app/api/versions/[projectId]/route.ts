@@ -39,7 +39,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   if (listAll) {
     const res = await pool.query(
       `SELECT v.id, v.version_number, v.name, v.description, v.status_date,
-              v.created_by, v.created_at, v.changes,
+              v.created_by, v.created_at, v.changes, v.is_autosave,
               (SELECT count(*)::int FROM jsonb_array_elements(v.snapshot->'tasks')) AS task_count
        FROM project_versions v
        WHERE v.project_id = $1
@@ -68,7 +68,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
 
     const body = await req.json().catch(() => ({}))
-    const statusDate: string | null = body.status_date ?? null
+    const isAutosave: boolean = body.is_autosave === true
+    const statusDate: string | null = isAutosave ? null : (body.status_date ?? null)
     const description: string | null = body.description ?? null
 
     // 禁止保存"未来"日期的版本：状态日期不得超过服务器当前日期
@@ -182,13 +183,13 @@ export async function POST(req: NextRequest, { params }: Params) {
         [projectId],
       )
       const nextVersion = (maxRes.rows[0].mx as number) + 1
-      const finalName = body.name || `快照 #${nextVersion}`
+      const finalName = isAutosave ? '自动保存' : (body.name || `快照 #${nextVersion}`)
       const insRes = await client.query(
-        `INSERT INTO project_versions (project_id, version_number, name, description, snapshot, changes, status_date, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, version_number, name, description, status_date, created_by, created_at`,
+        `INSERT INTO project_versions (project_id, version_number, name, description, snapshot, changes, status_date, is_autosave, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, version_number, name, description, status_date, is_autosave, created_by, created_at`,
         [projectId, nextVersion, finalName, description, JSON.stringify(snapshot),
-         changes ? JSON.stringify(changes) : null, null, auth.value.userId],
+         changes ? JSON.stringify(changes) : null, null, isAutosave, auth.value.userId],
       )
       row = insRes.rows[0]
     }
