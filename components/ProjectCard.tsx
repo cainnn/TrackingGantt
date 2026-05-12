@@ -6,6 +6,7 @@ import { useAppDispatch } from '@/store/hooks'
 import { deleteProject, updateProject } from '@/store/slices/projectSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import type { Project } from '@/types'
+import YmdDateInput from '@/components/YmdDateInput'
 
 interface ProjectCardProps {
   project: Project
@@ -122,15 +123,14 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
               {(() => {
                 const isMinute = project.time_granularity === 'minute'
                 const sliceLen = isMinute ? 16 : 10
-                const ctlType = isMinute ? 'datetime-local' : 'date'
                 const ctlVal = (project.start_date ?? '').slice(0, sliceLen)
                 const dispVal = isMinute ? ctlVal.replace('T', ' ') : ctlVal
                 if (readOnly) return <span className="text-gray-700 text-xs">{dispVal}</span>
                 return (
-                  <input
-                    type={ctlType}
-                    step={isMinute ? 60 * 15 : undefined}
+                  <YmdDateInput
                     value={ctlVal}
+                    includeTime={isMinute}
+                    size="compact"
                     onChange={async e => {
                       const val = e.target.value || null
                       const res = await authFetch(`/api/projects/${project.id}`, {
@@ -141,7 +141,6 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
                       const data = await res.json()
                       if (data.ok) dispatch(updateProject({ ...project, start_date: val }))
                     }}
-                    className={`border border-gray-200 rounded px-1 py-0.5 text-xs focus:outline-none focus:border-blue-400 text-gray-700 ${isMinute ? 'w-[160px]' : ''}`}
                   />
                 )
               })()}
