@@ -3478,9 +3478,77 @@ export default function GanttChart({
                     })
                 }
               </>
+            ) : colW >= 1440 ? (
+              <>
+                {/* ── 分钟级 + 高缩放：顶 = 日期+小时（每小时一格），二 = 15min ── */}
+                {(() => {
+                  // 顶层：每小时一格，标签 'MM-DD HH'
+                  const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
+                  const hourW = colW / 24
+                  const totalHours = totalDays * 24
+                  const pad = (n: number) => String(n).padStart(2, '0')
+                  const nodes: React.ReactNode[] = []
+                  for (let h = 0; h < totalHours; h++) {
+                    const d = Math.floor(h / 24)
+                    const hh = h % 24
+                    const date = addDays(origin, d)
+                    const x = h * hourW
+                    const isMidnight = hh === 0
+                    const dow = date.getDay()
+                    const wknd = dow === 0 || dow === 6
+                    // 小时格标签自适应
+                    const label = hourW < 50
+                      ? `${pad(hh)}`
+                      : hourW < 90
+                      ? `${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(hh)}`
+                      : `${pad(date.getMonth()+1)}月${pad(date.getDate())}日(${WEEKDAY_CN[dow]}) ${pad(hh)}时`
+                    nodes.push(
+                      <g key={`hth${h}`}>
+                        {wknd && (
+                          <rect x={x} y={0} width={hourW} height={HDR_H1} fill="#f3f4f6" opacity={0.3} />
+                        )}
+                        <line x1={x} y1={0} x2={x} y2={HDR_H1}
+                              stroke={isMidnight ? '#9ca3af' : '#e5e7eb'} />
+                        <text x={x + hourW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
+                              fill={wknd ? '#9ca3af' : '#374151'} fontWeight={isMidnight ? 700 : 600}>
+                          {label}
+                        </text>
+                      </g>
+                    )
+                  }
+                  return nodes
+                })()}
+                {(() => {
+                  // 二级：15min 槽（每小时 4 格），标签 0/15/30/45
+                  const slotW = colW / 96
+                  const totalSlots = totalDays * 96
+                  const showLabel = slotW >= 12
+                  const nodes: React.ReactNode[] = []
+                  for (let s = 0; s < totalSlots; s++) {
+                    const slotInHour = s % 4
+                    const mm = slotInHour * 15
+                    const x = s * slotW
+                    const isHourBoundary = slotInHour === 0
+                    nodes.push(
+                      <g key={`hs${s}`}>
+                        <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
+                              stroke={isHourBoundary ? '#d1d5db' : '#f3f4f6'} />
+                        {showLabel && (
+                          <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
+                                textAnchor="middle"
+                                fill={isHourBoundary ? '#374151' : '#9ca3af'}>
+                            {mm}
+                          </text>
+                        )}
+                      </g>
+                    )
+                  }
+                  return nodes
+                })()}
+              </>
             ) : (
               <>
-                {/* ── 分钟级：日头(含中文星期) + 小时/15min（无月头） ── */}
+                {/* ── 分钟级 + 默认：顶 = 日期(周X)，二 = 小时（每天 24 格）── */}
                 {Array.from({ length: totalDays }, (_, d) => {
                   const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
                   const date = addDays(origin, d)
@@ -3488,15 +3556,14 @@ export default function GanttChart({
                   const wknd = dow === 0 || dow === 6
                   const x = d * colW
                   const wd = WEEKDAY_CN[dow]
-                  // 列宽自适应：宽 → 详细，窄 → 简洁
+                  const pad = (n: number) => String(n).padStart(2, '0')
                   const label = colW < 24
                     ? `${date.getDate()}`
                     : colW < 60
                     ? `${date.getDate()} ${wd}`
                     : colW < 180
-                    ? `${date.getMonth() + 1}/${date.getDate()} 周${wd}`
-                    : `${date.getMonth() + 1}月${date.getDate()}日 周${wd}`
-                  // 月份切换时在前一天右边加深色线
+                    ? `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日(${wd})`
+                    : `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日(${wd})`
                   const prevDate = d > 0 ? addDays(origin, d - 1) : null
                   const monthBoundary = prevDate && prevDate.getMonth() !== date.getMonth()
                   return (
@@ -3516,41 +3583,29 @@ export default function GanttChart({
                   )
                 })}
                 {(() => {
-                  // 二级表头：太窄不画小时网格；≥1440 出 15min。
+                  // 二级：小时网格，标签密度自适应
                   if (colW < 60) {
                     return Array.from({ length: totalDays }, (_, d) => (
                       <line key={`hsep${d}`} x1={d * colW} y1={HDR_H1} x2={d * colW} y2={HDR_H} stroke="#e5e7eb" />
                     ))
                   }
-                  const slotMin = colW >= 1440 ? 15 : 60
-                  const slotsPerDay = 1440 / slotMin
-                  const slotW = colW / slotsPerDay
-                  // 自适应标签密度：根据每槽宽度决定每几个槽显示一个标签
-                  const labelEvery = slotMin >= 60
-                    ? (slotW >= 50 ? 1 : slotW >= 28 ? 2 : slotW >= 18 ? 3 : slotW >= 10 ? 6 : 0)
-                    : 1
+                  const slotW = colW / 24
+                  const labelEvery = slotW >= 50 ? 1 : slotW >= 28 ? 2 : slotW >= 18 ? 3 : slotW >= 10 ? 6 : 0
                   const nodes: React.ReactNode[] = []
                   for (let d = 0; d < totalDays; d++) {
-                    for (let s = 0; s < slotsPerDay; s++) {
-                      const minOfDay = s * slotMin
-                      const hh = Math.floor(minOfDay / 60)
-                      const mm = minOfDay % 60
-                      const x = d * colW + s * slotW
-                      const isMidnight = s === 0
-                      const isHourBoundary = mm === 0
-                      const showLabel = labelEvery > 0 && hh % labelEvery === 0 && mm === 0
-                      const label = slotMin >= 60
-                        ? `${String(hh).padStart(2, '0')}时`
-                        : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+                    for (let hh = 0; hh < 24; hh++) {
+                      const x = d * colW + hh * slotW
+                      const isMidnight = hh === 0
+                      const showLabel = labelEvery > 0 && hh % labelEvery === 0
                       nodes.push(
-                        <g key={`hh${d}_${s}`}>
+                        <g key={`hh${d}_${hh}`}>
                           <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
-                                stroke={isMidnight ? '#d1d5db' : (isHourBoundary ? '#e5e7eb' : '#f3f4f6')} />
+                                stroke={isMidnight ? '#d1d5db' : '#f3f4f6'} />
                           {showLabel && (
                             <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
                                   textAnchor="middle"
-                                  fill={isHourBoundary ? '#374151' : '#9ca3af'}>
-                              {label}
+                                  fill={isMidnight ? '#374151' : '#9ca3af'}>
+                              {hh}
                             </text>
                           )}
                         </g>
