@@ -194,6 +194,43 @@ export async function POST(req: NextRequest) {
       console.error('Copy project tasks error:', err)
       // Project was created, tasks copy failed - still return project
     }
+  } else if (granularity === 'minute') {
+    // 新建（未复制）的分钟级项目：种 10 个 1 小时任务，链式 FS 依赖
+    try {
+      const projectStart = newProject.start_date as Date | string | null
+      let startDt = projectStart instanceof Date
+        ? projectStart
+        : (projectStart ? new Date(projectStart as string) : new Date())
+      if (isNaN(startDt.getTime())) startDt = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const fmt = (d: Date) =>
+        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}` +
+        `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+      const taskIds: string[] = []
+      for (let i = 0; i < 10; i++) {
+        const tStart = new Date(startDt.getTime() + i * 60 * 60_000)
+        const tEnd = new Date(startDt.getTime() + (i + 1) * 60 * 60_000)
+        const id = randomUUID()
+        taskIds.push(id)
+        await pool.query(
+          `INSERT INTO tasks (id, project_id, task_code, name, start_date, end_date,
+            duration, duration_unit, is_milestone, auto_schedule, order_index,
+            is_deleted, percent_done, constraint_type)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'minute',false,true,$8,false,0,'asap')`,
+          [id, newProject.id, String(i + 1), `任务${i + 1}`, fmt(tStart), fmt(tEnd), 60, i + 1]
+        )
+      }
+      // 链式 FS 依赖：任务 i+1 → 任务 i+2
+      for (let i = 0; i < taskIds.length - 1; i++) {
+        await pool.query(
+          `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag)
+           VALUES ($1,$2,$3,2,0)`,
+          [newProject.id, taskIds[i], taskIds[i + 1]]
+        )
+      }
+    } catch (err) {
+      console.error('Seed minute-project tasks error:', err)
+    }
   }
 
   return NextResponse.json(success(newProject), { status: 201 })
