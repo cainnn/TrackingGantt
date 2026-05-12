@@ -133,9 +133,17 @@ export default function YmdDateInput({
              style={{ minWidth: '320px' }}>
           <div className="flex flex-col gap-1">
             <span className="text-[10px] text-gray-500">日期</span>
-            <input type="date" value={datePart} max={max?.slice(0, 10)} min={min?.slice(0, 10)}
-                   onChange={onDateChange}
-                   className="border border-gray-300 rounded px-2 py-1 text-[12px] focus:outline-none focus:border-blue-400" />
+            {/* 原生 date 控件文字隐藏，自己叠一层 YYYY-MM-DD 显示，
+                避免不同 locale 显示成 mm/dd/yyyy */}
+            <div className="relative">
+              <input type="date" value={datePart} max={max?.slice(0, 10)} min={min?.slice(0, 10)}
+                     onChange={onDateChange}
+                     style={{ color: 'transparent', caretColor: 'transparent', width: '120px' }}
+                     className="border border-gray-300 rounded px-2 py-1 text-[12px] focus:outline-none focus:border-blue-400" />
+              <div className="absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none text-[12px] text-gray-800">
+                {datePart || 'YYYY-MM-DD'}
+              </div>
+            </div>
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-[10px] text-gray-500">时</span>
