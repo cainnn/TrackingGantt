@@ -309,12 +309,12 @@ function cascadeLocal(
 
   // 初始化所有任务日期
   allTasks.forEach(t => {
-    if (t.start_date) localStart.set(t.id, sod(new Date(t.start_date)))
-    if (t.end_date)   localEnd.set(t.id, sod(new Date(t.end_date)))
+    if (t.start_date) localStart.set(t.id, new Date(t.start_date))
+    if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
   })
   // 覆盖已变更任务的日期
-  if (changedTask.start_date) localStart.set(changedTask.id, sod(new Date(changedTask.start_date)))
-  if (changedTask.end_date)   localEnd.set(changedTask.id, sod(new Date(changedTask.end_date)))
+  if (changedTask.start_date) localStart.set(changedTask.id, new Date(changedTask.start_date))
+  if (changedTask.end_date)   localEnd.set(changedTask.id, new Date(changedTask.end_date))
 
   const result: Record<string, Task> = {}
 
@@ -395,8 +395,8 @@ function cascadeLocal(
       let maxE: string | null = null
       for (const c of children) {
         const ct = result[c.id] ?? (c.id === changedTask.id ? changedTask : c)
-        const s = ct.start_date?.split('T')[0] ?? null
-        const e2 = ct.end_date?.split('T')[0] ?? null
+        const s = ct.start_date ?? null
+        const e2 = ct.end_date ?? null
         if (s && (!minS || s < minS)) minS = s
         if (e2 && (!maxE || e2 > maxE)) maxE = e2
       }
@@ -407,7 +407,7 @@ function cascadeLocal(
             ...parent,
             start_date: minS,
             end_date: maxE,
-            duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))),
+            duration: diffMins(new Date(minS), new Date(maxE)),
           }
         }
       }
@@ -910,8 +910,8 @@ export default function GanttChart({
   useEffect(() => {
     let mn = Infinity, mx = -Infinity
     tasks.forEach(t => {
-      if (t.start_date) { const d = diffDays(origin, sod(new Date(t.start_date))); if (d < mn) mn = d }
-      if (t.end_date)   { const d = diffDays(origin, sod(new Date(t.end_date)));   if (d > mx) mx = d }
+      if (t.start_date) { const d = diffDays(origin, new Date(t.start_date)); if (d < mn) mn = d }
+      if (t.end_date)   { const d = diffDays(origin, new Date(t.end_date));   if (d > mx) mx = d }
     })
     taskRangeRef.current = { minDay: mn === Infinity ? 0 : mn, maxDay: mx === -Infinity ? totalDays : mx, totalDays }
   }, [tasks, origin, totalDays])
@@ -924,7 +924,7 @@ export default function GanttChart({
     if (!el) return
     const viewW = el.clientWidth
     // 缩放时保持状态日期（或今天）居中
-    const target = statusDate ? sod(new Date(statusDate)) : sod(new Date())
+    const target = statusDate ? new Date(statusDate) : sod(new Date())
     const targetX = diffDays(origin, target) * colW
     syncTimelineScrollLeft(Math.max(0, targetX - viewW / 2))
   }, [colW, syncTimelineScrollLeft, statusDate, origin])
@@ -936,7 +936,7 @@ export default function GanttChart({
     // statusDate === undefined means project data hasn't loaded yet; wait for it
     if (statusDate === undefined) return
     scrolledForProject.current = projectId
-    const target = statusDate ? sod(new Date(statusDate)) : sod(new Date())
+    const target = statusDate ? new Date(statusDate) : sod(new Date())
     const x = dateToX(target)
     requestAnimationFrame(() => {
       const vw = rightRef.current?.clientWidth ?? 600
@@ -1097,7 +1097,7 @@ export default function GanttChart({
   const projectStartDate = useMemo(() => {
     if (currentProject?.start_date) return currentProject.start_date.split('T')[0]
     // Fallback: earliest task start date
-    const starts = tasks.filter(t => t.start_date).map(t => sod(new Date(t.start_date!)))
+    const starts = tasks.filter(t => t.start_date).map(t => new Date(t.start_date!))
     if (starts.length === 0) return fmtDate(sod(new Date()))
     return fmtDate(new Date(Math.min(...starts.map(x => x.getTime()))))
   }, [currentProject?.start_date, tasks])
@@ -1105,7 +1105,7 @@ export default function GanttChart({
   const defaultStart = useMemo(() => {
     let d = new Date(projectStartDate)
     if (statusDate) {
-      const sd = sod(new Date(statusDate))
+      const sd = new Date(statusDate)
       if (sd > d) d = sd
     }
     return fmtDate(d)
@@ -1239,7 +1239,7 @@ export default function GanttChart({
   }, [showCriticalPath, tasks, deps, summarySet])
 
   // ── 摘要任务进度（所有后代叶子任务按工期加权的完成度） ──────────────
-  const statusDateObj = useMemo(() => statusDate ? sod(new Date(statusDate)) : null, [statusDate])
+  const statusDateObj = useMemo(() => statusDate ? new Date(statusDate) : null, [statusDate])
   const summaryProgressMap = useMemo(() => {
     const map = new Map<string, number>()
     if (summarySet.size === 0) return map
@@ -1430,16 +1430,16 @@ export default function GanttChart({
 
             // 初始化所有任务的原始日期
             tasks.forEach(t => {
-              if (t.start_date) localStart.set(t.id, sod(new Date(t.start_date)))
-              if (t.end_date)   localEnd.set(t.id, sod(new Date(t.end_date)))
+              if (t.start_date) localStart.set(t.id, new Date(t.start_date))
+              if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
             })
 
             // 平移所有后代
             for (const did of descendantIds) {
               const dt = tasks.find(t => t.id === did)
               if (!dt?.start_date || !dt?.end_date) continue
-              const s = addDays(sod(new Date(dt.start_date)), effectiveDays)
-              const e = addDays(sod(new Date(dt.end_date)), effectiveDays)
+              const s = addDays(new Date(dt.start_date), effectiveDays)
+              const e = addDays(new Date(dt.end_date), effectiveDays)
               localStart.set(did, s)
               localEnd.set(did, e)
               map[did] = { ...dt, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
@@ -1503,14 +1503,14 @@ export default function GanttChart({
                 let minS: string | null = null, maxE: string | null = null
                 for (const c of children) {
                   const ct = map[c.id] ?? c
-                  const s = ct.start_date?.split('T')[0] ?? null
-                  const e2 = ct.end_date?.split('T')[0] ?? null
+                  const s = ct.start_date ?? null
+                  const e2 = ct.end_date ?? null
                   if (s && (!minS || s < minS)) minS = s
                   if (e2 && (!maxE || e2 > maxE)) maxE = e2
                 }
                 if (minS && maxE) {
                   const p = tasks.find(x => x.id === curPid)
-                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))) }
+                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffMins(new Date(minS), new Date(maxE)) }
                 }
                 curPid = tasks.find(x => x.id === curPid)?.parent_id ?? null
               }
@@ -1560,8 +1560,8 @@ export default function GanttChart({
           localStart.set(drag.taskId, newStart)
           localEnd.set(drag.taskId, newEnd)
           tasks.forEach(t => {
-            if (t.start_date && !localStart.has(t.id)) localStart.set(t.id, sod(new Date(t.start_date)))
-            if (t.end_date && !localEnd.has(t.id))     localEnd.set(t.id, sod(new Date(t.end_date)))
+            if (t.start_date && !localStart.has(t.id)) localStart.set(t.id, new Date(t.start_date))
+            if (t.end_date && !localEnd.has(t.id))     localEnd.set(t.id, new Date(t.end_date))
           })
 
           const downstreamIds = downstreamCache.get(drag.taskId) || []
@@ -1640,8 +1640,8 @@ export default function GanttChart({
               let maxE: string | null = null
               for (const c of children) {
                 const ct = map[c.id] ?? c
-                const s = ct.start_date?.split('T')[0] ?? null
-                const e2 = ct.end_date?.split('T')[0] ?? null
+                const s = ct.start_date ?? null
+                const e2 = ct.end_date ?? null
                 if (s && (!minS || s < minS)) minS = s
                 if (e2 && (!maxE || e2 > maxE)) maxE = e2
               }
@@ -1652,7 +1652,7 @@ export default function GanttChart({
                     ...parent,
                     start_date: minS,
                     end_date: maxE,
-                    duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))),
+                    duration: diffMins(new Date(minS), new Date(maxE)),
                   }
                 }
               }

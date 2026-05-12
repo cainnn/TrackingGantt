@@ -12,9 +12,9 @@ export const AI_TOOLS = [
         type: 'object',
         properties: {
           name:             { type: 'string', description: 'Task name' },
-          start_date:       { type: 'string', description: 'Start date YYYY-MM-DD' },
-          end_date:         { type: 'string', description: 'End date YYYY-MM-DD' },
-          duration:         { type: 'number', description: 'Duration in days' },
+          start_date:       { type: 'string', description: 'Start datetime: YYYY-MM-DDTHH:mm or YYYY-MM-DD (defaults 00:00)' },
+          end_date:         { type: 'string', description: 'End datetime: YYYY-MM-DDTHH:mm or YYYY-MM-DD' },
+          duration:         { type: 'number', description: 'Duration in minutes (1 hour=60, 1 day=1440)' },
           assignee:         { type: 'string', description: 'Person responsible' },
           parent_task_code: { type: 'string', description: 'Parent task code to nest under' },
           is_milestone:     { type: 'boolean', description: 'Whether this is a milestone (duration=0)' },
@@ -34,8 +34,8 @@ export const AI_TOOLS = [
         properties: {
           task_code:    { type: 'string', description: 'The task code to update' },
           name:         { type: 'string' },
-          start_date:   { type: 'string', description: 'YYYY-MM-DD' },
-          end_date:     { type: 'string', description: 'YYYY-MM-DD' },
+          start_date:   { type: 'string', description: 'YYYY-MM-DDTHH:mm or YYYY-MM-DD' },
+          end_date:     { type: 'string', description: 'YYYY-MM-DDTHH:mm or YYYY-MM-DD' },
           duration:     { type: 'number' },
           assignee:     { type: 'string' },
           percent_done: { type: 'number', description: '0-100' },
@@ -214,7 +214,7 @@ export function buildSystemPrompt(
       if (lagPreds.length > 0) {
         const descs = lagPreds.map(d => {
           const p = taskById.get(d.from_task_id)
-          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${d.lag}天)`
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${d.lag}分钟)`
         }).slice(0, 3)
         reasons.push(`依赖延迟(${descs.join(',')})`)
       }
