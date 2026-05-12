@@ -1186,7 +1186,7 @@ export default function GanttToolbar({
 
     // 保存时校验状态日期：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
     const nowStr = toDateTimeStr(new Date())!
-    const fmtDt = (s: string) => `${s.slice(0, 16).replace('T', ' ')}:00`
+    const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
     if (sd > nowStr) {
       alert(`无法保存：状态日期 ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
       return
@@ -1489,7 +1489,7 @@ export default function GanttToolbar({
                 const nowStr = toDateTimeStr(new Date())!
                 const isFuture = !!sd && sd > nowStr
                 const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
-                const fmtDt = (s: string) => `${s.slice(0, 16).replace('T', ' ')}:00`
+                const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
                 const tip = !sd
                   ? '请先设置状态日期'
                   : isFuture ? `状态日期不能晚于当前时间 (${fmtDt(nowStr)})`

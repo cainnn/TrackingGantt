@@ -694,7 +694,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '开始时间' : '开始日期'}</label>
                   {startReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
-                      {startDate ? (isMinute ? `${startDate.replace('T', ' ')}:00` : startDate) : '—'}
+                      {startDate ? (isMinute ? startDate.replace('T', ' ') : startDate) : '—'}
                     </div>
                   ) : (
                     <YmdDateInput
@@ -712,7 +712,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '结束时间' : '结束日期'}</label>
                   {endReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
-                      {endDate ? (isMinute ? `${endDate.replace('T', ' ')}:00` : endDate) : '—'}
+                      {endDate ? (isMinute ? endDate.replace('T', ' ') : endDate) : '—'}
                     </div>
                   ) : (
                     <YmdDateInput
@@ -750,7 +750,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 {deadline && endDate && endDate > deadline && (
                   <div className="mt-1 text-[11px] text-red-600 flex items-center gap-1">
                     <span aria-hidden>⚠</span>
-                    <span>计划结束 {isMinute ? `${endDate.replace('T', ' ')}:00` : endDate} 已超出截止 {isMinute ? `${deadline.replace('T', ' ')}:00` : deadline}</span>
+                    <span>计划结束 {isMinute ? endDate.replace('T', ' ') : endDate} 已超出截止 {isMinute ? deadline.replace('T', ' ') : deadline}</span>
                   </div>
                 )}
               </div>

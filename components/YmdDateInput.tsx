@@ -29,14 +29,13 @@ export default function YmdDateInput({
   const hourPart = iso.slice(11, 13) || '00'
   const minPart  = iso.slice(14, 16) || '00'
 
+  // 分钟精度：只显示 'YYYY-MM-DD HH:mm'，不带秒
   const ctlVal = (value || '').slice(0, includeTime ? 16 : 10)
-  const dispVal = includeTime
-    ? (ctlVal ? `${ctlVal.replace('T', ' ')}:00` : '')
-    : ctlVal
-  const placeholder = includeTime ? 'YYYY-MM-DD HH:mm:ss' : 'YYYY-MM-DD'
+  const dispVal = includeTime ? ctlVal.replace('T', ' ') : ctlVal
+  const placeholder = includeTime ? 'YYYY-MM-DD HH:mm' : 'YYYY-MM-DD'
   const compact = size === 'compact'
   const width = includeTime
-    ? (compact ? 'w-[160px]' : 'w-[180px]')
+    ? (compact ? 'w-[140px]' : 'w-[160px]')
     : (compact ? 'w-[100px]' : 'w-[120px]')
   const sizing = compact
     ? 'pl-1.5 pr-6 h-6 text-[11px]'
