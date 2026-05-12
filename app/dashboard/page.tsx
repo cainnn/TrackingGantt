@@ -20,6 +20,7 @@ export default function DashboardPage() {
   const [creating, setCreating] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [newGranularity, setNewGranularity] = useState<'day' | 'minute'>('day')
+  const [useTemplate, setUseTemplate] = useState(false)
   const [copyFrom, setCopyFrom] = useState('')
   const [loading, setLoading] = useState(true)
   const [createLoading, setCreateLoading] = useState(false)
@@ -90,12 +91,13 @@ export default function DashboardPage() {
       const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
       // 分钟级项目默认从今天早上 09:00 开始；天级仍为日期串
       const startDefault = newGranularity === 'minute' ? `${today}T09:00:00` : today
-      const payload: Record<string, string> = {
+      const payload: Record<string, string | boolean> = {
         name: newProjectName,
         start_date: startDefault,
         time_granularity: newGranularity,
       }
       if (copyFrom) payload.copy_from = copyFrom
+      else if (newGranularity === 'minute' && useTemplate) payload.use_template = true
       const res = await authFetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -117,6 +119,7 @@ export default function DashboardPage() {
       setNewProjectName('')
       setCopyFrom('')
       setNewGranularity('day')
+      setUseTemplate(false)
       setCreating(false)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : '创建失败')
@@ -243,6 +246,33 @@ export default function DashboardPage() {
             )}
             {!copyFrom && (
               <p className="text-xs text-gray-400">创建后不可更改。短期项目建议分钟级；长期排期建议天级。</p>
+            )}
+            {!copyFrom && newGranularity === 'minute' && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-gray-600 flex-none">初始内容：</label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="template"
+                    value="empty"
+                    checked={!useTemplate}
+                    onChange={() => setUseTemplate(false)}
+                    className="accent-blue-500"
+                  />
+                  <span>空项目</span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="template"
+                    value="template"
+                    checked={useTemplate}
+                    onChange={() => setUseTemplate(true)}
+                    className="accent-blue-500"
+                  />
+                  <span>默认模板（10 个 1 小时任务，FS 依赖）</span>
+                </label>
+              </div>
             )}
             <div className="flex gap-2">
               <button

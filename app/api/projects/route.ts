@@ -81,13 +81,14 @@ export async function POST(req: NextRequest) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 
   const body = await req.json()
-  const { name, start_date, end_date, status_date, copy_from, time_granularity } = body as {
+  const { name, start_date, end_date, status_date, copy_from, time_granularity, use_template } = body as {
     name?: string
     start_date?: string
     end_date?: string
     status_date?: string
     copy_from?: string
     time_granularity?: 'day' | 'minute'
+    use_template?: boolean
   }
 
   if (!name) {
@@ -194,8 +195,8 @@ export async function POST(req: NextRequest) {
       console.error('Copy project tasks error:', err)
       // Project was created, tasks copy failed - still return project
     }
-  } else if (granularity === 'minute') {
-    // 新建（未复制）的分钟级项目：种 10 个 1 小时任务，链式 FS 依赖
+  } else if (granularity === 'minute' && use_template === true) {
+    // 新建（未复制、勾选默认模板）的分钟级项目：种 10 个 1 小时任务，链式 FS 依赖
     try {
       const projectStart = newProject.start_date as Date | string | null
       let startDt = projectStart instanceof Date
