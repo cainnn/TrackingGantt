@@ -47,7 +47,26 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "  npm run deploy:vps"
   echo "  SKIP_BACKUP=1 npm run deploy:vps"
   echo "  VPS_HOST=1.2.3.4 npm run deploy:vps"
+  echo ""
+  echo "安全开关："
+  echo "  ALLOW_NON_MAIN=1        允许非 main 分支部署（默认禁止）"
+  echo "  ALLOW_DIRTY=1           允许带未提交改动部署（默认禁止）"
   exit 0
+fi
+
+# 分支与工作区校验：仅允许从 main 部署，且不能有未提交改动
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+if [[ "$CURRENT_BRANCH" != "main" ]] && [[ "${ALLOW_NON_MAIN:-0}" != "1" ]]; then
+  echo "❌ 当前分支是 '$CURRENT_BRANCH'，只允许从 main 部署"
+  echo "   切到 main：git checkout main"
+  echo "   或强制部署：ALLOW_NON_MAIN=1 npm run deploy:vps"
+  exit 1
+fi
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]] && [[ "${ALLOW_DIRTY:-0}" != "1" ]]; then
+  echo "❌ 工作区有未提交的改动，先 commit 或 stash 再部署"
+  git status --short
+  echo "   或强制部署：ALLOW_DIRTY=1 npm run deploy:vps"
+  exit 1
 fi
 
 VPS_HOST="${1:-${VPS_HOST:-159.75.40.209}}"
