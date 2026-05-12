@@ -3478,86 +3478,9 @@ export default function GanttChart({
                     })
                 }
               </>
-            ) : colW < 120 ? (
-              <>
-                {/* ── 分钟级 + 低缩放：月头 + 日(含周X) ── */}
-                {(() => {
-                  // 同天级的月头逻辑
-                  const months: { label: string; startD: number; endD: number }[] = []
-                  let mStart = 0
-                  let mLabel = ''
-                  for (let d = 0; d <= totalDays; d++) {
-                    const date  = addDays(origin, d)
-                    const label = `${date.getFullYear()}年${date.getMonth()+1}月`
-                    if (d === 0) { mStart = 0; mLabel = label }
-                    else if (label !== mLabel || d === totalDays) {
-                      months.push({ label: mLabel, startD: mStart, endD: d })
-                      mStart = d; mLabel = label
-                    }
-                  }
-                  return months.map((m, i) => {
-                    const x = m.startD * colW
-                    const w = (m.endD - m.startD) * colW
-                    return (
-                      <g key={`hm${i}`}>
-                        <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
-                        <text x={x + w/2} y={HDR_H1-8} fontSize={11} textAnchor="middle"
-                              fill="#374151" fontWeight="600">
-                          {m.label}
-                        </text>
-                      </g>
-                    )
-                  })
-                })()}
-                {colW < 7
-                  ? null
-                  : colW < 14
-                  ? (() => {
-                      const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
-                      const nodes: React.ReactNode[] = []
-                      for (let d = 0; d < totalDays; d += 7) {
-                        const date = addDays(origin, d)
-                        const x = d * colW
-                        const w7 = Math.min(7, totalDays - d) * colW
-                        nodes.push(
-                          <g key={`hw${d}`}>
-                            <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#d1d5db" />
-                            <text x={x + w7 / 2} y={HDR_H - 6} fontSize={10} textAnchor="middle"
-                                  fill="#374151" fontWeight={600}>
-                              {`${date.getMonth()+1}/${date.getDate()} ${WEEKDAY_CN[date.getDay()]}`}
-                            </text>
-                          </g>
-                        )
-                      }
-                      return nodes
-                    })()
-                  : Array.from({ length: totalDays }, (_,d) => {
-                      const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
-                      const date = addDays(origin,d)
-                      const dow  = date.getDay()
-                      const wknd = dow===0||dow===6
-                      const x    = d*colW
-                      const wd = WEEKDAY_CN[dow]
-                      // 列宽自适应：窄→只数字，宽→数字+周
-                      const label = colW < 24 ? `${date.getDate()}` : `${date.getDate()} ${wd}`
-                      return (
-                        <g key={`hd${d}`}>
-                          {wknd && (
-                            <rect x={x} y={HDR_H1} width={colW} height={HDR_H - HDR_H1} fill="#f3f4f6" opacity={0.45} />
-                          )}
-                          <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#e5e7eb" />
-                          <text x={x+colW/2} y={HDR_H - 6} fontSize={11} textAnchor="middle"
-                                fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                            {label}
-                          </text>
-                        </g>
-                      )
-                    })
-                }
-              </>
             ) : (
               <>
-                {/* ── 分钟级 + 高缩放：日头(中文星期) + 小时/15min ── */}
+                {/* ── 分钟级：日头(含中文星期) + 小时/15min（无月头） ── */}
                 {Array.from({ length: totalDays }, (_, d) => {
                   const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
                   const date = addDays(origin, d)
@@ -3565,28 +3488,47 @@ export default function GanttChart({
                   const wknd = dow === 0 || dow === 6
                   const x = d * colW
                   const wd = WEEKDAY_CN[dow]
-                  const label = colW < 180
+                  // 列宽自适应：宽 → 详细，窄 → 简洁
+                  const label = colW < 24
+                    ? `${date.getDate()}`
+                    : colW < 60
+                    ? `${date.getDate()} ${wd}`
+                    : colW < 180
                     ? `${date.getMonth() + 1}/${date.getDate()} 周${wd}`
                     : `${date.getMonth() + 1}月${date.getDate()}日 周${wd}`
+                  // 月份切换时在前一天右边加深色线
+                  const prevDate = d > 0 ? addDays(origin, d - 1) : null
+                  const monthBoundary = prevDate && prevDate.getMonth() !== date.getMonth()
                   return (
                     <g key={`htd${d}`}>
                       {wknd && (
                         <rect x={x} y={0} width={colW} height={HDR_H1} fill="#f3f4f6" opacity={0.4} />
                       )}
-                      <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
-                      <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
-                            fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                        {label}
-                      </text>
+                      <line x1={x} y1={0} x2={x} y2={HDR_H1}
+                            stroke={monthBoundary ? '#9ca3af' : '#e5e7eb'} />
+                      {colW >= 7 && (
+                        <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
+                              fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
+                          {label}
+                        </text>
+                      )}
                     </g>
                   )
                 })}
                 {(() => {
-                  // 二级：≥1440 出 15min，否则整点
+                  // 二级表头：太窄不画小时网格；≥1440 出 15min。
+                  if (colW < 60) {
+                    return Array.from({ length: totalDays }, (_, d) => (
+                      <line key={`hsep${d}`} x1={d * colW} y1={HDR_H1} x2={d * colW} y2={HDR_H} stroke="#e5e7eb" />
+                    ))
+                  }
                   const slotMin = colW >= 1440 ? 15 : 60
                   const slotsPerDay = 1440 / slotMin
                   const slotW = colW / slotsPerDay
-                  const showLabel = slotW >= 18
+                  // 自适应标签密度：根据每槽宽度决定每几个槽显示一个标签
+                  const labelEvery = slotMin >= 60
+                    ? (slotW >= 50 ? 1 : slotW >= 28 ? 2 : slotW >= 18 ? 3 : slotW >= 10 ? 6 : 0)
+                    : 1
                   const nodes: React.ReactNode[] = []
                   for (let d = 0; d < totalDays; d++) {
                     for (let s = 0; s < slotsPerDay; s++) {
@@ -3596,13 +3538,14 @@ export default function GanttChart({
                       const x = d * colW + s * slotW
                       const isMidnight = s === 0
                       const isHourBoundary = mm === 0
+                      const showLabel = labelEvery > 0 && hh % labelEvery === 0 && mm === 0
                       const label = slotMin >= 60
                         ? `${String(hh).padStart(2, '0')}时`
                         : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
                       nodes.push(
                         <g key={`hh${d}_${s}`}>
                           <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
-                                stroke={isMidnight ? '#d1d5db' : (isHourBoundary ? '#d1d5db' : '#e5e7eb')} />
+                                stroke={isMidnight ? '#d1d5db' : (isHourBoundary ? '#e5e7eb' : '#f3f4f6')} />
                           {showLabel && (
                             <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
                                   textAnchor="middle"

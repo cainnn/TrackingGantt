@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -52,6 +52,15 @@ export default function ProjectPage() {
   const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
+  // 分钟级项目首次加载时把默认列宽提到 120，让小时网格可见
+  const colWInitRef = useRef(false)
+  useEffect(() => {
+    if (colWInitRef.current) return
+    if (currentProject?.time_granularity === 'minute' && colW === 28) {
+      setColW(120)
+    }
+    if (currentProject) colWInitRef.current = true
+  }, [currentProject, colW])
   const [searchQuery,       setSearchQuery]       = useState('')
   const [expandAllSignal,   setExpandAllSignal]   = useState(0)
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
