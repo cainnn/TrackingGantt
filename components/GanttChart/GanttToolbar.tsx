@@ -515,15 +515,20 @@ export default function GanttToolbar({
   }, [projectId, dispatch])
 
   // ── 自动保存：把脏数据直接落库到 tasks/dependencies（不创建版本快照） ──
-  // 30 秒间隔；只跑增量差异；更新基线 + 清 dirty 避免重复 POST。
-  // 这样新建项目里加的任务即便不点"确认变更"也不会因关闭浏览器丢失。
+  // 用 ref 持有当前 state，定时器只在 mount 时建一次，避免每次编辑都重置 30 秒计时。
+  const autosaveRef = useRef({ tasks, dependencies, dirtyIds, baselineTasks, baselineDeps })
+  useEffect(() => {
+    autosaveRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
+  }, [tasks, dependencies, dirtyIds, baselineTasks, baselineDeps])
+
   useEffect(() => {
     if (readOnly) return
     let busy = false
     const flush = async () => {
       if (busy) return
-      if (dirtyIds.length === 0) return
-      const diff = buildSaveDiff(baselineTasks, baselineDeps, tasks, dependencies)
+      const cur = autosaveRef.current
+      if (cur.dirtyIds.length === 0) return
+      const diff = buildSaveDiff(cur.baselineTasks, cur.baselineDeps, cur.tasks, cur.dependencies)
       if (!hasAnyDiff(diff)) return
       busy = true
       try {
@@ -582,10 +587,10 @@ export default function GanttToolbar({
           })
           if (!r.ok) throw new Error(`autosave upd-dep ${r.status}`)
         }
-        // 成功：更新基线 + 清 dirty，避免下一轮重复 POST
-        const living = tasks.filter(t => !t.is_deleted)
+        // 成功：更新基线 + 清 dirty
+        const living = cur.tasks.filter(t => !t.is_deleted)
         setBaselineTasks(living.map(t => ({ ...t })))
-        setBaselineDeps(dependencies.map(d => ({ ...d })))
+        setBaselineDeps(cur.dependencies.map(d => ({ ...d })))
         dispatch(clearDirty())
       } catch (e) {
         console.warn('[autosave] failed:', e)
@@ -593,15 +598,14 @@ export default function GanttToolbar({
         busy = false
       }
     }
-    const timer = setInterval(flush, 30 * 1000)
-    // 关闭/刷新页面前再触发一次（best-effort，使用 keepalive 让请求能在卸载后完成）
+    const timer = setInterval(flush, 10 * 1000)  // 10 秒一次
     const onBeforeUnload = () => { void flush() }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => {
       clearInterval(timer)
       window.removeEventListener('beforeunload', onBeforeUnload)
     }
-  }, [projectId, readOnly, dirtyIds, tasks, dependencies, baselineTasks, baselineDeps, dispatch])
+  }, [projectId, readOnly, dispatch])
 
   // ── Export ─────────────────────────────────────────────────────────────
   const projectLines = useAppSelector(s => s.projectLines.lines)
