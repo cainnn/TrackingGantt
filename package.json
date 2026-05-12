@@ -11,7 +11,11 @@
     "doc-pdf": "node scripts/generate-doc-pdf.js",
     "deploy:vps": "bash scripts/deploy-vps.sh",
     "deploy:fast": "SKIP_BACKUP=1 SKIP_MIGRATE=1 bash scripts/deploy-vps.sh",
-    "deploy:local": "LOCAL_BUILD=1 bash scripts/deploy-vps.sh"
+    "deploy:local": "LOCAL_BUILD=1 bash scripts/deploy-vps.sh",
+    "deploy:vps:minute": "bash scripts/deploy-vps-minute.sh",
+    "deploy:fast:minute": "SKIP_BACKUP=1 SKIP_MIGRATE=1 bash scripts/deploy-vps-minute.sh",
+    "deploy:local:minute": "LOCAL_BUILD=1 bash scripts/deploy-vps-minute.sh",
+    "dev:minute": "PORT=3001 next dev --webpack"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.11.2",
