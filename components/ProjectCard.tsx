@@ -11,9 +11,11 @@ import YmdDateInput from '@/components/YmdDateInput'
 interface ProjectCardProps {
   project: Project
   readOnly?: boolean
+  selected?: boolean
+  onToggleSelect?: () => void
 }
 
-export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
+export default function ProjectCard({ project, readOnly, selected, onToggleSelect }: ProjectCardProps) {
   const dispatch = useAppDispatch()
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(project.name)
@@ -65,8 +67,17 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
   const progressColor = progress >= 80 ? 'text-green-600' : progress >= 50 ? 'text-blue-600' : progress >= 20 ? 'text-yellow-600' : 'text-gray-600'
 
   return (
-    <div className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
+    <div className={`border rounded-lg p-4 hover:shadow-md transition-shadow bg-white ${selected ? 'border-blue-400 ring-1 ring-blue-200' : 'border-gray-200'}`}>
       <div className="flex items-start justify-between">
+        {!readOnly && onToggleSelect && (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onToggleSelect}
+            className="mt-1 mr-2 w-4 h-4 accent-blue-500 cursor-pointer flex-none"
+            title="选择此项目"
+          />
+        )}
         <div className="flex-1 min-w-0">
           {editing ? (
             <form onSubmit={handleSave} className="flex items-center gap-2 mb-2">
