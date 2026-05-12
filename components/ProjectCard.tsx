@@ -119,11 +119,18 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
           <div className="text-sm text-gray-500 space-y-1">
             <div className="flex items-center gap-1">
               <span className="text-gray-500">开始：</span>
-              {readOnly
-                ? <span className="text-gray-700 text-xs">{project.start_date?.split('T')[0] ?? ''}</span>
-                : <input
-                    type="date"
-                    value={project.start_date?.split('T')[0] ?? ''}
+              {(() => {
+                const isMinute = project.time_granularity === 'minute'
+                const sliceLen = isMinute ? 16 : 10
+                const ctlType = isMinute ? 'datetime-local' : 'date'
+                const ctlVal = (project.start_date ?? '').slice(0, sliceLen)
+                const dispVal = isMinute ? ctlVal.replace('T', ' ') : ctlVal
+                if (readOnly) return <span className="text-gray-700 text-xs">{dispVal}</span>
+                return (
+                  <input
+                    type={ctlType}
+                    step={isMinute ? 60 * 15 : undefined}
+                    value={ctlVal}
                     onChange={async e => {
                       const val = e.target.value || null
                       const res = await authFetch(`/api/projects/${project.id}`, {
@@ -134,19 +141,26 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
                       const data = await res.json()
                       if (data.ok) dispatch(updateProject({ ...project, start_date: val }))
                     }}
-                    className="border border-gray-200 rounded px-1 py-0.5 text-xs focus:outline-none focus:border-blue-400 text-gray-700"
+                    className={`border border-gray-200 rounded px-1 py-0.5 text-xs focus:outline-none focus:border-blue-400 text-gray-700 ${isMinute ? 'w-[160px]' : ''}`}
                   />
-              }
+                )
+              })()}
             </div>
             {project.estimated_end_date && (
               <div className="flex items-center gap-1">
                 <span className="text-gray-500">预计完成：</span>
-                <span className="text-gray-700 text-xs font-medium">{project.estimated_end_date}</span>
+                <span className="text-gray-700 text-xs font-medium">
+                  {project.time_granularity === 'minute'
+                    ? project.estimated_end_date.slice(0, 16).replace('T', ' ')
+                    : project.estimated_end_date.slice(0, 10)}
+                </span>
               </div>
             )}
             {project.status_date && (
               <p className="text-blue-600">
-                状态日期：{new Date(project.status_date).toLocaleDateString('zh-CN')}
+                状态日期：{project.time_granularity === 'minute'
+                  ? project.status_date.slice(0, 16).replace('T', ' ')
+                  : new Date(project.status_date).toLocaleDateString('zh-CN')}
               </p>
             )}
             <p className={`font-semibold ${progressColor}`}>
