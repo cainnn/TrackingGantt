@@ -1,5 +1,6 @@
 import type { Task, Dependency } from '@/types'
 import { computeTimeBasedPercent } from '@/lib/projectProgress'
+import { formatMinDuration } from '@/lib/clientTime'
 
 // ── OpenAI tool definitions ────────────────────────────────────────────────
 export const AI_TOOLS = [
@@ -169,23 +170,23 @@ export function buildSystemPrompt(
   const codeById = new Map(tasks.map(t => [t.id, t.task_code]))
   const taskById = new Map(tasks.map(t => [t.id, t] as const))
 
-  // 辅助：判断任务 end_date 是否相对 baseline 延长
+  // 辅助：判断任务 end_date 是否相对 baseline 延长（分钟级）
   const isExtended = (tk: Task) => {
-    const b = tk.baseline_end_date ? String(tk.baseline_end_date).split('T')[0] : null
-    const e = tk.end_date ? String(tk.end_date).split('T')[0] : null
+    const b = tk.baseline_end_date ? String(tk.baseline_end_date) : null
+    const e = tk.end_date ? String(tk.end_date) : null
     return !!(b && e && e > b)
   }
 
   const taskRows = tasks.slice(0, 200).map(t => {
     const parentCode = t.parent_id ? (codeById.get(t.parent_id) ?? '') : ''
     const pct = computeTimeBasedPercent(t, statusDate)
-    const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : ''
-    const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : ''
+    const baseline = t.baseline_end_date ? String(t.baseline_end_date) : ''
+    const curEnd   = t.end_date ? String(t.end_date) : ''
     let delayFlag = ''
     if (baseline && curEnd && baseline !== curEnd) {
-      const days = Math.round((new Date(curEnd).getTime() - new Date(baseline).getTime()) / 86_400_000)
-      if (days > 0) delayFlag = `延期+${days}天`
-      else if (days < 0) delayFlag = `提前${days}天`
+      const mins = Math.round((new Date(curEnd).getTime() - new Date(baseline).getTime()) / 60_000)
+      if (mins > 0) delayFlag = `延期${formatMinDuration(mins, { signed: true })}`
+      else if (mins < 0) delayFlag = `提前${formatMinDuration(mins, { signed: true })}`
     }
     // 计算延期原因
     let delayReason = ''
@@ -214,7 +215,7 @@ export function buildSystemPrompt(
       if (lagPreds.length > 0) {
         const descs = lagPreds.map(d => {
           const p = taskById.get(d.from_task_id)
-          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${d.lag}分钟)`
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${formatMinDuration(d.lag ?? 0)})`
         }).slice(0, 3)
         reasons.push(`依赖延迟(${descs.join(',')})`)
       }
@@ -272,7 +273,7 @@ ${progress != null ? `Overall progress: ${progress}%` : ''}
 Tasks (code | name | start | end | duration | assignee | %done | parent_code | milestone | baseline_end | delay_flag | delay_reason):
 - **baseline_end** 是上一期版本快照中的计划结束日期。
 - **delay_flag** 格式："延期+N天"（end 晚于 baseline_end N 天）或"提前-N天"（end 早于 baseline_end）；为空表示无变化。这是判定任务延期/提前的权威依据，优先使用，总结时必须明确列出天数。
-- **delay_reason** 延期原因说明："自身工期延长"表示任务本身被拉长；"前置任务延期(任务名)"表示因上游任务延期被拖累；"依赖延迟(任务名lag=N天)"表示因依赖关系的lag设置导致延期。总结时必须说明延期原因。
+- **delay_reason** 延期原因说明："自身工期延长"表示任务本身被拉长；"前置任务延期(任务名)"表示因上游任务延期被拖累；"依赖延迟(任务名lag=N分钟/小时/天)"表示因依赖关系的lag设置导致延期。总结时必须说明延期原因。所有时长单位以分钟为内部表示。
 ${taskRows.length > 0 ? taskRows.join('\n') : '(empty)'}
 ${tasks.length > 200 ? `... and ${tasks.length - 200} more tasks` : ''}
 

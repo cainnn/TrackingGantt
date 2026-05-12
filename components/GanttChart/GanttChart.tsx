@@ -54,10 +54,10 @@ export const STATUS_META: Record<AutoStatus, { label: string; color: string }> =
   late:       { label: '延期',     color: '#dc2626' },
 }
 
-// 内部辅助：判断任务当前 end_date 是否相对上期基线被延长
+// 内部辅助：判断任务当前 end_date 是否相对上期基线被延长（分钟级比较）
 function isEndExtended(t: Pick<Task, 'end_date' | 'baseline_end_date'>): boolean {
-  const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-  const e = t.end_date ? String(t.end_date).split('T')[0] : null
+  const b = t.baseline_end_date ? String(t.baseline_end_date) : null
+  const e = t.end_date ? String(t.end_date) : null
   return !!(b && e && e > b)
 }
 
@@ -71,8 +71,8 @@ export function computeTaskStatus(
     seqMap?: Map<string, number>  // 左列"编号"的 DFS 序号映射，用于归因显示
   },
 ): { status: AutoStatus; reason: string } {
-  const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-  const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : null
+  const baseline = t.baseline_end_date ? String(t.baseline_end_date) : null
+  const curEnd   = t.end_date ? String(t.end_date) : null
   const ref      = statusDate ?? new Date()
   const timePct  = timeBasedPercent(t, ref)
   if (timePct >= 100 || (t.percent_done ?? 0) >= 100) {
@@ -98,14 +98,12 @@ export function computeTaskStatus(
       const prevIds = ctx.prevTaskIds
       const isNew = (id: string) => !!prevIds && !prevIds.has(id)
       const isDelaySource = (p: Task) => isEndExtended(p) || isNew(p.id)
-      // 影响工期：延期任务 = 自身 end_delta；新增任务 = 自身 duration（它往链里插了这么多天）
-      const endDeltaDays = (tk: Task): number => {
-        const b = tk.baseline_end_date ? String(tk.baseline_end_date).split('T')[0] : null
-        const e = tk.end_date ? String(tk.end_date).split('T')[0] : null
-        if (!b || !e) return 0
-        return Math.round((new Date(e).getTime() - new Date(b).getTime()) / 86_400_000)
+      // 影响工期（分钟）：延期任务 = end - baseline；新增任务 = 自身 duration
+      const endDeltaMins = (tk: Task): number => {
+        if (!tk.baseline_end_date || !tk.end_date) return 0
+        return Math.round((new Date(tk.end_date).getTime() - new Date(tk.baseline_end_date).getTime()) / 60_000)
       }
-      const impactOf = (p: Task): number => isNew(p.id) ? (p.duration ?? 0) : endDeltaDays(p)
+      const impactOf = (p: Task): number => isNew(p.id) ? (p.duration ?? 0) : endDeltaMins(p)
 
       // 编号显示优先用左列 seq（可视位置）；没传 seqMap 时 fallback 到 task_code
       const displayCode = (p: Task): string => {
@@ -189,7 +187,7 @@ export function computeTaskStatus(
           trueRoots.sort((a, b) => b.impact - a.impact)
           const top = trueRoots[0]
           const label = `${top.code} ${top.name}`
-          const impactStr = top.impact !== 0 ? `（${top.impact > 0 ? '+' : ''}${top.impact}天）` : ''
+          const impactStr = top.impact !== 0 ? `（${fmtMinDur(top.impact, { signed: true })}）` : ''
           if (top.kind === 'new') {
             reasonParts.push(`受新增任务「${label}」插入影响${impactStr}`)
           } else {
@@ -201,7 +199,7 @@ export function computeTaskStatus(
           const p = byId.get(top.from_task_id)
           const pName = p?.name ?? '?'
           const pCode = p ? displayCode(p) : ''
-          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${top.lag}天)`)
+          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${fmtMinDur(top.lag ?? 0)})`)
         }
         if (!started) return { status: 'pushed', reason: reasonParts.join('; ') }
         return { status: 'late', reason: `${reasonParts.join('; ')}；自身工期也延长` }
@@ -258,6 +256,21 @@ const fmtDate  = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padSt
 const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
 const SNAP_MIN = 15
+
+/** 把分钟数格式化为人类可读：'1天3小时' / '5小时15分钟' / '45分钟' / '0分钟' */
+function fmtMinDur(mins: number, opts?: { signed?: boolean }): string {
+  const sign = opts?.signed ? (mins > 0 ? '+' : mins < 0 ? '-' : '') : ''
+  const abs = Math.abs(Math.round(mins))
+  if (abs === 0) return opts?.signed ? '0分钟' : '0分钟'
+  const d = Math.floor(abs / 1440)
+  const h = Math.floor((abs % 1440) / 60)
+  const m = abs % 60
+  const parts: string[] = []
+  if (d > 0) parts.push(`${d}天`)
+  if (h > 0) parts.push(`${h}小时`)
+  if (m > 0) parts.push(`${m}分钟`)
+  return `${sign}${parts.join('')}`
+}
 
 function timeBasedPercent(task: Task, statusDate: Date | null): number {
   if (!statusDate || !task.start_date || !task.end_date) return task.percent_done ?? 0
@@ -3799,7 +3812,7 @@ export default function GanttChart({
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2
                   const lag = dep.lag ?? 0
-                  const lagLabel = `延迟 ${lag >= 0 ? '+' : ''}${lag} 天`
+                  const lagLabel = `延迟 ${fmtMinDur(lag, { signed: true })}`
                   const badgeW = Math.max(72, lagLabel.length * 8 + 12)
                   const badgeH = 20
                   const bx = mx - badgeW / 2
@@ -4029,7 +4042,7 @@ export default function GanttChart({
           {/* 依赖线拖拽中的 lag 提示 */}
           {depDrag && depDrag.dragging && (() => {
             const newLag = depDrag.startLag + depDrag.deltaDays
-            const label = `延迟 ${newLag >= 0 ? '+' : ''}${newLag} 天`
+            const label = `延迟 ${fmtMinDur(newLag, { signed: true })}`
             const badgeW = Math.max(72, label.length * 9)
             const bx = depDrag.labelX - badgeW/2
             const by = depDrag.labelY - 28

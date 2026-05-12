@@ -49,8 +49,11 @@ export interface ImportDep {
   active?: boolean
 }
 
-function fmtD(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+// 返回 'YYYY-MM-DDTHH:mm:ss'（分钟级）。Excel 单元格若无时间，默认 00:00。
+function fmtDt(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}` +
+         `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 function parseDateCell(v: unknown): string | null {
@@ -59,20 +62,23 @@ function parseDateCell(v: unknown): string | null {
   if (typeof v === 'object' && v !== null && typeof (v as Date).getTime === 'function') {
     const d = v as Date
     if (isNaN(d.getTime())) return null
-    return fmtD(d)
+    return fmtDt(d)
   }
   const s = String(v).trim()
   if (!s) return null
-  // YYYY-MM-DD or YYYY-MM-DDT...
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
+  // 'YYYY-MM-DD' / 'YYYY-MM-DD HH:mm' / 'YYYY-MM-DDTHH:mm:ss' — 保留分钟
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/)
+  if (m) {
+    const hh = m[2] ?? '00', mm = m[3] ?? '00', ss = m[4] ?? '00'
+    return `${m[1]}T${hh}:${mm}:${ss}`
+  }
   // Excel serial number
   const n = Number(s)
   if (!isNaN(n) && n > 40000 && n < 60000) {
-    return fmtD(new Date((n - 25569) * 86400000))
+    return fmtDt(new Date((n - 25569) * 86400000))
   }
-  // Fallback: try parsing any date string (e.g. "Mon Feb 23 2026 ...")
   const d = new Date(s)
-  if (!isNaN(d.getTime())) return fmtD(d)
+  if (!isNaN(d.getTime())) return fmtDt(d)
   return null
 }
 
@@ -214,8 +220,8 @@ export function validateImportData(
     }
   }
 
-  // ── 3. 检测日期问题 ──
-  const VALID_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+  // ── 3. 检测日期问题（分钟级：允许带时间） ──
+  const VALID_DATE_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$/
   let globalMin: string | null = null
   let globalMax: string | null = null
 

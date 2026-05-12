@@ -86,3 +86,18 @@ export function formatHm(s: string | null | undefined): string {
   const str = toDateTimeStr(s)
   return str ? str.slice(11, 16) : ''
 }
+
+/** 分钟数 → 人类可读 '1天3小时' / '5小时15分钟' / '45分钟' */
+export function formatMinDuration(mins: number, opts?: { signed?: boolean }): string {
+  const sign = opts?.signed ? (mins > 0 ? '+' : mins < 0 ? '-' : '') : ''
+  const abs = Math.abs(Math.round(mins))
+  if (abs === 0) return '0分钟'
+  const d = Math.floor(abs / 1440)
+  const h = Math.floor((abs % 1440) / 60)
+  const m = abs % 60
+  const parts: string[] = []
+  if (d > 0) parts.push(`${d}天`)
+  if (h > 0) parts.push(`${h}小时`)
+  if (m > 0) parts.push(`${m}分钟`)
+  return `${sign}${parts.join('')}`
+}
