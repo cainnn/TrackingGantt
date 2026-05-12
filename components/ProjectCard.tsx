@@ -124,7 +124,9 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
                 const isMinute = project.time_granularity === 'minute'
                 const sliceLen = isMinute ? 16 : 10
                 const ctlVal = (project.start_date ?? '').slice(0, sliceLen)
-                const dispVal = isMinute ? ctlVal.replace('T', ' ') : ctlVal
+                const dispVal = isMinute
+                  ? (ctlVal ? `${ctlVal.replace('T', ' ')}:00` : '')
+                  : ctlVal
                 if (readOnly) return <span className="text-gray-700 text-xs">{dispVal}</span>
                 return (
                   <YmdDateInput
@@ -150,7 +152,7 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
                 <span className="text-gray-500">预计完成：</span>
                 <span className="text-gray-700 text-xs font-medium">
                   {project.time_granularity === 'minute'
-                    ? project.estimated_end_date.slice(0, 16).replace('T', ' ')
+                    ? `${project.estimated_end_date.slice(0, 16).replace('T', ' ')}:00`
                     : project.estimated_end_date.slice(0, 10)}
                 </span>
               </div>
@@ -158,7 +160,7 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
             {project.status_date && (
               <p className="text-blue-600">
                 状态日期：{project.time_granularity === 'minute'
-                  ? project.status_date.slice(0, 16).replace('T', ' ')
+                  ? `${project.status_date.slice(0, 16).replace('T', ' ')}:00`
                   : new Date(project.status_date).toLocaleDateString('zh-CN')}
               </p>
             )}

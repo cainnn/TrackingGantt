@@ -26,13 +26,15 @@ export default function YmdDateInput({
     }
     el.focus()
   }
-  const isoLen = includeTime ? 16 : 10
-  const ctlVal = (value || '').slice(0, isoLen)
-  const dispVal = includeTime ? ctlVal.replace('T', ' ') : ctlVal
-  const placeholder = includeTime ? 'YYYY-MM-DD HH:mm' : 'YYYY-MM-DD'
+  // 控件值用 16 位（datetime-local 在 step=900 下要求），展示文本补到 19 位（带 :00 秒位）
+  const ctlVal = (value || '').slice(0, includeTime ? 16 : 10)
+  const dispVal = includeTime
+    ? (ctlVal ? `${ctlVal.replace('T', ' ')}:00` : '')
+    : ctlVal
+  const placeholder = includeTime ? 'YYYY-MM-DD HH:mm:ss' : 'YYYY-MM-DD'
   const compact = size === 'compact'
   const width = includeTime
-    ? (compact ? 'w-[140px]' : 'w-[160px]')
+    ? (compact ? 'w-[160px]' : 'w-[180px]')
     : (compact ? 'w-[100px]' : 'w-[120px]')
   const sizing = compact
     ? 'pl-1.5 pr-6 h-6 text-[11px]'
