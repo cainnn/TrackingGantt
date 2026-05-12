@@ -261,14 +261,14 @@ const SNAP_MIN = 15
 
 function timeBasedPercent(task: Task, statusDate: Date | null): number {
   if (!statusDate || !task.start_date || !task.end_date) return task.percent_done ?? 0
-  const start = sod(new Date(task.start_date))
-  const end   = sod(new Date(task.end_date))
-  const sd    = sod(statusDate)
-  if (sd >= end)   return 100
-  if (sd <= start) return 0
-  const total = end.getTime()  - start.getTime()
-  if (total <= 0)  return 100  // start === end 时视为已完成，防止除零
-  const done  = sd.getTime()   - start.getTime()
+  // 分钟级：直接按时间戳比较，不再 sod() 截断到日。
+  const start = new Date(task.start_date)
+  const end   = new Date(task.end_date)
+  if (statusDate >= end)   return 100
+  if (statusDate <= start) return 0
+  const total = end.getTime() - start.getTime()
+  if (total <= 0) return 100
+  const done = statusDate.getTime() - start.getTime()
   return Math.round((done / total) * 100)
 }
 

@@ -12,6 +12,7 @@ import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
+import { toDateTimeStr, addMinutesStr } from '@/lib/clientTime'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
 import { parseExcelFile, validateImportData, type ImportTask, type ImportDep, type ImportProjectLine } from '@/lib/client/excelImport'
@@ -119,34 +120,41 @@ const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="n
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V2M5 5l3-3 3 3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 
-// 年-月-日顺序的日期输入：显示 YYYY-MM-DD，点击触发原生日历选择
+// 年-月-日（可选带 时:分）输入：显示文本 + 隐藏原生 date/datetime-local 控件
 function YmdDateInput({
-  value, max, min, onChange,
+  value, max, min, onChange, includeTime = false,
 }: {
   value: string
   max?: string
   min?: string
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+  includeTime?: boolean
 }) {
   const ref = useRef<HTMLInputElement>(null)
   const openPicker = () => {
     const el = ref.current
     if (!el) return
     if (typeof el.showPicker === 'function') {
-      try { el.showPicker(); return } catch { /* fall through to focus */ }
+      try { el.showPicker(); return } catch { /* fall through */ }
     }
     el.focus()
   }
+  // value 形如 'YYYY-MM-DD' 或 'YYYY-MM-DDTHH:mm[:ss]'，统一裁出展示串与控件值
+  const isoLen = includeTime ? 16 : 10
+  const ctlVal = (value || '').slice(0, isoLen)
+  const dispVal = includeTime ? ctlVal.replace('T', ' ') : ctlVal
+  const placeholder = includeTime ? 'YYYY-MM-DD HH:mm' : 'YYYY-MM-DD'
+  const width = includeTime ? 'w-[160px]' : 'w-[120px]'
   return (
     <div className="relative inline-flex items-center">
       <input
         readOnly
         type="text"
-        value={value}
-        placeholder="YYYY-MM-DD"
+        value={dispVal}
+        placeholder={placeholder}
         onClick={openPicker}
         onFocus={openPicker}
-        className="border border-gray-300 rounded pl-2 pr-7 h-8 text-[13px] w-[120px] bg-white cursor-pointer focus:outline-none focus:border-blue-400"
+        className={`border border-gray-300 rounded pl-2 pr-7 h-8 text-[13px] ${width} bg-white cursor-pointer focus:outline-none focus:border-blue-400`}
       />
       <svg viewBox="0 0 24 24" width="14" height="14"
            className="absolute right-2 pointer-events-none text-gray-500"
@@ -156,8 +164,8 @@ function YmdDateInput({
       </svg>
       <input
         ref={ref}
-        type="date"
-        value={value}
+        type={includeTime ? 'datetime-local' : 'date'}
+        value={ctlVal}
         max={max}
         min={min}
         onChange={onChange}
@@ -220,9 +228,10 @@ export default function GanttToolbar({
   const { versions } = useAppSelector(s => s.versions)
 
   // 上一版本带状态日期的快照（保存时校验：新版本状态日期必须严格大于旧版本）
+  // 分钟级：保留完整 datetime，不再裁到日。
   const lastVersionDate = React.useMemo(() => {
     const latest = versions.find(v => !v.is_autosave && v.status_date)
-    return latest?.status_date?.split('T')[0] ?? null
+    return toDateTimeStr(latest?.status_date ?? null)
   }, [versions])
 
   // Column settings dropdown
@@ -1154,25 +1163,22 @@ export default function GanttToolbar({
 
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
-    const sd = currentProject?.status_date?.split('T')[0] ?? null
+    const sd = toDateTimeStr(currentProject?.status_date ?? null)
     if (!sd || statusDateSaving) return
 
-    // 保存时校验状态日期：1) 不晚于今天 2) 不早于今天-3 3) 严格大于上一版本
-    const now = new Date()
-    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    const today = fmt(now)
-    if (sd > today) {
-      alert(`无法保存：状态日期 ${sd} 晚于今天 (${today})`)
+    // 保存时校验状态日期：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
+    const nowStr = toDateTimeStr(new Date())!
+    if (sd > nowStr) {
+      alert(`无法保存：状态日期 ${sd.slice(0, 16).replace('T', ' ')} 晚于当前时间 (${nowStr.slice(0, 16).replace('T', ' ')})`)
       return
     }
-    const earliest = new Date(now); earliest.setDate(earliest.getDate() - 3)
-    const earliestStr = fmt(earliest)
+    const earliestStr = addMinutesStr(nowStr, -3 * 24 * 60)!
     if (sd < earliestStr) {
-      alert(`无法保存：状态日期 ${sd} 早于 ${earliestStr}（仅允许保存最近 3 天内的状态日期）`)
+      alert(`无法保存：状态日期 ${sd.slice(0, 16).replace('T', ' ')} 早于 ${earliestStr.slice(0, 16).replace('T', ' ')}（仅允许最近 72 小时内）`)
       return
     }
     if (lastVersionDate && sd <= lastVersionDate) {
-      alert(`无法保存：状态日期必须晚于上一版本 (${lastVersionDate})`)
+      alert(`无法保存：状态日期必须晚于上一版本 (${lastVersionDate.slice(0, 16).replace('T', ' ')})`)
       return
     }
 
@@ -1454,31 +1460,30 @@ export default function GanttToolbar({
             <div className="flex items-center gap-1.5 relative">
               <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
               {(() => {
-                const v = currentProject?.status_date?.split('T')[0] ?? ''
+                const v = currentProject?.status_date ?? ''
                 return (
-                  <YmdDateInput value={v} onChange={handleStatusDatePick} />
+                  <YmdDateInput value={v} onChange={handleStatusDatePick} includeTime />
                 )
               })()}
               {(() => {
-                const sd = currentProject?.status_date?.split('T')[0] ?? null
-                const now = new Date()
-                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-                const isFuture = !!sd && sd > today
+                const sd = toDateTimeStr(currentProject?.status_date ?? null)
+                const nowStr = toDateTimeStr(new Date())!
+                const isFuture = !!sd && sd > nowStr
                 const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
                 const tip = !sd
                   ? '请先设置状态日期'
-                  : isFuture ? `状态日期不能晚于今天 (${today})`
+                  : isFuture ? `状态日期不能晚于当前时间 (${nowStr.slice(0, 16).replace('T', ' ')})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
                       if (!sd) { alert('请先设置状态日期'); return }
-                      if (sd > today) {
-                        alert(`状态日期不能晚于今天 (${today})`); return
+                      if (sd > nowStr) {
+                        alert(`状态日期不能晚于当前时间 (${nowStr.slice(0, 16).replace('T', ' ')})`); return
                       }
                       if (lastVersionDate && sd < lastVersionDate) {
-                        alert(`状态日期不能早于上一版本 (${lastVersionDate})`); return
+                        alert(`状态日期不能早于上一版本 (${lastVersionDate.slice(0, 16).replace('T', ' ')})`); return
                       }
                       openReview()
                     }}
@@ -1598,8 +1603,9 @@ export default function GanttToolbar({
             {sep}
             <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
             <YmdDateInput
-              value={currentProject?.status_date?.split('T')[0] ?? ''}
+              value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
+              includeTime
             />
           </>
         )}
