@@ -22,12 +22,14 @@ export async function GET(req: NextRequest) {
            COALESCE(SUM(
              t.duration *
              CASE
-               WHEN $2::date IS NULL THEN t.percent_done / 100.0
-               WHEN t.end_date <= $2::date THEN 1.0
-               WHEN t.start_date >= $2::date THEN 0
+               WHEN $2::timestamp IS NULL THEN t.percent_done / 100.0
+               WHEN t.end_date <= $2::timestamp THEN 1.0
+               WHEN t.start_date >= $2::timestamp THEN 0
                ELSE LEAST(1.0,
-                 GREATEST(0, ($2::date - t.start_date)::numeric
-                           / NULLIF((t.end_date - t.start_date)::numeric, 0)))
+                 GREATEST(0,
+                   EXTRACT(EPOCH FROM ($2::timestamp - t.start_date))
+                   / NULLIF(EXTRACT(EPOCH FROM (t.end_date - t.start_date)), 0)
+                 ))
              END
            ), 0) as completed_duration
          FROM tasks t
