@@ -46,9 +46,14 @@ export default function DashboardPage() {
 
     setCreateLoading(true)
     try {
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+      // 分钟级项目默认从今天早上 09:00 开始；天级仍为日期串
+      const startDefault = newGranularity === 'minute' ? `${today}T09:00:00` : today
       const payload: Record<string, string> = {
         name: newProjectName,
-        start_date: new Date().toISOString().split('T')[0],
+        start_date: startDefault,
         time_granularity: newGranularity,
       }
       if (copyFrom) payload.copy_from = copyFrom

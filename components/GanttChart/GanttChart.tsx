@@ -3407,9 +3407,9 @@ export default function GanttChart({
           >
             <rect x={0} y={0} width={Math.max(totalW, 800)} height={HDR_H} fill="#f9fafb" />
             <line x1={0} y1={HDR_H} x2={Math.max(totalW, 800)} y2={HDR_H} stroke="#d1d5db" />
-            {colW < 120 ? (
+            {!isMinute ? (
               <>
-                {/* ── 低密度：月头 + 周/日 ──────────────────────── */}
+                {/* ── 天级项目：月头 + 周/日（保持稳定版样式） ─── */}
                 {(() => {
                   const months: { label: string; startD: number; endD: number }[] = []
                   let mStart = 0
@@ -3480,26 +3480,47 @@ export default function GanttChart({
               </>
             ) : (
               <>
-                {/* ── 高密度：日头（含中文星期）+ 小时 / 15min ── */}
+                {/* ── 分钟级项目：日头（含中文星期）+ 小时/15min ── */}
                 {Array.from({ length: totalDays }, (_, d) => {
                   const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
                   const date = addDays(origin, d)
                   const dow = date.getDay()
                   const wknd = dow === 0 || dow === 6
                   const x = d * colW
-                  const label = `${date.getMonth() + 1}月${date.getDate()}日 ${WEEKDAY_CN[dow]}`
+                  const wd = WEEKDAY_CN[dow]
+                  // 按列宽自适应日期标签
+                  const label = colW < 14
+                    ? `${date.getDate()}`
+                    : colW < 28
+                    ? `${date.getDate()} ${wd}`
+                    : colW < 60
+                    ? `${date.getMonth() + 1}/${date.getDate()} ${wd}`
+                    : colW < 100
+                    ? `${date.getMonth() + 1}/${date.getDate()} 周${wd}`
+                    : `${date.getMonth() + 1}月${date.getDate()}日 周${wd}`
                   return (
                     <g key={`htd${d}`}>
+                      {wknd && (
+                        <rect x={x} y={0} width={colW} height={HDR_H1} fill="#f3f4f6" opacity={0.4} />
+                      )}
                       <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
-                      <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
-                            fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                        {colW < 80 ? `${date.getMonth() + 1}/${date.getDate()} ${WEEKDAY_CN[dow]}` : label}
-                      </text>
+                      {colW >= 7 && (
+                        <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
+                              fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
+                          {label}
+                        </text>
+                      )}
                     </g>
                   )
                 })}
                 {(() => {
-                  // 高密度二级表头：默认整点 (24/天)；放到 ≥1440 切换 15min (96/天)。
+                  // 二级表头：colW≥120 出整点；≥1440 切 15min；其余仅画日分隔线。
+                  if (colW < 120) {
+                    // 低缩放：只画日分隔（不渲染小时槽位，避免线密集到糊掉）
+                    return Array.from({ length: totalDays }, (_, d) => (
+                      <line key={`hsep${d}`} x1={d * colW} y1={HDR_H1} x2={d * colW} y2={HDR_H} stroke="#e5e7eb" />
+                    ))
+                  }
                   const slotMin = colW >= 1440 ? 15 : 60
                   const slotsPerDay = 1440 / slotMin
                   const slotW = colW / slotsPerDay
@@ -3513,7 +3534,6 @@ export default function GanttChart({
                       const x = d * colW + s * slotW
                       const isMidnight = s === 0
                       const isHourBoundary = mm === 0
-                      // 整点模式：'00 时'；15min 模式：'09:15'
                       const label = slotMin >= 60
                         ? `${String(hh).padStart(2, '0')}时`
                         : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
