@@ -3478,7 +3478,7 @@ export default function GanttChart({
                     })
                 }
               </>
-            ) : colW >= 1440 ? (
+            ) : colW >= 1200 ? (
               <>
                 {/* ── 分钟级 + 高缩放：顶 = 日期+小时（每小时一格），二 = 15min ── */}
                 {(() => {
@@ -3496,8 +3496,8 @@ export default function GanttChart({
                     const isMidnight = hh === 0
                     const dow = date.getDay()
                     const wknd = dow === 0 || dow === 6
-                    // 小时格标签自适应
-                    const label = hourW < 50
+                    // 标签自适应
+                    const label = hourW < 45
                       ? `${pad(hh)}`
                       : hourW < 90
                       ? `${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(hh)}`

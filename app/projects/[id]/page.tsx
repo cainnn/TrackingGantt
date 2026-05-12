@@ -52,12 +52,13 @@ export default function ProjectPage() {
   const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
-  // 分钟级项目首次加载时把默认列宽提到 120，让小时网格可见
+  // 分钟级项目首次加载时把默认列宽提到 480（Mode 1 小时可见），
+  // 用户继续放大到 1440 自动切 Mode 2 (小时+15min)。
   const colWInitRef = useRef(false)
   useEffect(() => {
     if (colWInitRef.current) return
     if (currentProject?.time_granularity === 'minute' && colW === 28) {
-      setColW(120)
+      setColW(480)
     }
     if (currentProject) colWInitRef.current = true
   }, [currentProject, colW])
