@@ -1184,20 +1184,21 @@ export default function GanttToolbar({
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
     if (!sd || statusDateSaving) return
 
-    // 保存时校验状态日期：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
+    // 保存时校验：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
+    const sdLabel = isMinute ? '状态时间' : '状态日期'
     const nowStr = toDateTimeStr(new Date())!
     const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
     if (sd > nowStr) {
-      alert(`无法保存：状态日期 ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
+      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
       return
     }
     const earliestStr = addMinutesStr(nowStr, -3 * 24 * 60)!
     if (sd < earliestStr) {
-      alert(`无法保存：状态日期 ${fmtDt(sd)} 早于 ${fmtDt(earliestStr)}（仅允许最近 72 小时内）`)
+      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 早于 ${fmtDt(earliestStr)}（仅允许最近 72 小时内）`)
       return
     }
     if (lastVersionDate && sd <= lastVersionDate) {
-      alert(`无法保存：状态日期必须晚于上一版本 (${fmtDt(lastVersionDate)})`)
+      alert(`无法保存：${sdLabel}必须晚于上一版本 (${fmtDt(lastVersionDate)})`)
       return
     }
 
@@ -1477,7 +1478,7 @@ export default function GanttToolbar({
 
             {/* Status date */}
             <div className="flex items-center gap-1.5 relative">
-              <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
+              <span className="text-xs text-gray-500 whitespace-nowrap">{isMinute ? '状态时间' : '状态日期'}</span>
               {(() => {
                 const v = currentProject?.status_date ?? ''
                 return (
@@ -1490,20 +1491,21 @@ export default function GanttToolbar({
                 const isFuture = !!sd && sd > nowStr
                 const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
                 const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
+                const sdLabel = isMinute ? '状态时间' : '状态日期'
                 const tip = !sd
-                  ? '请先设置状态日期'
-                  : isFuture ? `状态日期不能晚于当前时间 (${fmtDt(nowStr)})`
+                  ? `请先设置${sdLabel}`
+                  : isFuture ? `${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
-                      if (!sd) { alert('请先设置状态日期'); return }
+                      if (!sd) { alert(`请先设置${sdLabel}`); return }
                       if (sd > nowStr) {
-                        alert(`状态日期不能晚于当前时间 (${fmtDt(nowStr)})`); return
+                        alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
                       }
                       if (lastVersionDate && sd < lastVersionDate) {
-                        alert(`状态日期不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
+                        alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
                       }
                       openReview()
                     }}
@@ -1621,7 +1623,7 @@ export default function GanttToolbar({
         {readOnly && (
           <>
             {sep}
-            <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
+            <span className="text-xs text-gray-500 whitespace-nowrap">{isMinute ? '状态时间' : '状态日期'}</span>
             <YmdDateInput
               value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
