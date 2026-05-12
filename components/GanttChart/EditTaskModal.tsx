@@ -9,6 +9,7 @@ import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
 import { runFullCascade } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
+import YmdDateInput from '@/components/YmdDateInput'
 
 interface Props {
   taskId: string
@@ -44,8 +45,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   // 项目精度：天级 vs 分钟级（创建时固定）
   const isMinute = currentProject?.time_granularity === 'minute'
   const dtSlice = isMinute ? 16 : 10      // input value 取前 N 位
-  const dtInputType = isMinute ? 'datetime-local' : 'date'
-  const dtStep = isMinute ? 60 * 15 : undefined
   const durMul = isMinute ? 1 : 1440      // 用户输入 → 存储分钟数的乘数
   const durLabel = isMinute ? '工期（分钟）' : '工期（天）'
   const durStep = isMinute ? 15 : 1
@@ -698,12 +697,15 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                       {startDate ? (isMinute ? `${startDate.replace('T', ' ')}:00` : startDate) : '—'}
                     </div>
                   ) : (
-                    <input type={dtInputType} value={startDate} min={projStart || undefined} step={dtStep}
-                           onChange={e => {
-                             const v = e.target.value
-                             setStartDate(projStart && v < projStart ? projStart : v)
-                           }}
-                           className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <YmdDateInput
+                      value={startDate}
+                      min={projStart || undefined}
+                      includeTime={isMinute}
+                      onChange={e => {
+                        const v = e.target.value
+                        setStartDate(projStart && v < projStart ? projStart : v)
+                      }}
+                    />
                   )}
                 </div>
                 <div className="flex-1">
@@ -713,9 +715,11 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                       {endDate ? (isMinute ? `${endDate.replace('T', ' ')}:00` : endDate) : '—'}
                     </div>
                   ) : (
-                    <input type={dtInputType} value={endDate} step={dtStep}
-                           onChange={e => setEndDate(e.target.value)}
-                           className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <YmdDateInput
+                      value={endDate}
+                      includeTime={isMinute}
+                      onChange={e => setEndDate(e.target.value)}
+                    />
                   )}
                 </div>
               </div>
@@ -731,9 +735,11 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '截止时间' : '截止日期'}</label>
                 <div className="flex items-center gap-2">
-                  <input type={dtInputType} value={deadline} step={dtStep}
-                         onChange={e => setDeadline(e.target.value)}
-                         className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                  <YmdDateInput
+                    value={deadline}
+                    includeTime={isMinute}
+                    onChange={e => setDeadline(e.target.value)}
+                  />
                   {deadline && (
                     <button type="button"
                             onClick={() => setDeadline('')}
@@ -812,13 +818,13 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 <Toggle checked={manualSchedule} onChange={setManualSchedule} />
 
                 <label className="text-sm text-gray-600">{isMinute ? '限制时间' : '限制日期'}</label>
-                <input type={dtInputType}
-                  value={constraintDate}
-                  step={dtStep}
-                  disabled={!dateActive || manualSchedule}
-                  onChange={e => setConstraintDate(e.target.value)}
-                  className={`w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400
-                    ${(!dateActive || manualSchedule) ? 'bg-gray-50 text-gray-400' : 'bg-white'}`} />
+                <div className={(!dateActive || manualSchedule) ? 'opacity-50 pointer-events-none' : ''}>
+                  <YmdDateInput
+                    value={constraintDate}
+                    includeTime={isMinute}
+                    onChange={e => setConstraintDate(e.target.value)}
+                  />
+                </div>
                 <label className="text-sm text-gray-600 pl-4">打包</label>
                 <Toggle checked={rollup} onChange={setRollup} />
 
