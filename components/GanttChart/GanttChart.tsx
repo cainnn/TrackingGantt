@@ -3480,25 +3480,27 @@ export default function GanttChart({
               </>
             ) : (
               <>
-                {/* ── 高密度：日头 + 小时/15分钟 ────────────────── */}
+                {/* ── 高密度：日头（含中文星期）+ 小时 / 15min ── */}
                 {Array.from({ length: totalDays }, (_, d) => {
+                  const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
                   const date = addDays(origin, d)
                   const dow = date.getDay()
                   const wknd = dow === 0 || dow === 6
                   const x = d * colW
+                  const label = `${date.getMonth() + 1}月${date.getDate()}日 ${WEEKDAY_CN[dow]}`
                   return (
                     <g key={`htd${d}`}>
                       <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
                       <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
                             fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                        {`${date.getMonth() + 1}月${date.getDate()}日`}
+                        {colW < 80 ? `${date.getMonth() + 1}/${date.getDate()} ${WEEKDAY_CN[dow]}` : label}
                       </text>
                     </g>
                   )
                 })}
                 {(() => {
-                  // 槽位粒度：≥1440 → 15min；≥480 → 1h；其余 → 4h
-                  const slotMin = colW >= 1440 ? 15 : (colW >= 480 ? 60 : 240)
+                  // 高密度二级表头：默认整点 (24/天)；放到 ≥1440 切换 15min (96/天)。
+                  const slotMin = colW >= 1440 ? 15 : 60
                   const slotsPerDay = 1440 / slotMin
                   const slotW = colW / slotsPerDay
                   const showLabel = slotW >= 18
@@ -3510,16 +3512,19 @@ export default function GanttChart({
                       const mm = minOfDay % 60
                       const x = d * colW + s * slotW
                       const isMidnight = s === 0
+                      const isHourBoundary = mm === 0
+                      // 整点模式：'00 时'；15min 模式：'09:15'
                       const label = slotMin >= 60
-                        ? `${hh}时`
-                        : `${hh}:${String(mm).padStart(2, '0')}`
+                        ? `${String(hh).padStart(2, '0')}时`
+                        : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
                       nodes.push(
                         <g key={`hh${d}_${s}`}>
                           <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
-                                stroke={isMidnight ? '#d1d5db' : '#e5e7eb'} />
+                                stroke={isMidnight ? '#d1d5db' : (isHourBoundary ? '#d1d5db' : '#e5e7eb')} />
                           {showLabel && (
                             <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
-                                  textAnchor="middle" fill="#6b7280">
+                                  textAnchor="middle"
+                                  fill={isHourBoundary ? '#374151' : '#9ca3af'}>
                               {label}
                             </text>
                           )}
