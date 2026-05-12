@@ -248,11 +248,16 @@ export const INDICATOR_META: { key: keyof IndicatorsConfig; label: string }[] = 
 const INIT_LEFT_W = COL_NUM + COL_CHECK + COL_NAME + DEFAULT_VISIBLE_COLS.reduce((s, k) => s + (OPTIONAL_COL_META.find(c => c.key === k)?.width ?? 0), 0)
 
 // ─── Date helpers ──────────────────────────────────────────────────────────
+// 分钟级时间轴：addDays/diffDays 现在内部走分钟精度；调用方传"天"（可小数）。
 const sod      = (d: Date) => { const r=new Date(d); r.setHours(0,0,0,0); return r }
-const addDays  = (d: Date, n: number) => { const r=new Date(d); r.setDate(r.getDate()+n); return r }
-const diffDays = (a: Date, b: Date) => Math.round((sod(b).getTime()-sod(a).getTime())/86_400_000)
+const addMins  = (d: Date, n: number) => { const r=new Date(d); r.setMinutes(r.getMinutes()+n); return r }
+const diffMins = (a: Date, b: Date) => Math.round((b.getTime()-a.getTime())/60_000)
+const addDays  = (d: Date, n: number) => addMins(d, Math.round(n * 1440))
+const diffDays = (a: Date, b: Date) => diffMins(a, b) / 1440
 const fmtDate  = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
+const SNAP_MIN = 15
 
 function timeBasedPercent(task: Task, statusDate: Date | null): number {
   if (!statusDate || !task.start_date || !task.end_date) return task.percent_done ?? 0
@@ -365,7 +370,7 @@ function cascadeLocal(
       if (e < s) e = s
       localStart.set(toId, s)
       localEnd.set(toId, e)
-      result[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+      result[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
       changed = true
     }
   }
@@ -402,7 +407,7 @@ function cascadeLocal(
             ...parent,
             start_date: minS,
             end_date: maxE,
-            duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))),
+            duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))),
           }
         }
       }
@@ -897,7 +902,9 @@ export default function GanttChart({
     return { origin:o, totalDays:diffDays(o, addDays(sod(mx),21)) }
   }, [tasks, currentProject?.start_date, currentProject?.end_date])
 
-  const dateToX = useCallback((d:Date)=>diffDays(origin,d)*colW, [origin, colW])
+  // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
+  const pxPerMin = colW / 1440
+  const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
 
   // ── 更新任务日期范围缓存 + 缩放居中 ────────────────────────────────────
   useEffect(() => {
@@ -1401,9 +1408,11 @@ export default function GanttChart({
           setDrag(prev => prev ? { ...prev, dragging: true } : null)
         }
 
-        // 只有在真正拖动时才更新日期
+        // 只有在真正拖动时才更新日期（分钟级精度，吸附到 15 分钟）
         if (drag.dragging) {
-          const days = Math.round(dx / colW)
+          const minsRaw = Math.round(dx * 1440 / colW)
+          const mins = Math.round(minsRaw / SNAP_MIN) * SNAP_MIN
+          const days = mins / 1440  // 分数天，传给 addDays 仍按分钟精度处理
           const orig = tasks.find(t => t.id === drag.taskId)
           if (!orig) return
 
@@ -1433,7 +1442,7 @@ export default function GanttChart({
               const e = addDays(sod(new Date(dt.end_date)), effectiveDays)
               localStart.set(did, s)
               localEnd.set(did, e)
-              map[did] = { ...dt, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+              map[did] = { ...dt, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
             }
 
             // 级联子树外部的下游依赖
@@ -1478,7 +1487,7 @@ export default function GanttChart({
                 if (eNew < s) eNew = s
                 localStart.set(toId, s)
                 localEnd.set(toId, eNew)
-                map[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(eNew), duration: diffDays(s, eNew) }
+                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(eNew), duration: diffMins(s, eNew) }
                 changed = true
               }
             }
@@ -1501,7 +1510,7 @@ export default function GanttChart({
                 }
                 if (minS && maxE) {
                   const p = tasks.find(x => x.id === curPid)
-                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))) }
+                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))) }
                 }
                 curPid = tasks.find(x => x.id === curPid)?.parent_id ?? null
               }
@@ -1539,7 +1548,7 @@ export default function GanttChart({
           const map: Record<string, Task> = {
             [orig.id]: {
               ...orig,
-              start_date: fmtDate(newStart),
+              start_date: fmtDt(newStart),
               end_date:   fmtDate(newEnd),
               duration:   diffDays(newStart, newEnd),
             },
@@ -1608,7 +1617,7 @@ export default function GanttChart({
                 if (e < s) e = s
                 localStart.set(toId, s)
                 localEnd.set(toId, e)
-                map[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
                 changed = true
               }
             }
@@ -1643,7 +1652,7 @@ export default function GanttChart({
                     ...parent,
                     start_date: minS,
                     end_date: maxE,
-                    duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))),
+                    duration: diffMins(sod(new Date(minS)), sod(new Date(maxE))),
                   }
                 }
               }
@@ -3380,76 +3389,130 @@ export default function GanttChart({
           >
             <rect x={0} y={0} width={Math.max(totalW, 800)} height={HDR_H} fill="#f9fafb" />
             <line x1={0} y1={HDR_H} x2={Math.max(totalW, 800)} y2={HDR_H} stroke="#d1d5db" />
-            {(() => {
-              const months: { label: string; startD: number; endD: number }[] = []
-              let mStart = 0
-              let mLabel = ''
-              for (let d = 0; d <= totalDays; d++) {
-                const date  = addDays(origin, d)
-                const label = `${date.getFullYear()}年${date.getMonth()+1}月`
-                if (d === 0) { mStart = 0; mLabel = label }
-                else if (label !== mLabel || d === totalDays) {
-                  months.push({ label: mLabel, startD: mStart, endD: d })
-                  mStart = d; mLabel = label
-                }
-              }
-              return months.map((m, i) => {
-                const x = m.startD * colW
-                const w = (m.endD - m.startD) * colW
-                return (
-                  <g key={`hm${i}`}>
-                    <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
-                    <text x={x + w/2} y={HDR_H1-8} fontSize={11} textAnchor="middle"
-                          fill="#374151" fontWeight="600">
-                      {m.label}
-                    </text>
-                  </g>
-                )
-              })
-            })()}
-            {colW < 7
-              ? /* ── 月视图：只显示月份，第二行留空 ─────────────── */
-                null
-              : colW < 14
-              ? /* ── 周视图：每7天显示一个日期 ─────────────────── */
-                (() => {
-                  const nodes: React.ReactNode[] = []
-                  for (let d = 0; d < totalDays; d += 7) {
-                    const date = addDays(origin, d)
-                    const x = d * colW
-                    const w7 = Math.min(7, totalDays - d) * colW
-                    nodes.push(
-                      <g key={`hw${d}`}>
-                        <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#d1d5db" />
-                        <text x={x + w7 / 2} y={HDR_H - 6} fontSize={10} textAnchor="middle"
-                              fill="#374151" fontWeight={600}>
-                          {`${date.getMonth()+1}/${date.getDate()}`}
+            {colW < 120 ? (
+              <>
+                {/* ── 低密度：月头 + 周/日 ──────────────────────── */}
+                {(() => {
+                  const months: { label: string; startD: number; endD: number }[] = []
+                  let mStart = 0
+                  let mLabel = ''
+                  for (let d = 0; d <= totalDays; d++) {
+                    const date  = addDays(origin, d)
+                    const label = `${date.getFullYear()}年${date.getMonth()+1}月`
+                    if (d === 0) { mStart = 0; mLabel = label }
+                    else if (label !== mLabel || d === totalDays) {
+                      months.push({ label: mLabel, startD: mStart, endD: d })
+                      mStart = d; mLabel = label
+                    }
+                  }
+                  return months.map((m, i) => {
+                    const x = m.startD * colW
+                    const w = (m.endD - m.startD) * colW
+                    return (
+                      <g key={`hm${i}`}>
+                        <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
+                        <text x={x + w/2} y={HDR_H1-8} fontSize={11} textAnchor="middle"
+                              fill="#374151" fontWeight="600">
+                          {m.label}
                         </text>
                       </g>
                     )
-                  }
-                  return nodes
-                })()
-              : /* ── 日视图：每天一个日期 ──────────────────────── */
-                Array.from({ length: totalDays }, (_,d) => {
-                  const date = addDays(origin,d)
-                  const dow  = date.getDay()
-                  const wknd = dow===0||dow===6
-                  const x    = d*colW
+                  })
+                })()}
+                {colW < 7
+                  ? null
+                  : colW < 14
+                  ? (() => {
+                      const nodes: React.ReactNode[] = []
+                      for (let d = 0; d < totalDays; d += 7) {
+                        const date = addDays(origin, d)
+                        const x = d * colW
+                        const w7 = Math.min(7, totalDays - d) * colW
+                        nodes.push(
+                          <g key={`hw${d}`}>
+                            <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#d1d5db" />
+                            <text x={x + w7 / 2} y={HDR_H - 6} fontSize={10} textAnchor="middle"
+                                  fill="#374151" fontWeight={600}>
+                              {`${date.getMonth()+1}/${date.getDate()}`}
+                            </text>
+                          </g>
+                        )
+                      }
+                      return nodes
+                    })()
+                  : Array.from({ length: totalDays }, (_,d) => {
+                      const date = addDays(origin,d)
+                      const dow  = date.getDay()
+                      const wknd = dow===0||dow===6
+                      const x    = d*colW
+                      return (
+                        <g key={`hd${d}`}>
+                          {wknd && (
+                            <rect x={x} y={HDR_H1} width={colW} height={HDR_H - HDR_H1} fill="#f3f4f6" opacity={0.45} />
+                          )}
+                          <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#e5e7eb" />
+                          <text x={x+colW/2} y={HDR_H - 6} fontSize={11} textAnchor="middle"
+                                fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
+                            {date.getDate()}
+                          </text>
+                        </g>
+                      )
+                    })
+                }
+              </>
+            ) : (
+              <>
+                {/* ── 高密度：日头 + 小时/15分钟 ────────────────── */}
+                {Array.from({ length: totalDays }, (_, d) => {
+                  const date = addDays(origin, d)
+                  const dow = date.getDay()
+                  const wknd = dow === 0 || dow === 6
+                  const x = d * colW
                   return (
-                    <g key={`hd${d}`}>
-                      {wknd && (
-                        <rect x={x} y={HDR_H1} width={colW} height={HDR_H - HDR_H1} fill="#f3f4f6" opacity={0.45} />
-                      )}
-                      <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#e5e7eb" />
-                      <text x={x+colW/2} y={HDR_H - 6} fontSize={11} textAnchor="middle"
+                    <g key={`htd${d}`}>
+                      <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
+                      <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
                             fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                        {date.getDate()}
+                        {`${date.getMonth() + 1}月${date.getDate()}日`}
                       </text>
                     </g>
                   )
-                })
-            }
+                })}
+                {(() => {
+                  // 槽位粒度：≥1440 → 15min；≥480 → 1h；其余 → 4h
+                  const slotMin = colW >= 1440 ? 15 : (colW >= 480 ? 60 : 240)
+                  const slotsPerDay = 1440 / slotMin
+                  const slotW = colW / slotsPerDay
+                  const showLabel = slotW >= 18
+                  const nodes: React.ReactNode[] = []
+                  for (let d = 0; d < totalDays; d++) {
+                    for (let s = 0; s < slotsPerDay; s++) {
+                      const minOfDay = s * slotMin
+                      const hh = Math.floor(minOfDay / 60)
+                      const mm = minOfDay % 60
+                      const x = d * colW + s * slotW
+                      const isMidnight = s === 0
+                      const label = slotMin >= 60
+                        ? `${hh}时`
+                        : `${hh}:${String(mm).padStart(2, '0')}`
+                      nodes.push(
+                        <g key={`hh${d}_${s}`}>
+                          <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
+                                stroke={isMidnight ? '#d1d5db' : '#e5e7eb'} />
+                          {showLabel && (
+                            <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
+                                  textAnchor="middle" fill="#6b7280">
+                              {label}
+                            </text>
+                          )}
+                        </g>
+                      )
+                    }
+                  }
+                  return nodes
+                })()}
+              </>
+            )}
             {/* Date markers aligned under day numbers */}
             {(() => {
               const nodes: React.ReactNode[] = []

@@ -24,8 +24,9 @@ const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ),
 })
 
-const COL_W_MAX  = 56
-const ZOOM_LEVELS = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
+// colW = 像素 / 天。56 是日级满格，>=120 起进入小时/分钟级渲染。
+const COL_W_MAX  = 2880
+const ZOOM_LEVELS = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56, 84, 120, 240, 480, 720, 1440, 2880]
 
 export default function ProjectPage() {
   const params    = useParams()

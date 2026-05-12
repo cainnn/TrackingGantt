@@ -6,40 +6,12 @@
  * 所以编辑期间的 cascade、summary 更新都需要在客户端跑。
  */
 import type { Task, Dependency } from '@/types'
+import { toDateTimeStr, addMinutesStr, diffMinutesStr } from './clientTime'
 
-// ── 日期工具 ────────────────────────────────────────────────────────────
-function toDateStr(v: string | Date | null | undefined): string | null {
-  if (!v) return null
-  if (v instanceof Date) {
-    if (isNaN(v.getTime())) return null
-    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`
-  }
-  const s = String(v).trim()
-  if (!s) return null
-  return s.includes('T') ? s.split('T')[0] : s.split(/\s/)[0] || null
-}
-
-function parseDateLocal(s: string | null): Date | null {
-  if (!s) return null
-  const d = new Date(s + 'T00:00:00')
-  return isNaN(d.getTime()) ? null : d
-}
-
-function addDaysStr(dateStr: string | null, days: number): string | null {
-  const s = toDateStr(dateStr)
-  if (!s) return null
-  const d = parseDateLocal(s)
-  if (!d) return null
-  d.setDate(d.getDate() + days)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-function diffDaysStr(a: string, b: string): number {
-  const da = parseDateLocal(toDateStr(a)!)
-  const db = parseDateLocal(toDateStr(b)!)
-  if (!da || !db) return 0
-  return Math.round((db.getTime() - da.getTime()) / 86400000)
-}
+// 调度内部使用分钟级时间戳；保留旧函数名以减少改动面，但语义改为分钟。
+const toTimeStr = toDateTimeStr
+const addMinutes = addMinutesStr
+const diffMinutes = diffMinutesStr
 
 // ── 循环依赖检测 ─────────────────────────────────────────────────────────
 export function wouldCreateCycle(
@@ -96,17 +68,17 @@ export function runFullCascade(
   for (const t of allTasks) {
     if (t.is_deleted) continue
     taskMap.set(t.id, {
-      start_date: toDateStr(t.start_date),
-      end_date: toDateStr(t.end_date),
+      start_date: toTimeStr(t.start_date),
+      end_date: toTimeStr(t.end_date),
       duration: t.duration ?? null,
       auto_schedule: t.auto_schedule !== false,
       parent_id: t.parent_id ?? null,
       inactive: !!t.inactive,
       constraint_type: t.constraint_type ?? null,
-      constraint_date: toDateStr(t.constraint_date),
+      constraint_date: toTimeStr(t.constraint_date),
       is_milestone: !!t.is_milestone,
-      original_start_date: toDateStr(t.original_start_date),
-      original_end_date: toDateStr(t.original_end_date),
+      original_start_date: toTimeStr(t.original_start_date),
+      original_end_date: toTimeStr(t.original_end_date),
     })
   }
 
@@ -166,7 +138,7 @@ export function runFullCascade(
       if (!to?.start_date || !to?.end_date) continue
       if (to.auto_schedule === false) continue
 
-      const dur = Math.max(0, diffDaysStr(to.start_date, to.end_date))
+      const dur = Math.max(0, diffMinutes(to.start_date, to.end_date))
 
       let maxRequired: string | null = null
       for (const dep of toDepList) {
@@ -175,10 +147,10 @@ export function runFullCascade(
         const lag = dep.lag ?? 0
         const depType = dep.type ?? 2
         let rs: string | null = null
-        if (depType === 2) rs = addDaysStr(from.end_date, lag)
-        else if (depType === 0) rs = addDaysStr(from.start_date, lag)
-        else if (depType === 3) rs = addDaysStr(from.end_date, lag - dur)
-        else if (depType === 1) rs = addDaysStr(from.start_date, lag - dur)
+        if (depType === 2) rs = addMinutes(from.end_date, lag)
+        else if (depType === 0) rs = addMinutes(from.start_date, lag)
+        else if (depType === 3) rs = addMinutes(from.end_date, lag - dur)
+        else if (depType === 1) rs = addMinutes(from.start_date, lag - dur)
         if (rs && (!maxRequired || rs > maxRequired)) maxRequired = rs
       }
 
@@ -187,16 +159,16 @@ export function runFullCascade(
       const cd = to.constraint_date
       if (ct && cd && ct !== 'asap' && ct !== 'alap' && ct !== 'none') {
         if (ct === 'muststarton') newStart = cd
-        else if (ct === 'mustfinishon') newStart = addDaysStr(cd, -dur)
+        else if (ct === 'mustfinishon') newStart = addMinutes(cd, -dur)
         else if (ct === 'startnoearlierthan') newStart = (maxRequired && maxRequired > cd) ? maxRequired : cd
         else if (ct === 'finishnoearlierthan') {
-          const s = addDaysStr(cd, -dur)
+          const s = addMinutes(cd, -dur)
           newStart = (maxRequired && s && maxRequired > s) ? maxRequired : s
         }
       }
       if (!newStart) continue
       if (to.start_date === newStart) continue
-      const newEnd = addDaysStr(newStart, dur)
+      const newEnd = addMinutes(newStart, dur)
       if (!newEnd) continue
 
       taskMap.set(toId, { ...to, start_date: newStart, end_date: newEnd, duration: dur })
@@ -235,7 +207,7 @@ export function runFullCascade(
     if (childIds.length === 0) {
       // 没有子任务但保存了 original_*：恢复
       if (parent.original_start_date && parent.original_end_date) {
-        const dur = diffDaysStr(parent.original_start_date, parent.original_end_date)
+        const dur = diffMinutes(parent.original_start_date, parent.original_end_date)
         taskMap.set(pid, {
           ...parent,
           start_date: parent.original_start_date,
@@ -256,7 +228,7 @@ export function runFullCascade(
     }
     if (!minS || !maxE) continue
     if (parent.start_date === minS && parent.end_date === maxE) continue
-    const newDur = diffDaysStr(minS, maxE)
+    const newDur = diffMinutes(minS, maxE)
     // 首次成为摘要：保存原始日期
     const shouldSaveOrig = !parent.original_start_date && !parent.original_end_date
     taskMap.set(pid, {
@@ -275,11 +247,11 @@ export function runFullCascade(
     if (t.is_deleted) continue
     const st = taskMap.get(t.id)
     if (!st) continue
-    const oldStart = toDateStr(t.start_date)
-    const oldEnd = toDateStr(t.end_date)
+    const oldStart = toTimeStr(t.start_date)
+    const oldEnd = toTimeStr(t.end_date)
     const oldDur = t.duration ?? null
-    const oldOrigStart = toDateStr(t.original_start_date)
-    const oldOrigEnd = toDateStr(t.original_end_date)
+    const oldOrigStart = toTimeStr(t.original_start_date)
+    const oldOrigEnd = toTimeStr(t.original_end_date)
     if (
       st.start_date === oldStart &&
       st.end_date === oldEnd &&
