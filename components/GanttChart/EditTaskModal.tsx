@@ -41,6 +41,15 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const isSummary = allTasks.some(t => t.parent_id === taskId)
   const summaryIds = new Set(allTasks.filter(t => !t.is_deleted).map(t => t.parent_id).filter(Boolean) as string[])
   const currentProject = useAppSelector(s => s.project.currentProject)
+  // 项目精度：天级 vs 分钟级（创建时固定）
+  const isMinute = currentProject?.time_granularity === 'minute'
+  const dtSlice = isMinute ? 16 : 10      // input value 取前 N 位
+  const dtInputType = isMinute ? 'datetime-local' : 'date'
+  const dtStep = isMinute ? 60 * 15 : undefined
+  const durMul = isMinute ? 1 : 1440      // 用户输入 → 存储分钟数的乘数
+  const durLabel = isMinute ? '工期（分钟）' : '工期（天）'
+  const durStep = isMinute ? 15 : 1
+  const durHint = isMinute ? '1 小时 = 60，1 天 = 1440' : ''
 
   type TabKey = 'general' | 'pred' | 'succ' | 'constraint' | 'note' | 'history'
   const [tab, setTab] = useState<TabKey>('general')
@@ -117,15 +126,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     prevTaskId.current = taskId
     setName(task.name)
     setAssignee(task.assignee ?? '')
-    // 分钟级：保留完整 datetime（datetime-local 控件接受 'YYYY-MM-DDTHH:mm'，截到 16 位）
-    setStartDate((task.start_date ?? '').slice(0, 16))
-    setEndDate((task.end_date ?? '').slice(0, 16))
+    // 控件值：分钟级取前 16 位（含时间），天级取前 10 位（仅日期）
+    setStartDate((task.start_date ?? '').slice(0, dtSlice))
+    setEndDate((task.end_date ?? '').slice(0, dtSlice))
     setIsMilestone(task.is_milestone)
     setNote(task.note ?? '')
-    setDurationIn(task.duration != null ? String(task.duration) : '')
+    // 工期：DB 总是分钟；天级 UI 展示为天数
+    setDurationIn(task.duration != null ? String(Math.round((task.duration / durMul) * 100) / 100) : '')
     setConstraintType(task.constraint_type ?? 'asap')
-    setConstraintDate((task.constraint_date ?? '').slice(0, 16))
-    setDeadline((task.deadline ?? '').slice(0, 16))
+    setConstraintDate((task.constraint_date ?? '').slice(0, dtSlice))
+    setDeadline((task.deadline ?? '').slice(0, dtSlice))
     setManualSchedule(task.auto_schedule === false)
     setRollup(task.rollup ?? false)
     setInactive(task.inactive ?? false)
@@ -154,9 +164,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       // 同步本任务的输入框
       const me = cascaded.find(t => t.id === taskId)
       if (me) {
-        setStartDate((me.start_date ?? '').slice(0, 16))
-        setEndDate((me.end_date ?? '').slice(0, 16))
-        setDurationIn(me.duration != null ? String(me.duration) : '')
+        setStartDate((me.start_date ?? '').slice(0, dtSlice))
+        setEndDate((me.end_date ?? '').slice(0, dtSlice))
+        setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
       }
     }
   }, [dispatch, allTasks, taskId])
@@ -254,12 +264,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       const startDt = new Date(earliest)
       const endDt = new Date(startDt.getTime() + dur * 60_000)
       const pad = (n: number) => String(n).padStart(2, '0')
-      const newEnd = `${endDt.getFullYear()}-${pad(endDt.getMonth()+1)}-${pad(endDt.getDate())}T${pad(endDt.getHours())}:${pad(endDt.getMinutes())}`
-      const updated = { ...task, auto_schedule: true, start_date: earliest, end_date: newEnd, duration: dur }
+      const fmtTok = (d: Date) => isMinute
+        ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+        : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+      const startStr = fmtTok(startDt)
+      const newEnd = fmtTok(endDt)
+      const updated = { ...task, auto_schedule: true, start_date: startStr, end_date: newEnd, duration: dur }
       dispatch(updateTasks([updated]))
       dispatch(markDirty([task.id]))
       dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为自动排程` }))
-      setStartDate(earliest)
+      setStartDate(startStr)
       setEndDate(newEnd)
     }
   }, [task, allTasks, currentProject, dispatch, projectId])
@@ -278,7 +292,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   if (!task) return null
 
   const durNum = durationIn !== '' ? Number(durationIn) : null
-  const duration = durNum != null && !isNaN(durNum) ? durNum : task.duration
+  // 用户输入按 UI 单位（分钟或天）；存储统一为分钟。
+  const duration = durNum != null && !isNaN(durNum) ? Math.round(durNum * durMul) : task.duration
 
   // Determine date editability based on dep types
   const hasFS_SS = incomingDeps.some(d => d.type === 2 || d.type === 0)
@@ -286,26 +301,28 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const startReadonly = hasDepMode ? hasFS_SS : !isManual
   const endReadonly   = hasDepMode ? hasFF_SF : false
 
-  const projStart = (currentProject?.start_date ?? '').slice(0, 16)
+  const projStart = (currentProject?.start_date ?? '').slice(0, dtSlice)
 
   const pad2 = (n: number) => String(n).padStart(2, '0')
-  const fmtDtLocal = (d: Date) =>
-    `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  const fmtDtLocal = (d: Date) => isMinute
+    ? `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    : `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
 
-  // duration 单位：分钟
+  // duration 输入单位：天级=天，分钟级=分钟；内部统一换算为分钟保存。
   const handleDurationChange = (val: string) => {
     setDurationIn(val)
     const n = Number(val)
     if (!isNaN(n) && n >= 0) {
+      const totalMins = n * durMul
       if (endReadonly && endDate) {
         const d = new Date(endDate)
-        d.setMinutes(d.getMinutes() - n)
+        d.setMinutes(d.getMinutes() - totalMins)
         let s = fmtDtLocal(d)
         if (projStart && s < projStart) s = projStart
         setStartDate(s)
       } else if (startDate) {
         const d = new Date(startDate)
-        d.setMinutes(d.getMinutes() + n)
+        d.setMinutes(d.getMinutes() + totalMins)
         setEndDate(fmtDtLocal(d))
       }
     }
@@ -675,13 +692,13 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
               <div className="flex gap-3">
                 <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 mb-1">开始时间</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '开始时间' : '开始日期'}</label>
                   {startReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
                       {startDate ? startDate.replace('T', ' ') : '—'}
                     </div>
                   ) : (
-                    <input type="datetime-local" value={startDate} min={projStart || undefined} step={60 * 15}
+                    <input type={dtInputType} value={startDate} min={projStart || undefined} step={dtStep}
                            onChange={e => {
                              const v = e.target.value
                              setStartDate(projStart && v < projStart ? projStart : v)
@@ -690,13 +707,13 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   )}
                 </div>
                 <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 mb-1">结束时间</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '结束时间' : '结束日期'}</label>
                   {endReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
                       {endDate ? endDate.replace('T', ' ') : '—'}
                     </div>
                   ) : (
-                    <input type="datetime-local" value={endDate} step={60 * 15}
+                    <input type={dtInputType} value={endDate} step={dtStep}
                            onChange={e => setEndDate(e.target.value)}
                            className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
                   )}
@@ -704,17 +721,17 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">
-                  工期（分钟）<span className="text-gray-400 ml-2">1 小时 = 60，1 天 = 1440</span>
+                  {durLabel}{durHint && <span className="text-gray-400 ml-2">{durHint}</span>}
                 </label>
-                <input type="number" min={0} step={15} value={durationIn}
+                <input type="number" min={0} step={durStep} value={durationIn}
                        onChange={e => handleDurationChange(e.target.value)}
-                       placeholder="分钟数"
+                       placeholder={isMinute ? '分钟数' : '天数'}
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">截止时间</label>
+                <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '截止时间' : '截止日期'}</label>
                 <div className="flex items-center gap-2">
-                  <input type="datetime-local" value={deadline} step={60 * 15}
+                  <input type={dtInputType} value={deadline} step={dtStep}
                          onChange={e => setDeadline(e.target.value)}
                          className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
                   {deadline && (
@@ -740,8 +757,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                            setDurationIn('0')
                            if (startDate) setEndDate(startDate)
                          } else {
-                           // 默认工期 1 天 = 1440 分钟
-                           setDurationIn('1440')
+                           // 默认工期 1 天：UI 单位换算
+                           setDurationIn(String(1440 / durMul))
                            if (startDate) {
                              const d = new Date(startDate)
                              d.setMinutes(d.getMinutes() + 1440)
@@ -794,10 +811,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 <label className="text-sm text-gray-600 pl-4">手动排程</label>
                 <Toggle checked={manualSchedule} onChange={setManualSchedule} />
 
-                <label className="text-sm text-gray-600">限制时间</label>
-                <input type="datetime-local"
+                <label className="text-sm text-gray-600">{isMinute ? '限制时间' : '限制日期'}</label>
+                <input type={dtInputType}
                   value={constraintDate}
-                  step={60 * 15}
+                  step={dtStep}
                   disabled={!dateActive || manualSchedule}
                   onChange={e => setConstraintDate(e.target.value)}
                   className={`w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400

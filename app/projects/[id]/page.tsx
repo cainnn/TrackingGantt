@@ -24,9 +24,9 @@ const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ),
 })
 
-// colW = 像素 / 天。56 是日级满格，>=120 起进入小时/分钟级渲染。
-const COL_W_MAX  = 2880
-const ZOOM_LEVELS = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56, 84, 120, 240, 480, 720, 1440, 2880]
+// colW = 像素 / 天。天级项目止于 56；分钟级延伸到 2880（每分钟 2px）。
+const ZOOM_LEVELS_DAY    = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
+const ZOOM_LEVELS_MINUTE = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56, 84, 120, 240, 480, 720, 1440, 2880]
 
 export default function ProjectPage() {
   const params    = useParams()
@@ -46,6 +46,10 @@ export default function ProjectPage() {
     return v?.status_date ?? currentProject?.status_date ?? null
   }, [viewSnapshot, versions, currentProject?.status_date])
   const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, effectiveStatusDate), [tasks, effectiveStatusDate])
+  // 项目精度（创建时固定）
+  const isMinute = currentProject?.time_granularity === 'minute'
+  const zoomLevels = isMinute ? ZOOM_LEVELS_MINUTE : ZOOM_LEVELS_DAY
+  const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
   const [searchQuery,       setSearchQuery]       = useState('')
@@ -183,14 +187,15 @@ export default function ProjectPage() {
       <GanttToolbar
         projectId={projectId}
         readOnly={isViewOnly}
+        isMinute={isMinute}
         colW={colW}
         onZoomIn={() => setColW(w => {
-          const idx = ZOOM_LEVELS.indexOf(w)
-          return idx < 0 ? Math.min(COL_W_MAX, w + 7) : ZOOM_LEVELS[Math.min(idx + 1, ZOOM_LEVELS.length - 1)]
+          const idx = zoomLevels.indexOf(w)
+          return idx < 0 ? Math.min(zoomMax, w + 7) : zoomLevels[Math.min(idx + 1, zoomLevels.length - 1)]
         })}
         onZoomOut={() => setColW(w => {
-          const idx = ZOOM_LEVELS.indexOf(w)
-          return idx < 0 ? Math.max(ZOOM_LEVELS[0], w - 7) : ZOOM_LEVELS[Math.max(idx - 1, 0)]
+          const idx = zoomLevels.indexOf(w)
+          return idx < 0 ? Math.max(zoomLevels[0], w - 7) : zoomLevels[Math.max(idx - 1, 0)]
         })}
         onExpandAll={() => setExpandAllSignal(n => n + 1)}
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
@@ -219,6 +224,7 @@ export default function ProjectPage() {
         <div className="flex-1 overflow-hidden">
           <GanttChart
             projectId={projectId}
+            isMinute={isMinute}
             statusDate={effectiveStatusDate}
             colW={colW}
             searchQuery={searchQuery}

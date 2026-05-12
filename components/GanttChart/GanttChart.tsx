@@ -462,6 +462,7 @@ interface ConnectState {
 // ─── Props ─────────────────────────────────────────────────────────────────
 interface Props {
   projectId: string
+  isMinute?: boolean  // 项目精度：true=分钟级，false=天级
   statusDate?: string | null
   colW?: number
   searchQuery?: string
@@ -477,7 +478,9 @@ interface Props {
 }
 
 export default function GanttChart({
-  projectId, statusDate,
+  projectId,
+  isMinute = false,
+  statusDate,
   colW: colWProp,
   searchQuery = '',
   expandAllSignal = 0,
@@ -1424,8 +1427,10 @@ export default function GanttChart({
         // 只有在真正拖动时才更新日期（分钟级精度，吸附到 15 分钟）
         if (drag.dragging) {
           const minsRaw = Math.round(dx * 1440 / colW)
-          const mins = Math.round(minsRaw / SNAP_MIN) * SNAP_MIN
-          const days = mins / 1440  // 分数天，传给 addDays 仍按分钟精度处理
+          // 天级项目吸附 1 天 (1440 min)，分钟级吸附 15 分钟。
+          const snap = isMinute ? SNAP_MIN : 1440
+          const mins = Math.round(minsRaw / snap) * snap
+          const days = mins / 1440
           const orig = tasks.find(t => t.id === drag.taskId)
           if (!orig) return
 

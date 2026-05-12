@@ -6,6 +6,8 @@ export interface User {
   created_at: string
 }
 
+export type TimeGranularity = 'day' | 'minute'
+
 export interface Project {
   id: string
   user_id: string
@@ -13,9 +15,10 @@ export interface Project {
   start_date: string | null
   end_date: string | null
   status_date: string | null
+  time_granularity?: TimeGranularity  // 'day' 或 'minute'，创建时固定
   created_at: string
-  progress?: number  // 项目完成进度百分比 (0-100)
-  estimated_end_date?: string | null  // 预计完成时间（最晚任务结束日期）
+  progress?: number
+  estimated_end_date?: string | null
 }
 
 export interface Task {

@@ -79,12 +79,13 @@ export async function POST(req: NextRequest) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 
   const body = await req.json()
-  const { name, start_date, end_date, status_date, copy_from } = body as {
+  const { name, start_date, end_date, status_date, copy_from, time_granularity } = body as {
     name?: string
     start_date?: string
     end_date?: string
     status_date?: string
-    copy_from?: string // source project id to copy tasks from
+    copy_from?: string
+    time_granularity?: 'day' | 'minute'
   }
 
   if (!name) {
@@ -104,14 +105,21 @@ export async function POST(req: NextRequest) {
     srcProject = srcRes.rows[0]
   }
 
+  // 粒度：显式传入 > 复制源继承 > 默认天级
+  const granularity: 'day' | 'minute' =
+    time_granularity === 'minute' || time_granularity === 'day'
+      ? time_granularity
+      : ((srcProject?.time_granularity as 'day' | 'minute' | undefined) ?? 'day')
+
   const result = await pool.query(
-    'INSERT INTO projects (user_id, name, start_date, end_date, status_date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    'INSERT INTO projects (user_id, name, start_date, end_date, status_date, time_granularity) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
     [
       auth.value.userId,
       name,
       start_date ?? (srcProject?.start_date as string | null) ?? null,
       end_date ?? (srcProject?.end_date as string | null) ?? null,
       status_date ?? (srcProject?.status_date as string | null) ?? null,
+      granularity,
     ]
   )
   const newProject = result.rows[0]

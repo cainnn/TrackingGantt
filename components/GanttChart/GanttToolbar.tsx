@@ -180,6 +180,7 @@ function YmdDateInput({
 interface GanttToolbarProps {
   projectId: string
   readOnly?: boolean
+  isMinute?: boolean  // 项目精度：true=分钟级，false=天级
   colW: number
   onZoomIn: () => void
   onZoomOut: () => void
@@ -205,6 +206,7 @@ interface GanttToolbarProps {
 export default function GanttToolbar({
   projectId,
   readOnly,
+  isMinute = false,
   colW, onZoomIn, onZoomOut,
   onExpandAll, onCollapseAll,
   onFocusTask,
@@ -1462,7 +1464,7 @@ export default function GanttToolbar({
               {(() => {
                 const v = currentProject?.status_date ?? ''
                 return (
-                  <YmdDateInput value={v} onChange={handleStatusDatePick} includeTime />
+                  <YmdDateInput value={v} onChange={handleStatusDatePick} includeTime={isMinute} />
                 )
               })()}
               {(() => {
@@ -1605,7 +1607,7 @@ export default function GanttToolbar({
             <YmdDateInput
               value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
-              includeTime
+              includeTime={isMinute}
             />
           </>
         )}

@@ -95,10 +95,15 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
             </form>
           ) : (
             <div className="flex items-center gap-2 mb-2">
-              <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
+              <Link href={`/projects/${project.id}`} className="flex-1 min-w-0 flex items-center gap-1.5">
                 <h3 className="font-semibold text-gray-900 hover:text-blue-600 truncate">
                   {project.name}
                 </h3>
+                {project.time_granularity === 'minute' && (
+                  <span className="flex-none text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
+                    分钟级
+                  </span>
+                )}
               </Link>
               {!readOnly && (
               <button

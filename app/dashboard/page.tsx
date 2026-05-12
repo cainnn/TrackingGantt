@@ -19,6 +19,7 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'projects' | 'users'>('projects')
   const [creating, setCreating] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [newGranularity, setNewGranularity] = useState<'day' | 'minute'>('day')
   const [copyFrom, setCopyFrom] = useState('')
   const [loading, setLoading] = useState(true)
   const [createLoading, setCreateLoading] = useState(false)
@@ -48,6 +49,7 @@ export default function DashboardPage() {
       const payload: Record<string, string> = {
         name: newProjectName,
         start_date: new Date().toISOString().split('T')[0],
+        time_granularity: newGranularity,
       }
       if (copyFrom) payload.copy_from = copyFrom
       const res = await authFetch('/api/projects', {
@@ -70,6 +72,7 @@ export default function DashboardPage() {
       dispatch(addProject(data.value as any))
       setNewProjectName('')
       setCopyFrom('')
+      setNewGranularity('day')
       setCreating(false)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : '创建失败')
@@ -165,7 +168,37 @@ export default function DashboardPage() {
               </select>
             </div>
             {copyFrom && (
-              <p className="text-xs text-gray-500">将复制选中项目的所有任务和依赖关系到新项目</p>
+              <p className="text-xs text-gray-500">将复制选中项目的所有任务和依赖关系到新项目（精度跟随源项目）</p>
+            )}
+            {!copyFrom && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-gray-600 flex-none">时间精度：</label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="granularity"
+                    value="day"
+                    checked={newGranularity === 'day'}
+                    onChange={() => setNewGranularity('day')}
+                    className="accent-blue-500"
+                  />
+                  <span>天级（YYYY-MM-DD，日历日）</span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="granularity"
+                    value="minute"
+                    checked={newGranularity === 'minute'}
+                    onChange={() => setNewGranularity('minute')}
+                    className="accent-blue-500"
+                  />
+                  <span>分钟级（YYYY-MM-DD HH:mm，15min 吸附）</span>
+                </label>
+              </div>
+            )}
+            {!copyFrom && (
+              <p className="text-xs text-gray-400">创建后不可更改。短期项目建议分钟级；长期排期建议天级。</p>
             )}
             <div className="flex gap-2">
               <button
