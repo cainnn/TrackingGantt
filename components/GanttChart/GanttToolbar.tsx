@@ -514,29 +514,94 @@ export default function GanttToolbar({
       .catch(() => {})
   }, [projectId, dispatch])
 
-  // ── 自动保存快照（5 分钟间隔，仅在有未保存编辑时触发） ──
+  // ── 自动保存：把脏数据直接落库到 tasks/dependencies（不创建版本快照） ──
+  // 30 秒间隔；只跑增量差异；更新基线 + 清 dirty 避免重复 POST。
+  // 这样新建项目里加的任务即便不点"确认变更"也不会因关闭浏览器丢失。
   useEffect(() => {
     if (readOnly) return
-    const timer = setInterval(() => {
+    let busy = false
+    const flush = async () => {
+      if (busy) return
       if (dirtyIds.length === 0) return
-      authFetch(`/api/versions/${projectId}`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({ tasks, dependencies, is_autosave: true }),
-      })
-        .then(r => r.json())
-        .then(d => {
-          if (d.ok) {
-            // 刷新版本列表
-            authFetch(`/api/versions/${projectId}?list=1`)
-              .then(r => r.json())
-              .then(d2 => { if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value)) })
-          }
-        })
-        .catch(() => {})
-    }, 5 * 60 * 1000)
-    return () => clearInterval(timer)
-  }, [projectId, readOnly, dirtyIds, tasks, dependencies, dispatch])
+      const diff = buildSaveDiff(baselineTasks, baselineDeps, tasks, dependencies)
+      if (!hasAnyDiff(diff)) return
+      busy = true
+      try {
+        for (const depId of diff.depsToDelete) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'DELETE', headers: authFetchHeaders(true),
+            body: JSON.stringify({ id: depId }),
+          })
+          if (!r.ok) throw new Error(`autosave del-dep ${r.status}`)
+        }
+        if (diff.tasksToDelete.length > 0) {
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'DELETE', headers: authFetchHeaders(true),
+            body: JSON.stringify({ ids: diff.tasksToDelete }),
+          })
+          if (!r.ok) throw new Error(`autosave del-task ${r.status}`)
+        }
+        if (diff.tasksToAdd.length > 0) {
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'POST', headers: authFetchHeaders(true),
+            body: JSON.stringify(diff.tasksToAdd),
+          })
+          if (!r.ok) throw new Error(`autosave add-task ${r.status}`)
+        }
+        if (diff.tasksToUpdate.length > 0) {
+          const payload = diff.tasksToUpdate.map(t => ({
+            id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
+            duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
+            order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
+            assignee: t.assignee, note: t.note,
+            constraint_type: t.constraint_type, constraint_date: t.constraint_date,
+            status: t.status, deadline: t.deadline,
+            rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
+            baseline_end_date: t.baseline_end_date, task_code: t.task_code,
+          }))
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'PUT', headers: authFetchHeaders(true),
+            body: JSON.stringify(payload),
+          })
+          if (!r.ok) throw new Error(`autosave upd-task ${r.status}`)
+        }
+        for (const dep of diff.depsToAdd) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'POST', headers: authFetchHeaders(true),
+            body: JSON.stringify({
+              id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
+              type: dep.type, lag: dep.lag, active: dep.active ?? true,
+            }),
+          })
+          if (!r.ok) throw new Error(`autosave add-dep ${r.status}`)
+        }
+        for (const dep of diff.depsToUpdate) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'PUT', headers: authFetchHeaders(true),
+            body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true }),
+          })
+          if (!r.ok) throw new Error(`autosave upd-dep ${r.status}`)
+        }
+        // 成功：更新基线 + 清 dirty，避免下一轮重复 POST
+        const living = tasks.filter(t => !t.is_deleted)
+        setBaselineTasks(living.map(t => ({ ...t })))
+        setBaselineDeps(dependencies.map(d => ({ ...d })))
+        dispatch(clearDirty())
+      } catch (e) {
+        console.warn('[autosave] failed:', e)
+      } finally {
+        busy = false
+      }
+    }
+    const timer = setInterval(flush, 30 * 1000)
+    // 关闭/刷新页面前再触发一次（best-effort，使用 keepalive 让请求能在卸载后完成）
+    const onBeforeUnload = () => { void flush() }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+    }
+  }, [projectId, readOnly, dirtyIds, tasks, dependencies, baselineTasks, baselineDeps, dispatch])
 
   // ── Export ─────────────────────────────────────────────────────────────
   const projectLines = useAppSelector(s => s.projectLines.lines)
