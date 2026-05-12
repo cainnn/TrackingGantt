@@ -3583,28 +3583,35 @@ export default function GanttChart({
                   )
                 })}
                 {(() => {
-                  // 二级：小时网格，标签密度自适应
-                  if (colW < 60) {
-                    return Array.from({ length: totalDays }, (_, d) => (
-                      <line key={`hsep${d}`} x1={d * colW} y1={HDR_H1} x2={d * colW} y2={HDR_H} stroke="#e5e7eb" />
-                    ))
-                  }
+                  // 二级：小时网格，标签密度自适应。任何能塞下数字的宽度都尽量显示。
                   const slotW = colW / 24
-                  const labelEvery = slotW >= 50 ? 1 : slotW >= 28 ? 2 : slotW >= 18 ? 3 : slotW >= 10 ? 6 : 0
+                  // 至少显示 0/12（或 0/6/12/18）的稀疏标签
+                  const labelEvery =
+                    slotW >= 50 ? 1
+                    : slotW >= 28 ? 2
+                    : slotW >= 16 ? 3
+                    : slotW >= 8  ? 6
+                    : slotW >= 4  ? 12
+                    : 0
+                  // 网格线密度：颜色按重要性区分
+                  const showAllLines = slotW >= 8
                   const nodes: React.ReactNode[] = []
                   for (let d = 0; d < totalDays; d++) {
                     for (let hh = 0; hh < 24; hh++) {
                       const x = d * colW + hh * slotW
                       const isMidnight = hh === 0
+                      const isMajor = labelEvery > 0 && hh % labelEvery === 0
+                      // 不显示所有线时只显示标签对应的整点线
+                      if (!showAllLines && !isMidnight && !isMajor) continue
                       const showLabel = labelEvery > 0 && hh % labelEvery === 0
                       nodes.push(
                         <g key={`hh${d}_${hh}`}>
                           <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
-                                stroke={isMidnight ? '#d1d5db' : '#f3f4f6'} />
+                                stroke={isMidnight ? '#d1d5db' : (isMajor ? '#e5e7eb' : '#f3f4f6')} />
                           {showLabel && (
                             <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
                                   textAnchor="middle"
-                                  fill={isMidnight ? '#374151' : '#9ca3af'}>
+                                  fill={isMidnight ? '#374151' : '#6b7280'}>
                               {hh}
                             </text>
                           )}
