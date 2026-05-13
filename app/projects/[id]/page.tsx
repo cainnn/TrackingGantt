@@ -4,7 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setTasks, clearTasks, clearViewSnapshot } from '@/store/slices/tasksSlice'
+import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slices/tasksSlice'
+import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
+import { toDateTimeStr } from '@/lib/clientTime'
+import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
@@ -127,12 +130,29 @@ export default function ProjectPage() {
         }
         dispatch(setCurrentProject(pr.value))
         if (tr.ok && tr.value) {
-          dispatch(
-            setTasks({
-              tasks: Array.isArray(tr.value.tasks) ? tr.value.tasks : [],
-              dependencies: Array.isArray(tr.value.dependencies) ? tr.value.dependencies : [],
-            })
-          )
+          let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
+          const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
+          // 自动起点锚定：无依赖 + auto_schedule 的任务起点不早于
+          //   max(项目开始时间, 当前时间)
+          const projStart = toDateTimeStr(pr.value?.start_date ?? null)
+          const nowStr = toDateTimeStr(new Date())!
+          const earliest = projStart && projStart > nowStr ? projStart : nowStr
+          const anchored = applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
+          let dirtyIds: string[] = []
+          if (anchored.length > 0) {
+            const byId = new Map(anchored.map(t => [t.id, t]))
+            loadedTasks = loadedTasks.map(t => byId.get(t.id) ?? t)
+            dirtyIds = anchored.map(t => t.id)
+            // 再跑一次级联，让下游跟着前移
+            const cascaded = runFullCascade(loadedTasks, loadedDeps)
+            if (cascaded.length > 0) {
+              const cByid = new Map(cascaded.map(t => [t.id, t]))
+              loadedTasks = loadedTasks.map(t => cByid.get(t.id) ?? t)
+              dirtyIds = [...new Set([...dirtyIds, ...cascaded.map(t => t.id)])]
+            }
+          }
+          dispatch(setTasks({ tasks: loadedTasks, dependencies: loadedDeps }))
+          if (dirtyIds.length > 0) dispatch(markDirty(dirtyIds))
         }
         if (plr.ok && Array.isArray(plr.value)) {
           dispatch(setProjectLines(plr.value))

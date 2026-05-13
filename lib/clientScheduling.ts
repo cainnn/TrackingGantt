@@ -13,6 +13,52 @@ const toTimeStr = toDateTimeStr
 const addMinutes = addMinutesStr
 const diffMinutes = diffMinutesStr
 
+// ── 自动起点锚定 ────────────────────────────────────────────────────────
+/**
+ * 无前置依赖 + 自动排程 + asap/none 约束 的任务，起点不能早于"项目开始时间"和"当前时间"中的较晚者。
+ * 保留任务 duration，调整 start/end。
+ * 仅返回需要变更的任务。
+ */
+export function applyAutoStartAnchor(
+  allTasks: Task[],
+  deps: Dependency[],
+  earliestStart: string | null,
+): Task[] {
+  if (!earliestStart) return []
+  const anchor = toDateTimeStr(earliestStart)
+  if (!anchor) return []
+
+  const hasIncoming = new Set<string>()
+  for (const d of deps) {
+    if (d.active === false) continue
+    hasIncoming.add(d.to_task_id)
+  }
+
+  const updates: Task[] = []
+  for (const t of allTasks) {
+    if (t.is_deleted) continue
+    if (t.auto_schedule === false) continue
+    if (t.is_milestone) continue
+    if (hasIncoming.has(t.id)) continue
+    // 仅 asap / 未设置约束的任务被锚定
+    const ct = t.constraint_type
+    if (ct && ct !== 'asap' && ct !== 'alap' && ct !== 'none') continue
+    if (!t.start_date || !t.end_date) continue
+    const cur = toDateTimeStr(t.start_date)
+    if (!cur || cur >= anchor) continue
+    const dur = diffMinutes(t.start_date, t.end_date)
+    const newStart = anchor
+    const newEnd = addMinutes(newStart, dur)
+    if (!newEnd) continue
+    updates.push({
+      ...t,
+      start_date: newStart,
+      end_date: newEnd,
+    })
+  }
+  return updates
+}
+
 // ── 循环依赖检测 ─────────────────────────────────────────────────────────
 export function wouldCreateCycle(
   fromId: string,
