@@ -97,7 +97,7 @@ export default function DashboardPage() {
         time_granularity: newGranularity,
       }
       if (copyFrom) payload.copy_from = copyFrom
-      else if (newGranularity === 'minute' && useTemplate) payload.use_template = true
+      else if (useTemplate) payload.use_template = true
       const res = await authFetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -247,7 +247,7 @@ export default function DashboardPage() {
             {!copyFrom && (
               <p className="text-xs text-gray-400">创建后不可更改。短期项目建议分钟级；长期排期建议天级。</p>
             )}
-            {!copyFrom && newGranularity === 'minute' && (
+            {!copyFrom && (
               <div className="flex items-center gap-3">
                 <label className="text-sm text-gray-600 flex-none">初始内容：</label>
                 <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
@@ -270,7 +270,9 @@ export default function DashboardPage() {
                     onChange={() => setUseTemplate(true)}
                     className="accent-blue-500"
                   />
-                  <span>默认模板（10 个 1 小时任务，FS 依赖）</span>
+                  <span>
+                    默认模板（10 个任务，{newGranularity === 'minute' ? '每个 1 小时' : '每个 1 天'}，FS 链式依赖）
+                  </span>
                 </label>
               </div>
             )}
