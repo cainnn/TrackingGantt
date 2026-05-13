@@ -2563,9 +2563,18 @@ export default function GanttChart({
       name:       Math.max(MIN_NAME_W, headerW('任务名称'), contentW(t => t.name ?? '') + 32),
       assignee:   Math.max(headerW('责任人'),   contentW(t => t.assignee ?? '')),
       pct:        Math.max(headerW('完成'),     contentW(t => `${Math.round(t.percent_done ?? 0)}%`)),
-      duration:   Math.max(headerW('持续时间'), contentW(t => t.duration != null ? `${t.duration}天` : '')),
-      start:      Math.max(headerW('开始时间'), contentW(t => (t.start_date ?? '').split('T')[0])),
-      end:        Math.max(headerW('完成时间'), contentW(t => (t.end_date ?? '').split('T')[0])),
+      duration:   Math.max(headerW('持续时间'), contentW(t => {
+        if (t.duration == null) return ''
+        return isMinute
+          ? (t.duration >= 60 && t.duration % 60 === 0 ? `${t.duration / 60}小时` : `${t.duration}分钟`)
+          : `${t.duration}天`
+      })),
+      start:      Math.max(headerW('开始时间'), contentW(t => isMinute
+        ? (t.start_date ?? '').slice(0, 16).replace('T', ' ')
+        : (t.start_date ?? '').split('T')[0])),
+      end:        Math.max(headerW('完成时间'), contentW(t => isMinute
+        ? (t.end_date ?? '').slice(0, 16).replace('T', ' ')
+        : (t.end_date ?? '').split('T')[0])),
       pred:       headerW('前导'),
       succ:       headerW('后继'),
       lag:        headerW('延迟'),
@@ -2840,8 +2849,12 @@ export default function GanttChart({
               .map(d => flatRowIdx[d.to_task_id])
               .filter(Boolean)
               .join(',')
-            const fmtCell = (s: string | null) =>
-              s ? s.split('T')[0].slice(5) : ''  // MM-DD
+            const fmtCell = (s: string | null) => {
+              if (!s) return ''
+              return isMinute
+                ? `${s.slice(5, 10)} ${s.slice(11, 16)}`  // 'MM-DD HH:mm'
+                : s.split('T')[0].slice(5)  // 'MM-DD'
+            }
             const cellRing = (col: OptionalCol | 'name') =>
               selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
             const pickCell = (col: OptionalCol | 'name') => () => setSelectedCell({ taskId: t.id, col })
@@ -3054,7 +3067,13 @@ export default function GanttChart({
                                }}
                                onClick={e => e.stopPropagation()} />
                       : <span className="text-[11px] text-gray-600">
-                          {t.duration != null ? t.duration : ''}
+                          {t.duration != null
+                            ? (isMinute
+                                ? (t.duration >= 60 && t.duration % 60 === 0
+                                    ? `${t.duration / 60}小时`
+                                    : `${t.duration}分钟`)
+                                : `${t.duration}天`)
+                            : ''}
                         </span>
                     }
                   </div>
@@ -3073,10 +3092,10 @@ export default function GanttChart({
                            const dt = inc.length > 0 ? (inc[0].type ?? 2) : -1
                            if (dt !== 3 && dt !== 1) return
                          }
-                         setCellEdit({ taskId: t.id, field: 'start_date', value: t.start_date?.split('T')[0] ?? '' })
+                         setCellEdit({ taskId: t.id, field: 'start_date', value: (t.start_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'start_date'
-                      ? <input autoFocus type="date"
+                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
                                className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
@@ -3107,10 +3126,10 @@ export default function GanttChart({
                            // FS/SS: 结束日期由工期推导，不可编辑；FF/SF: 结束日期可编辑
                            if (dt !== 3 && dt !== 1 && dt !== -1) return
                          }
-                         setCellEdit({ taskId: t.id, field: 'end_date', value: t.end_date?.split('T')[0] ?? '' })
+                         setCellEdit({ taskId: t.id, field: 'end_date', value: (t.end_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'end_date'
-                      ? <input autoFocus type="date"
+                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
                                className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
@@ -3952,7 +3971,10 @@ export default function GanttChart({
             const t = row.task
             if (!t.start_date || !t.end_date) return null
             const x  = dateToX(new Date(t.start_date))
-            const w  = Math.max(colW*0.4, dateToX(new Date(t.end_date))-x)
+            // 最小条宽：天级用 0.4 个列宽（保证不足一天的任务可见）；
+            // 分钟级走绝对像素，避免小时级任务被拉成"一天"宽。
+            const minW = isMinute ? 4 : colW * 0.4
+            const w  = Math.max(minW, dateToX(new Date(t.end_date))-x)
             const y  = i*ROW_H + BAR_TOP
             const isDragging = !!previewMap[t.id]
 
