@@ -2263,7 +2263,7 @@ export default function GanttChart({
     if (!t) return
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddBelow = useCallback((taskId: string) => {
@@ -2272,7 +2272,7 @@ export default function GanttChart({
     if (!t) return
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddMilestone = useCallback((taskId: string) => {
@@ -2290,7 +2290,7 @@ export default function GanttChart({
     const childCount = tasks.filter(x => x.parent_id === taskId).length
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate })
     setExpanded(prev => ({ ...prev, [taskId]: true }))
   }, [tasks, addTask, defaultStart])
 
@@ -2473,6 +2473,21 @@ export default function GanttChart({
     const remainDeps = deps.filter(d => !taskDeps.some(x => x.id === d.id))
     recascade(remainDeps)
   }, [dispatch, deps, recascade])
+
+  const handleCtxToggleAutoSchedule = useCallback((taskId: string) => {
+    setCtxMenu(null)
+    const t = tasks.find(x => x.id === taskId)
+    if (!t) return
+    const next = t.auto_schedule === false  // 当前手动 → 改自动；当前自动 → 改手动
+    const updated = { ...t, auto_schedule: next }
+    dispatch(updateTasks([updated]))
+    dispatch(markDirty([taskId]))
+    // 从手动切回自动：跑级联 + anchor，让任务回到正确位置
+    if (next === true) {
+      const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
+      recascade(deps, nextTasks)
+    }
+  }, [tasks, deps, dispatch, recascade])
 
   const handleEnableAutoSchedule = useCallback(() => {
     setCtxMenu(null)
@@ -4347,10 +4362,13 @@ export default function GanttChart({
 
             <Sep />
 
-            {/* Group 3: Convert to milestone */}
+            {/* Group 3: Convert to milestone / toggle auto-schedule */}
             <Row icon={IcoDiamond}
                  label={task.is_milestone ? '转换为普通任务' : '转换为里程碑'}
                  onClick={() => handleCtxConvertMilestone(ctxMenu.taskId)} />
+            <Row icon={IcoAuto}
+                 label={task.auto_schedule === false ? '设为自动任务' : '设为手动任务'}
+                 onClick={() => handleCtxToggleAutoSchedule(ctxMenu.taskId)} />
 
             <Sep />
 
