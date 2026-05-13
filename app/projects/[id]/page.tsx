@@ -133,9 +133,18 @@ export default function ProjectPage() {
           let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
           const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
           // 自动起点锚定：无依赖 + auto_schedule 的任务起点不早于
-          //   max(项目开始时间, 当前时间)
-          const projStart = toDateTimeStr(pr.value?.start_date ?? null)
-          const nowStr = toDateTimeStr(new Date())!
+          //   max(项目开始时间, 当前时间)。
+          // 天级项目把锚点对齐到当天 00:00，避免任务带 sub-day 时间。
+          const projIsMinute = pr.value?.time_granularity === 'minute'
+          const now = new Date()
+          const pad = (n: number) => String(n).padStart(2, '0')
+          const nowStr = projIsMinute
+            ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+            : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+          const projStartRaw = toDateTimeStr(pr.value?.start_date ?? null)
+          const projStart = !projIsMinute && projStartRaw
+            ? `${projStartRaw.slice(0, 10)}T00:00:00`
+            : projStartRaw
           const earliest = projStart && projStart > nowStr ? projStart : nowStr
           const anchored = applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
           let dirtyIds: string[] = []

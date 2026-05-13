@@ -159,8 +159,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     let baseTasks = nextTasks ?? allTasks
     const allChanged: Task[] = []
     // 先做"自动起点锚定"：删了依赖后，没有任何前置的 auto 任务回到 anchor
-    const projStart = toDateTimeStr(currentProject?.start_date ?? null)
-    const nowStr = toDateTimeStr(new Date())!
+    // 天级项目锚到当天 00:00，分钟级精确到当前分钟。
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projStartRaw = toDateTimeStr(currentProject?.start_date ?? null)
+    const projStart = !isMinute && projStartRaw
+      ? `${projStartRaw.slice(0, 10)}T00:00:00`
+      : projStartRaw
     const anchor = projStart && projStart > nowStr ? projStart : nowStr
     const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
     if (anchored.length > 0) {
