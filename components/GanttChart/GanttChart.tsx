@@ -3646,18 +3646,24 @@ export default function GanttChart({
             {(() => {
               const nodes: React.ReactNode[] = []
               const LBL_Y = HDR_H
-              const ps = currentProject?.start_date?.split('T')[0]
-              let pe = currentProject?.end_date?.split('T')[0]
-              if (!pe) {
+              // 项目起止：分钟级保留完整 datetime；天级取日期部分。
+              const psRaw = currentProject?.start_date ?? null
+              let peRaw = currentProject?.end_date ?? null
+              if (!peRaw) {
                 let mx = ''
                 tasks.forEach(t => {
-                  const d = t.end_date?.split('T')[0]
-                  if (d && d > mx) mx = d
+                  const e = t.end_date ? String(t.end_date) : ''
+                  if (e && e > mx) mx = e
                 })
-                pe = mx || undefined
+                peRaw = mx || null
               }
-              if (ps) {
-                const x = dateToX(new Date(isMinute ? (currentProject?.start_date ?? ps) : ps + 'T00:00:00'))
+              const toMarkerDate = (s: string) => {
+                if (isMinute) return new Date(s)
+                const d = s.includes('T') ? s.split('T')[0] : s
+                return new Date(d + 'T00:00:00')
+              }
+              if (psRaw) {
+                const x = dateToX(toMarkerDate(psRaw))
                 nodes.push(
                   <text key="lbl-ps" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
                         fill="#dc2626" fontWeight={600}>{isMinute ? '开始时间' : '开始日期'}</text>
@@ -3670,8 +3676,8 @@ export default function GanttChart({
                         fill="#ef4444" fontWeight={600}>{isMinute ? '状态时间' : '状态日期'}</text>
                 )
               }
-              if (pe) {
-                const x = dateToX(new Date(isMinute ? (currentProject?.end_date ?? pe) : pe + 'T00:00:00'))
+              if (peRaw) {
+                const x = dateToX(toMarkerDate(peRaw))
                 nodes.push(
                   <text key="lbl-pe" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
                         fill="#dc2626" fontWeight={600}>{isMinute ? '结束时间' : '结束日期'}</text>
@@ -4191,18 +4197,24 @@ export default function GanttChart({
           {/* Project start / end lines */}
           {(() => {
             const nodes: React.ReactNode[] = []
-            const ps = currentProject?.start_date?.split('T')[0]
-            let pe = currentProject?.end_date?.split('T')[0]
-            if (!pe) {
+            // 分钟级保留完整 datetime；天级取日期 00:00。
+            const psRaw = currentProject?.start_date ?? null
+            let peRaw = currentProject?.end_date ?? null
+            if (!peRaw) {
               let mx = ''
               tasks.forEach(t => {
-                const d = t.end_date?.split('T')[0]
-                if (d && d > mx) mx = d
+                const e = t.end_date ? String(t.end_date) : ''
+                if (e && e > mx) mx = e
               })
-              pe = mx || undefined
+              peRaw = mx || null
             }
-            if (ps) {
-              const px = dateToX(new Date(ps + 'T00:00:00'))
+            const toLineDate = (s: string) => {
+              if (isMinute) return new Date(s)
+              const d = s.includes('T') ? s.split('T')[0] : s
+              return new Date(d + 'T00:00:00')
+            }
+            if (psRaw) {
+              const px = dateToX(toLineDate(psRaw))
               nodes.push(
                 <g key="proj-start">
                   <line x1={px} y1={0} x2={px} y2={totalH}
@@ -4210,8 +4222,8 @@ export default function GanttChart({
                 </g>
               )
             }
-            if (pe) {
-              const px = dateToX(new Date(pe + 'T00:00:00'))
+            if (peRaw) {
+              const px = dateToX(toLineDate(peRaw))
               nodes.push(
                 <g key="proj-end">
                   <line x1={px} y1={0} x2={px} y2={totalH}

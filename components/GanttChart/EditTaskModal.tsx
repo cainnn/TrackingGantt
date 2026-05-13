@@ -7,7 +7,8 @@ import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
+import { toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 
@@ -155,20 +156,40 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── 本地依赖变更后跑级联 ─────────────────────────────────────────────
   const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
-    const baseTasks = nextTasks ?? allTasks
+    let baseTasks = nextTasks ?? allTasks
+    const allChanged: Task[] = []
+    // 先做"自动起点锚定"：删了依赖后，没有任何前置的 auto 任务回到 anchor
+    const projStart = toDateTimeStr(currentProject?.start_date ?? null)
+    const nowStr = toDateTimeStr(new Date())!
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
+    if (anchored.length > 0) {
+      const byId = new Map(anchored.map(t => [t.id, t]))
+      baseTasks = baseTasks.map(t => byId.get(t.id) ?? t)
+      allChanged.push(...anchored)
+    }
     const cascaded = runFullCascade(baseTasks, nextDeps)
     if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-      // 同步本任务的输入框
-      const me = cascaded.find(t => t.id === taskId)
+      const cById = new Map(cascaded.map(t => [t.id, t]))
+      baseTasks = baseTasks.map(t => cById.get(t.id) ?? t)
+      // 合并：cascade 的结果覆盖 anchor 的
+      const merged = new Map<string, Task>()
+      for (const t of allChanged) merged.set(t.id, t)
+      for (const t of cascaded) merged.set(t.id, t)
+      allChanged.length = 0
+      allChanged.push(...merged.values())
+    }
+    if (allChanged.length > 0) {
+      dispatch(updateTasks(allChanged))
+      dispatch(markDirty(allChanged.map(t => t.id)))
+      const me = allChanged.find(t => t.id === taskId)
       if (me) {
         setStartDate((me.start_date ?? '').slice(0, dtSlice))
         setEndDate((me.end_date ?? '').slice(0, dtSlice))
         setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
       }
     }
-  }, [dispatch, allTasks, taskId])
+  }, [dispatch, allTasks, taskId, currentProject?.start_date, dtSlice, durMul])
 
   // ── Add predecessor ──────────────────────────────────────────────────
   const handleAddPredecessor = useCallback((fromTaskId: string) => {
