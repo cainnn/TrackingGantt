@@ -556,6 +556,19 @@ export default function GanttToolbar({
     autosaveRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
   }, [tasks, dependencies, dirtyIds, baselineTasks, baselineDeps])
 
+  // ── 撤销历史栈：每次 tasks/deps 变化都压栈一份，"放弃更改"每点一次 pop 一步 ──
+  const historyRef = useRef<Array<{ tasks: Task[]; deps: Dependency[] }>>([])
+  const skipNextHistoryPushRef = useRef(false)
+  const HISTORY_MAX = 50
+  useEffect(() => {
+    if (skipNextHistoryPushRef.current) { skipNextHistoryPushRef.current = false; return }
+    const id = setTimeout(() => {
+      if (historyRef.current.length >= HISTORY_MAX) historyRef.current.shift()
+      historyRef.current.push({ tasks: tasks.map(t => ({ ...t })), deps: dependencies.map(d => ({ ...d })) })
+    }, 300)
+    return () => clearTimeout(id)
+  }, [tasks, dependencies])
+
   useEffect(() => {
     if (readOnly) return
     let busy = false
@@ -1422,17 +1435,29 @@ export default function GanttToolbar({
     dispatch(markDirty(list.map(t => t.id)))
   }, [tasks, dependencies, isMinute, currentProject?.start_date, dispatch])
 
-  // ── 放弃更改：重新加载 DB 状态（所有本地编辑被丢弃，因为它们从未入库）
+  // ── 放弃更改：先尝试从撤销栈 pop 一步（多步可用），栈空再 reload DB ──
   const handleRefresh = useCallback(async () => {
+    // 至少需要 2 条历史：当前状态 + 上一步
+    if (historyRef.current.length >= 2) {
+      historyRef.current.pop()  // 弹掉当前
+      const prev = historyRef.current[historyRef.current.length - 1]
+      skipNextHistoryPushRef.current = true
+      dispatch(setTasks({ tasks: prev.tasks, dependencies: prev.deps }))
+      // dirtyIds 保持，由 autosave 决定后续是否落库
+      return
+    }
+    // 历史栈空 → 回退到 DB 状态
     try {
       const res = await authFetch(`/api/tasks/${projectId}`)
       const data = await res.json()
       if (data.ok && data.value) {
         const freshTasks = Array.isArray(data.value.tasks) ? data.value.tasks : []
         const freshDeps = Array.isArray(data.value.dependencies) ? data.value.dependencies : []
+        skipNextHistoryPushRef.current = true
         dispatch(setTasks({ tasks: freshTasks, dependencies: freshDeps }))
         dispatch(clearDirty())
         dispatch(clearComparison())
+        historyRef.current = []
         const livingTasks = freshTasks.filter((t: Task) => !t.is_deleted)
         setBaseline(livingTasks.map((t: Task) => ({
           id: t.id, task_code: t.task_code, name: t.name,
@@ -1601,12 +1626,8 @@ export default function GanttToolbar({
               {!readOnly && (
                 <button
                   onClick={handleRefresh}
-                  disabled={!hasChanges}
-                  title="放弃所有未保存的更改"
-                  className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
-                    ${hasChanges
-                      ? 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer'
-                      : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
+                  title="撤销一步本地编辑；栈空后回到数据库的当前状态"
+                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
                 >
                   <IcoRefresh />
                   放弃更改

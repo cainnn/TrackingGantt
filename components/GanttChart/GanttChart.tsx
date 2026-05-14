@@ -3681,17 +3681,17 @@ export default function GanttChart({
             {(() => {
               const nodes: React.ReactNode[] = []
               const LBL_Y = HDR_H
-              // 项目起止：分钟级保留完整 datetime；天级取日期部分。
+              // 项目起止：结束日期始终取 max(项目设定 end_date, 所有任务最晚 end_date)
               const psRaw = currentProject?.start_date ?? null
-              let peRaw = currentProject?.end_date ?? null
-              if (!peRaw) {
-                let mx = ''
-                tasks.forEach(t => {
-                  const e = t.end_date ? String(t.end_date) : ''
-                  if (e && e > mx) mx = e
-                })
-                peRaw = mx || null
-              }
+              let maxTaskEnd = ''
+              tasks.forEach(t => {
+                const e = t.end_date ? String(t.end_date) : ''
+                if (e && e > maxTaskEnd) maxTaskEnd = e
+              })
+              const projEnd = currentProject?.end_date ? String(currentProject.end_date) : ''
+              let peRaw: string | null = null
+              if (projEnd && maxTaskEnd) peRaw = projEnd > maxTaskEnd ? projEnd : maxTaskEnd
+              else peRaw = projEnd || maxTaskEnd || null
               const toMarkerDate = (s: string) => {
                 if (isMinute) return new Date(s)
                 const d = s.includes('T') ? s.split('T')[0] : s
@@ -4232,17 +4232,17 @@ export default function GanttChart({
           {/* Project start / end lines */}
           {(() => {
             const nodes: React.ReactNode[] = []
-            // 分钟级保留完整 datetime；天级取日期 00:00。
             const psRaw = currentProject?.start_date ?? null
-            let peRaw = currentProject?.end_date ?? null
-            if (!peRaw) {
-              let mx = ''
-              tasks.forEach(t => {
-                const e = t.end_date ? String(t.end_date) : ''
-                if (e && e > mx) mx = e
-              })
-              peRaw = mx || null
-            }
+            // 结束线对齐到 max(项目 end_date, 所有任务最晚 end_date)
+            let maxTaskEnd = ''
+            tasks.forEach(t => {
+              const e = t.end_date ? String(t.end_date) : ''
+              if (e && e > maxTaskEnd) maxTaskEnd = e
+            })
+            const projEnd = currentProject?.end_date ? String(currentProject.end_date) : ''
+            let peRaw: string | null = null
+            if (projEnd && maxTaskEnd) peRaw = projEnd > maxTaskEnd ? projEnd : maxTaskEnd
+            else peRaw = projEnd || maxTaskEnd || null
             const toLineDate = (s: string) => {
               if (isMinute) return new Date(s)
               const d = s.includes('T') ? s.split('T')[0] : s
