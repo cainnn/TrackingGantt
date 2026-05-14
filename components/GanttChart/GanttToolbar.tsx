@@ -22,7 +22,7 @@ import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsCon
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
 import { buildSaveDiff, hasAnyDiff } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import type { Dependency } from '@/types'
@@ -1357,6 +1357,32 @@ export default function GanttToolbar({
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
       baselineTasks, baselineDeps, lastVersionDate])
 
+  // ── 重排对齐：把无前置依赖 + 自动模式的任务拉回 anchor，并跑级联 ──
+  const handleRealign = useCallback(() => {
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
+    const projStart = !isMinute && projRaw
+      ? `${projRaw.slice(0, 10)}T00:00:00`
+      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    let baseTasks = tasks
+    const merged = new Map<string, Task>()
+    const anchored = applyAutoStartAnchor(baseTasks, dependencies, anchor)
+    for (const t of anchored) merged.set(t.id, t)
+    if (anchored.length > 0) baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
+    const cascaded = runFullCascade(baseTasks, dependencies)
+    for (const t of cascaded) merged.set(t.id, t)
+    if (merged.size > 0) {
+      const list = Array.from(merged.values())
+      dispatch(updateTasks(list))
+      dispatch(markDirty(list.map(t => t.id)))
+    }
+  }, [tasks, dependencies, isMinute, currentProject?.start_date, dispatch])
+
   // ── 放弃更改：重新加载 DB 状态（所有本地编辑被丢弃，因为它们从未入库）
   const handleRefresh = useCallback(async () => {
     try {
@@ -1523,6 +1549,16 @@ export default function GanttToolbar({
                   </button>
                 )
               })()}
+              {!readOnly && (
+                <button
+                  onClick={handleRealign}
+                  title="把无前置依赖 + 自动模式的任务拉回今天（或项目开始日期），并跑链式级联"
+                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
+                >
+                  <IcoRefresh />
+                  重排对齐
+                </button>
+              )}
               {!readOnly && (
                 <button
                   onClick={handleRefresh}

@@ -12,7 +12,7 @@ import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -2067,14 +2067,34 @@ export default function GanttChart({
     dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
   }, [tasks, dispatch])
 
-  // ── 本地依赖变更后重算级联 + 摘要 ──────────────────────────────────────
+  // ── 本地依赖变更后重算：先 anchor（拉无依赖任务回 anchor），再 cascade ──
   const recascade = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
-    const cascaded = runFullCascade(nextTasks ?? tasks, nextDeps)
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
+    let baseTasks = nextTasks ?? tasks
+    // 计算 anchor：分钟级精确到分钟，天级对齐到 00:00
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
+    const projStart = !isMinute && projRaw
+      ? `${projRaw.slice(0, 10)}T00:00:00`
+      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
+    const merged = new Map<string, Task>()
+    if (anchored.length > 0) {
+      for (const t of anchored) merged.set(t.id, t)
+      baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     }
-  }, [dispatch, tasks])
+    const cascaded = runFullCascade(baseTasks, nextDeps)
+    for (const t of cascaded) merged.set(t.id, t)
+    if (merged.size > 0) {
+      const list = Array.from(merged.values())
+      dispatch(updateTasks(list))
+      dispatch(markDirty(list.map(t => t.id)))
+    }
+  }, [dispatch, tasks, isMinute, currentProject?.start_date])
 
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
@@ -2582,7 +2602,7 @@ export default function GanttChart({
         if (t.duration == null) return ''
         return isMinute
           ? (t.duration >= 60 && t.duration % 60 === 0 ? `${t.duration / 60}小时` : `${t.duration}分钟`)
-          : `${t.duration}天`
+          : `${Math.round(t.duration / 1440 * 10) / 10}天`
       })),
       start:      Math.max(headerW('开始时间'), contentW(t => isMinute
         ? (t.start_date ?? '').slice(0, 16).replace('T', ' ')
@@ -3087,7 +3107,7 @@ export default function GanttChart({
                                 ? (t.duration >= 60 && t.duration % 60 === 0
                                     ? `${t.duration / 60}小时`
                                     : `${t.duration}分钟`)
-                                : `${t.duration}天`)
+                                : `${Math.round(t.duration / 1440 * 10) / 10}天`)
                             : ''}
                         </span>
                     }
