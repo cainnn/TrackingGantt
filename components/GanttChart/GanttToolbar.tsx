@@ -1392,7 +1392,7 @@ export default function GanttToolbar({
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
       baselineTasks, baselineDeps, lastVersionDate])
 
-  // ── 重排对齐：把无前置依赖 + 自动模式的任务拉回 anchor，并跑级联 ──
+  // ── 重排对齐：把无前置依赖 + 自动模式的任务强制 snap 到 anchor，并跑级联 ──
   const handleRealign = useCallback(() => {
     const now = new Date()
     const pad = (n: number) => String(n).padStart(2, '0')
@@ -1406,16 +1406,20 @@ export default function GanttToolbar({
     const anchor = projStart && projStart > nowStr ? projStart : nowStr
     let baseTasks = tasks
     const merged = new Map<string, Task>()
-    const anchored = applyAutoStartAnchor(baseTasks, dependencies, anchor)
+    // 重排对齐用 snap 模式：无依赖任务整体对齐到 anchor（push + pull 都做）
+    const anchored = applyAutoStartAnchor(baseTasks, dependencies, anchor, 'snap')
     for (const t of anchored) merged.set(t.id, t)
     if (anchored.length > 0) baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     const cascaded = runFullCascade(baseTasks, dependencies)
     for (const t of cascaded) merged.set(t.id, t)
-    if (merged.size > 0) {
-      const list = Array.from(merged.values())
-      dispatch(updateTasks(list))
-      dispatch(markDirty(list.map(t => t.id)))
+    if (merged.size === 0) {
+      // 已对齐：给个无操作反馈
+      alert('所有任务已对齐到当前 anchor，无需重排')
+      return
     }
+    const list = Array.from(merged.values())
+    dispatch(updateTasks(list))
+    dispatch(markDirty(list.map(t => t.id)))
   }, [tasks, dependencies, isMinute, currentProject?.start_date, dispatch])
 
   // ── 放弃更改：重新加载 DB 状态（所有本地编辑被丢弃，因为它们从未入库）

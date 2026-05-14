@@ -15,14 +15,17 @@ const diffMinutes = diffMinutesStr
 
 // ── 自动起点锚定 ────────────────────────────────────────────────────────
 /**
- * 无前置依赖 + 自动排程 + asap/none 约束 的任务，起点不能早于"项目开始时间"和"当前时间"中的较晚者。
- * 保留任务 duration，调整 start/end。
- * 仅返回需要变更的任务。
+ * 无前置依赖 + 自动排程 + asap/none 约束 的任务，起点锚定到指定锚点。
+ * - mode='floor'（默认，初始加载）：仅当 cur < anchor 时推后到 anchor。
+ *   防止把用户已主动安排到更晚日期的任务回拉。
+ * - mode='snap'（手动"重排对齐"按钮）：cur ≠ anchor 都强制设到 anchor，
+ *   既能 push 也能 pull，达到一次性整体对齐效果。
  */
 export function applyAutoStartAnchor(
   allTasks: Task[],
   deps: Dependency[],
   earliestStart: string | null,
+  mode: 'floor' | 'snap' = 'floor',
 ): Task[] {
   if (!earliestStart) return []
   const anchor = toDateTimeStr(earliestStart)
@@ -45,7 +48,8 @@ export function applyAutoStartAnchor(
     if (ct && ct !== 'asap' && ct !== 'alap' && ct !== 'none') continue
     if (!t.start_date || !t.end_date) continue
     const cur = toDateTimeStr(t.start_date)
-    if (!cur || cur >= anchor) continue
+    if (!cur) continue
+    if (mode === 'floor' ? cur >= anchor : cur === anchor) continue
     const dur = diffMinutes(t.start_date, t.end_date)
     const newStart = anchor
     const newEnd = addMinutes(newStart, dur)
