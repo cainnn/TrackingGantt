@@ -506,13 +506,48 @@ export default function GanttToolbar({
   const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0) &&
     changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
-  // 初始加载时，拉取版本列表
+  // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
+  const initVersionRef = useRef(false)
   useEffect(() => {
     authFetch(`/api/versions/${projectId}?list=1`)
       .then(r => r.json())
-      .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
+      .then(async d => {
+        if (!d.ok || !Array.isArray(d.value)) return
+        dispatch(setVersions(d.value))
+        if (initVersionRef.current) return
+        initVersionRef.current = true
+        if (readOnly) return
+        // 只在没有任何版本（含 autosave）且当前有任务时创建初始版本
+        const hasAny = d.value.length > 0
+        if (hasAny) return
+        const hasTasks = autosaveRef.current.tasks.some(t => !t.is_deleted)
+        if (!hasTasks) return
+        const now = new Date()
+        const pad = (n: number) => String(n).padStart(2, '0')
+        const sd = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}` +
+                   `T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+        try {
+          const r = await authFetch(`/api/versions/${projectId}`, {
+            method: 'POST',
+            headers: authFetchHeaders(true),
+            body: JSON.stringify({
+              tasks: autosaveRef.current.tasks,
+              dependencies: autosaveRef.current.dependencies,
+              status_date: sd,
+              name: '初始版本',
+              description: '项目首次进入时自动创建的基线快照',
+              is_autosave: false,
+            }),
+          })
+          if (r.ok) {
+            const r2 = await authFetch(`/api/versions/${projectId}?list=1`)
+            const d2 = await r2.json()
+            if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value))
+          }
+        } catch { /* silent */ }
+      })
       .catch(() => {})
-  }, [projectId, dispatch])
+  }, [projectId, dispatch, readOnly])
 
   // ── 自动保存：把脏数据直接落库到 tasks/dependencies（不创建版本快照） ──
   // 用 ref 持有当前 state，定时器只在 mount 时建一次，避免每次编辑都重置 30 秒计时。
