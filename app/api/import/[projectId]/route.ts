@@ -144,7 +144,8 @@ function validateImportTasks(
   // 3. 日期校验
   let globalMin: string | null = null
   let globalMax: string | null = null
-  const validDate = /^\d{4}-\d{2}-\d{2}$/
+  // 支持 YYYY-MM-DD 或 YYYY-MM-DDTHH:mm:ss（分钟级合并后 toDateStr 已统一带时间）
+  const validDate = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$/
 
   for (const t of tasks) {
     if (t.start_date && !validDate.test(t.start_date)) {
