@@ -256,9 +256,10 @@ fi
 echo ">> 清理旧代码并解压部署包..."
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
-# 保留 .env、node_modules、.next，删除其余代码文件
+# 保留 .env、node_modules、.next、aspose（license）、aspose-tasks-cli（含 Linux 二进制）
 find "$APP_DIR" -maxdepth 1 -mindepth 1 \
   ! -name '.env' ! -name 'node_modules' ! -name '.next' \
+  ! -name 'aspose' ! -name 'aspose-tasks-cli' \
   -exec rm -rf {} +
 tar -xzf "/tmp/${APP_NAME}-deploy.tar.gz" -C "$APP_DIR" --strip-components=1
 chmod -R a+rX "$APP_DIR" 2>/dev/null || true
