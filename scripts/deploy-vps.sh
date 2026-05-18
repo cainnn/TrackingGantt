@@ -191,11 +191,17 @@ EXCLUDES=(
   --exclude='.DS_Store'
   --exclude='doc-pdf-output'
   --exclude='source-pdf-output'
+  --exclude='aspose-tasks-cli/bin'
+  --exclude='aspose-tasks-cli/obj'
+  --exclude='aspose-tasks-cli/publish'
+  --exclude='aspose-tasks-cli/publish-linux-x64'
 )
 
 if [[ "$LOCAL_BUILD" -eq 1 ]]; then
   # 本地构建模式：包含 .next 和 node_modules
-  EXCLUDES=( --exclude='.git' --exclude='.env' --exclude='.env.*' --exclude='.cursor' --exclude='*.log' --exclude='.DS_Store' )
+  EXCLUDES=( --exclude='.git' --exclude='.env' --exclude='.env.*' --exclude='.cursor' --exclude='*.log' --exclude='.DS_Store'
+             --exclude='aspose-tasks-cli/bin' --exclude='aspose-tasks-cli/obj'
+             --exclude='aspose-tasks-cli/publish' --exclude='aspose-tasks-cli/publish-linux-x64' )
 fi
 
 export COPYFILE_DISABLE=1

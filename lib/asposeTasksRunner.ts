@@ -6,10 +6,18 @@ import path from 'node:path'
 const CLI_DIR = path.join(process.cwd(), 'aspose-tasks-cli', 'publish')
 const CLI_BIN = path.join(CLI_DIR, 'aspose-tasks-cli')
 const CLI_DLL = path.join(CLI_DIR, 'aspose-tasks-cli.dll')
-const LICENSE_ENV = process.env.ASPOSE_TASKS_LICENSE ?? '/Users/acai/AsposeLicense/Aspose.Total.lic'
+/**
+ * License 路径解析顺序：
+ *   1. ASPOSE_TASKS_LICENSE 环境变量
+ *   2. <cwd>/aspose/Aspose.Total.lic（VPS 部署约定）
+ *   3. 留空 → CLI 自身的 evaluation 模式
+ */
+const LICENSE_ENV =
+  process.env.ASPOSE_TASKS_LICENSE ??
+  path.join(process.cwd(), 'aspose', 'Aspose.Total.lic')
 
-/** Aspose CLI 子进程超时（毫秒）。MPP 文件可能较大，给 60s。*/
-const RUNNER_TIMEOUT_MS = 60_000
+/** Aspose CLI 子进程超时（毫秒）。VPS 写 MPP 大文件较慢，给 5 分钟。*/
+const RUNNER_TIMEOUT_MS = 300_000
 
 export interface ImportResult {
   tasks: ImportTaskDto[]
