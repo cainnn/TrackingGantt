@@ -69,8 +69,10 @@ export function computeTaskStatus(
     deps: { from_task_id: string; to_task_id: string; active?: boolean; lag?: number }[]
     prevTaskIds?: Set<string>  // 上期快照存在的任务 ID 集合，用于识别"新增任务"
     seqMap?: Map<string, number>  // 左列"编号"的 DFS 序号映射，用于归因显示
+    isMinute?: boolean  // 项目粒度，影响归因里 duration 文字单位
   },
 ): { status: AutoStatus; reason: string } {
+  const dayOnly = ctx?.isMinute === false
   const baseline = t.baseline_end_date ? String(t.baseline_end_date) : null
   const curEnd   = t.end_date ? String(t.end_date) : null
   const ref      = statusDate ?? new Date()
@@ -187,7 +189,7 @@ export function computeTaskStatus(
           trueRoots.sort((a, b) => b.impact - a.impact)
           const top = trueRoots[0]
           const label = `${top.code} ${top.name}`
-          const impactStr = top.impact !== 0 ? `（${fmtMinDur(top.impact, { signed: true })}）` : ''
+          const impactStr = top.impact !== 0 ? `（${fmtMinDur(top.impact, { signed: true, dayOnly })}）` : ''
           if (top.kind === 'new') {
             reasonParts.push(`受新增任务「${label}」插入影响${impactStr}`)
           } else {
@@ -199,7 +201,7 @@ export function computeTaskStatus(
           const p = byId.get(top.from_task_id)
           const pName = p?.name ?? '?'
           const pCode = p ? displayCode(p) : ''
-          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${fmtMinDur(top.lag ?? 0)})`)
+          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${fmtMinDur(top.lag ?? 0, { dayOnly })})`)
         }
         if (!started) return { status: 'pushed', reason: reasonParts.join('; ') }
         return { status: 'late', reason: `${reasonParts.join('; ')}；自身工期也延长` }
@@ -257,10 +259,17 @@ const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
 const SNAP_MIN = 15
 
-/** 把分钟数格式化为人类可读：'1天3小时' / '5小时15分钟' / '45分钟' / '0分钟' */
-function fmtMinDur(mins: number, opts?: { signed?: boolean }): string {
+/** 把分钟数格式化为人类可读：
+ *   - 分钟级项目：'1天3小时' / '5小时15分钟' / '45分钟' / '0分钟'
+ *   - 天级项目（dayOnly=true）：'1天' / '0天'（按 1440 分钟四舍五入到整天）
+ */
+function fmtMinDur(mins: number, opts?: { signed?: boolean; dayOnly?: boolean }): string {
   const sign = opts?.signed ? (mins > 0 ? '+' : mins < 0 ? '-' : '') : ''
   const abs = Math.abs(Math.round(mins))
+  if (opts?.dayOnly) {
+    const days = Math.round(abs / 1440)
+    return `${sign}${days}天`
+  }
   if (abs === 0) return opts?.signed ? '0分钟' : '0分钟'
   const d = Math.floor(abs / 1440)
   const h = Math.floor((abs % 1440) / 60)
@@ -997,7 +1006,7 @@ export default function GanttChart({
     if (activeFilterEntries.length > 0) {
       const sdForStatus = statusDate ? new Date(statusDate) : null
       const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
-      const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds }
+      const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
       const statusValue = (t: Task): string => {
         const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
         const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
@@ -2660,7 +2669,7 @@ export default function GanttChart({
     const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
     const sdForStatus = statusDate ? new Date(statusDate) : null
     const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
-    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds }
+    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
     const statusValue = (t: Task): string => {
       const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
       const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
@@ -3032,7 +3041,7 @@ export default function GanttChart({
                     const { status: st, reason: statusReason } = computeTaskStatus(
                       taskForStatus,
                       statusDate ? new Date(statusDate) : null,
-                      { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap },
+                      { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap, isMinute },
                     )
                     const meta = STATUS_META[st]
                     let deltaText = ''
@@ -3969,7 +3978,7 @@ export default function GanttChart({
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2
                   const lag = dep.lag ?? 0
-                  const lagLabel = `延迟 ${fmtMinDur(lag, { signed: true })}`
+                  const lagLabel = `延迟 ${fmtMinDur(lag, { signed: true, dayOnly: !isMinute })}`
                   const badgeW = Math.max(72, lagLabel.length * 8 + 12)
                   const badgeH = 20
                   const bx = mx - badgeW / 2
@@ -4202,7 +4211,7 @@ export default function GanttChart({
           {/* 依赖线拖拽中的 lag 提示 */}
           {depDrag && depDrag.dragging && (() => {
             const newLag = depDrag.startLag + depDrag.deltaDays
-            const label = `延迟 ${fmtMinDur(newLag, { signed: true })}`
+            const label = `延迟 ${fmtMinDur(newLag, { signed: true, dayOnly: !isMinute })}`
             const badgeW = Math.max(72, label.length * 9)
             const bx = depDrag.labelX - badgeW/2
             const by = depDrag.labelY - 28
