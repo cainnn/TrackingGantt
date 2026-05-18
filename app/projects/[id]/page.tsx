@@ -135,7 +135,11 @@ export default function ProjectPage() {
           // 自动起点锚定：无依赖 + auto_schedule 的任务起点不早于
           //   max(项目开始时间, 当前时间)。
           // 天级项目把锚点对齐到当天 00:00，避免任务带 sub-day 时间。
+          //
+          // 已设 status_date 的项目视为"用户在主动推进"，跳过 anchor，
+          // 避免历史/示例项目被强行拉到今天造成假延期。
           const projIsMinute = pr.value?.time_granularity === 'minute'
+          const hasStatusDate = !!pr.value?.status_date
           const now = new Date()
           const pad = (n: number) => String(n).padStart(2, '0')
           const nowStr = projIsMinute
@@ -146,7 +150,9 @@ export default function ProjectPage() {
             ? `${projStartRaw.slice(0, 10)}T00:00:00`
             : projStartRaw
           const earliest = projStart && projStart > nowStr ? projStart : nowStr
-          const anchored = applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
+          const anchored = hasStatusDate
+            ? []
+            : applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
           let dirtyIds: string[] = []
           if (anchored.length > 0) {
             const byId = new Map(anchored.map(t => [t.id, t]))
