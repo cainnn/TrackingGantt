@@ -584,6 +584,8 @@ export default function GanttToolbar({
   const projectLines = useAppSelector(s => s.projectLines.lines)
   const [exportDropdown, setExportDropdown] = useState(false)
   const exportDropdownRef = useRef<HTMLDivElement>(null)
+  const [importDropdown, setImportDropdown] = useState(false)
+  const importDropdownRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!exportDropdown) return
@@ -593,6 +595,15 @@ export default function GanttToolbar({
     window.addEventListener('mousedown', close)
     return () => window.removeEventListener('mousedown', close)
   }, [exportDropdown])
+
+  useEffect(() => {
+    if (!importDropdown) return
+    const close = (e: MouseEvent) => {
+      if (importDropdownRef.current && !importDropdownRef.current.contains(e.target as Node)) setImportDropdown(false)
+    }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [importDropdown])
 
   // 加载上期状态日期快照（用于导出时识别新任务 + 延期归因）
   const [prevSnapshotMap, setPrevSnapshotMap] = useState<{ ids: Set<string>; ends: Map<string, string> }>({ ids: new Set(), ends: new Map() })
@@ -639,24 +650,83 @@ export default function GanttToolbar({
       currentProject?.start_date, currentProject?.end_date)
   }, [tasks, dependencies, currentProject, projectLines])
 
-  // ── Excel import ──────────────────────────────────────────────────────
+  const handleExportMpp = useCallback(async () => {
+    setExportDropdown(false)
+    try {
+      const idMap = new Map(tasks.map(t => [t.id, t]))
+      const codeOf = (id: string | null) => id ? idMap.get(id)?.task_code ?? null : null
+      const payload = {
+        name: currentProject?.name ?? 'project',
+        start_date: currentProject?.start_date?.split('T')[0] ?? null,
+        end_date: currentProject?.end_date?.split('T')[0] ?? null,
+        status_date: currentProject?.status_date?.split('T')[0] ?? null,
+        tasks: tasks
+          .filter(t => !t.is_deleted)
+          .map(t => ({
+            task_code: t.task_code,
+            parent_task_code: codeOf(t.parent_id),
+            name: t.name,
+            start_date: t.start_date ? t.start_date.split('T')[0] : null,
+            end_date: t.end_date ? t.end_date.split('T')[0] : null,
+            duration: t.duration ?? null,
+            percent_done: t.percent_done ?? 0,
+            is_milestone: !!t.is_milestone,
+            auto_schedule: t.auto_schedule !== false,
+            note: t.note ?? null,
+            constraint_type: t.constraint_type ?? null,
+            constraint_date: t.constraint_date ? t.constraint_date.split('T')[0] : null,
+            rollup: !!t.rollup,
+            inactive: !!t.inactive,
+            deadline: t.deadline ? t.deadline.split('T')[0] : null,
+            order_index: t.order_index,
+          })),
+        dependencies: dependencies.map(d => ({
+          from_task_code: idMap.get(d.from_task_id)?.task_code ?? '',
+          to_task_code: idMap.get(d.to_task_id)?.task_code ?? '',
+          type: d.type,
+          lag: d.lag,
+          active: d.active !== false,
+        })).filter(d => d.from_task_code && d.to_task_code),
+      }
+      const r = await authFetch('/api/mpp/build', {
+        method: 'POST',
+        headers: authFetchHeaders(true),
+        body: JSON.stringify(payload),
+      })
+      if (!r.ok) {
+        const text = await r.text()
+        try { const j = JSON.parse(text); throw new Error(j.error || text) } catch { throw new Error(text) }
+      }
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${currentProject?.name ?? 'project'}.mpp`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      alert(`导出 MS Project 失败：${err instanceof Error ? err.message : '未知错误'}`)
+    }
+  }, [tasks, dependencies, currentProject])
+
+  // ── Import (Excel + MPP 共用流程) ─────────────────────────────────────
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const mppFileInputRef = useRef<HTMLInputElement>(null)
   const [importing, setImporting] = useState(false)
 
-  const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    e.target.value = '' // reset so same file can be re-selected
-
-    try {
-      const parsed = await parseExcelFile(file)
-      if (parsed.tasks.length === 0) { alert('Excel 中没有找到有效任务数据'); return }
+  const applyParsedImport = useCallback(async (
+    parsed: { tasks: ImportTask[]; dependencies: ImportDep[]; statusDate?: string | null; projectLines?: ImportProjectLine[] },
+    sourceLabel: string,
+  ) => {
+      if (parsed.tasks.length === 0) { alert(`${sourceLabel} 中没有找到有效任务数据`); return }
 
       // ── 客户端数据校验：阻止会导致渲染崩溃的数据 ──
       const validationErrors = validateImportData(parsed.tasks, parsed.dependencies)
       if (validationErrors.length > 0) {
         const msgs = validationErrors.map(e => `• ${e.message}`)
-        alert(`导入数据校验失败，请修正 Excel 后重试：\n\n${msgs.join('\n')}`)
+        alert(`导入数据校验失败，请修正 ${sourceLabel} 后重试：\n\n${msgs.join('\n')}`)
         return
       }
 
@@ -664,7 +734,7 @@ export default function GanttToolbar({
       const choice = prompt(
         `解析到 ${parsed.tasks.length} 个任务和 ${parsed.dependencies.length} 个依赖关系。\n\n` +
         `请选择导入模式：\n` +
-        `  1 = 替换导入（删除所有现有数据，用 Excel 数据替换）\n` +
+        `  1 = 替换导入（删除所有现有数据，用 ${sourceLabel} 数据替换）\n` +
         `  2 = 合并导入（保留现有数据，更新已有任务，新增新任务）\n\n` +
         `输入 1 或 2：`,
         '2'
@@ -779,12 +849,52 @@ export default function GanttToolbar({
         dispatch(setProjectLines(lines))
       }
       alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，"保存版本"时入库。`)
+  }, [dispatch, projectId, tasks, dependencies])
+
+  const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setImporting(true)
+    try {
+      const parsed = await parseExcelFile(file)
+      await applyParsedImport(parsed, 'Excel')
     } catch (err) {
       alert(`解析 Excel 文件失败：${err instanceof Error ? err.message : '未知错误'}`)
     } finally {
       setImporting(false)
     }
-  }, [dispatch, projectId, tasks, dependencies])
+  }, [applyParsedImport])
+
+  const handleImportMpp = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setImporting(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await authFetch('/api/mpp/parse', { method: 'POST', body: fd })
+      const d = await r.json()
+      if (!d.ok) throw new Error(d.error || `HTTP ${r.status}`)
+      const v = d.value as {
+        tasks: ImportTask[]
+        dependencies: ImportDep[]
+        status_date: string | null
+        project_lines?: ImportProjectLine[]
+      }
+      await applyParsedImport({
+        tasks: v.tasks,
+        dependencies: v.dependencies,
+        statusDate: v.status_date,
+        projectLines: v.project_lines,
+      }, 'MS Project')
+    } catch (err) {
+      alert(`导入 MS Project 文件失败：${err instanceof Error ? err.message : '未知错误'}`)
+    } finally {
+      setImporting(false)
+    }
+  }, [applyParsedImport])
 
   // ── Navigate prev/next task ───────────────────────────────────────────
   const flatOrder = getFlatOrder(tasks)
@@ -1710,16 +1820,41 @@ export default function GanttToolbar({
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="1" width="12" height="14" rx="1.5"/><path d="M5 5h2.5a1.5 1.5 0 010 3H5V5z" fill="currentColor" opacity="0.3"/><path d="M5 11h6"/></svg>
                 导出 PDF
               </button>
+              <button className="w-full px-3 py-1.5 text-left text-[12px] text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 cursor-pointer"
+                      onClick={handleExportMpp}>
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="1" width="12" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h6"/><path d="M3 1v14" strokeWidth="2"/></svg>
+                导出 MS Project (.mpp)
+              </button>
             </div>
           )}
         </div>
 
-        {/* Excel import */}
+        {/* Import dropdown (Excel + MPP) */}
         {!readOnly && (
-          <>
-            <Ic title="导入 Excel" onClick={() => fileInputRef.current?.click()} disabled={importing}><IcoUpload /></Ic>
+          <div className="relative">
+            <Ic title="导入" onClick={() => setImportDropdown(v => !v)} disabled={importing}><IcoUpload /></Ic>
+            {importDropdown && (
+              <div ref={importDropdownRef}
+                   className="absolute top-full right-0 mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1 min-w-[180px]">
+                <button
+                  className="w-full px-3 py-1.5 text-left text-[12px] text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  disabled={importing}
+                  onClick={() => { setImportDropdown(false); fileInputRef.current?.click() }}>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="1" width="12" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h4"/></svg>
+                  导入 Excel
+                </button>
+                <button
+                  className="w-full px-3 py-1.5 text-left text-[12px] text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  disabled={importing}
+                  onClick={() => { setImportDropdown(false); mppFileInputRef.current?.click() }}>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="1" width="12" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h6"/><path d="M3 1v14" strokeWidth="2"/></svg>
+                  导入 MS Project (.mpp)
+                </button>
+              </div>
+            )}
             <input ref={fileInputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={handleImport} />
-          </>
+            <input ref={mppFileInputRef} type="file" accept=".mpp" className="hidden" onChange={handleImportMpp} />
+          </div>
         )}
 
         {sep}
