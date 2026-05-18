@@ -21,6 +21,10 @@ BEGIN
     RETURN;
   END IF;
 
+  -- 历史遗留视图依赖 tasks.start_date / end_date 等列，阻塞 ALTER TABLE。
+  -- 已不被代码引用，直接 DROP（不重建）。
+  DROP VIEW IF EXISTS v_project_tasks;
+
   -- projects
   ALTER TABLE projects
     ALTER COLUMN start_date  TYPE TIMESTAMP USING (start_date  + INTERVAL '9 hours'),
