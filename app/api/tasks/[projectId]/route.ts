@@ -68,9 +68,12 @@ const FIELD_LABELS: Record<string, string> = {
 function fmtFieldVal(field: string, val: unknown): string {
   if (val === null || val === undefined || val === '') return '(空)'
   if (field === 'start_date' || field === 'end_date') {
-    const s = String(val); return s.includes('T') ? s.split('T')[0] : s
+    // 'YYYY-MM-DDTHH:mm:ss' → 'YYYY-MM-DD HH:mm'，无时间则保持原样
+    const s = String(val)
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
+    return m ? `${m[1]} ${m[2]}` : s
   }
-  if (field === 'duration') return `${val} 天`
+  if (field === 'duration') return `${val} 分钟`
   if (field === 'percent_done') return `${val}%`
   if (field === 'is_milestone') return val ? '是' : '否'
   return String(val)
@@ -227,21 +230,19 @@ export async function POST(req: NextRequest, { params }: Params) {
         code = await nextTaskCode(client, projectId)
       }
 
-      // 确保日期格式正确：将ISO字符串或Date对象转换为YYYY-MM-DD格式
+      // 归一化为 ISO datetime 'YYYY-MM-DDTHH:mm:ss'（分钟级保留时间）
       const normalizeDate = (date: unknown): string | null => {
         if (!date) return null
         if (typeof date === 'string') {
-          // 如果已经是YYYY-MM-DD格式，直接返回
-          if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date
-          // 如果是ISO格式，提取日期部分
-          if (date.includes('T')) return date.split('T')[0]
-          return date
+          const m = date.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/)
+          if (!m) return date
+          const hh = m[2] ?? '00', mm = m[3] ?? '00', ss = m[4] ?? '00'
+          return `${m[1]}T${hh}:${mm}:${ss}`
         }
         if (date instanceof Date) {
-          const year = date.getFullYear()
-          const month = String(date.getMonth() + 1).padStart(2, '0')
-          const day = String(date.getDate()).padStart(2, '0')
-          return `${year}-${month}-${day}`
+          const pad = (n: number) => String(n).padStart(2, '0')
+          return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}` +
+                 `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
         }
         return null
       }
@@ -310,15 +311,15 @@ export async function POST(req: NextRequest, { params }: Params) {
 const normalizeDate = (date: unknown): string | null => {
   if (!date) return null
   if (typeof date === 'string') {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date
-    if (date.includes('T')) return date.split('T')[0]
-    return date
+    const m = date.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/)
+    if (!m) return date
+    const hh = m[2] ?? '00', mm = m[3] ?? '00', ss = m[4] ?? '00'
+    return `${m[1]}T${hh}:${mm}:${ss}`
   }
   if (date instanceof Date) {
-    const year = date.getFullYear()
-    const month = String(date.getMonth() + 1).padStart(2, '0')
-    const day = String(date.getDate()).padStart(2, '0')
-    return `${year}-${month}-${day}`
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}` +
+           `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   }
   return null
 }
@@ -592,9 +593,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
       console.log(`[lifecycle] task ${code}: checking fields`, Object.keys(task as Record<string, unknown>).filter(k => COMPARE_FIELDS.includes(k)))
       for (const f of COMPARE_FIELDS) {
         if (!(f in task)) continue
+        // 分钟级比较：保留 HH:mm，避免同日不同时间被误判为"无变更"
         const norm = (v: unknown) => {
           if (v === null || v === undefined) return ''
-          const s = String(v); return s.includes('T') ? s.split('T')[0] : s
+          const s = String(v)
+          const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+          return m ? `${m[1]}${m[2] ? `T${m[2]}` : ''}` : s
         }
         const ov = norm(old[f])
         const nv = norm(cur[f])

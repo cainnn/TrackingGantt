@@ -7,8 +7,10 @@ import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
+import { toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
+import YmdDateInput from '@/components/YmdDateInput'
 
 interface Props {
   taskId: string
@@ -41,6 +43,13 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const isSummary = allTasks.some(t => t.parent_id === taskId)
   const summaryIds = new Set(allTasks.filter(t => !t.is_deleted).map(t => t.parent_id).filter(Boolean) as string[])
   const currentProject = useAppSelector(s => s.project.currentProject)
+  // 项目精度：天级 vs 分钟级（创建时固定）
+  const isMinute = currentProject?.time_granularity === 'minute'
+  const dtSlice = isMinute ? 16 : 10      // input value 取前 N 位
+  const durMul = isMinute ? 1 : 1440      // 用户输入 → 存储分钟数的乘数
+  const durLabel = isMinute ? '工期（分钟）' : '工期（天）'
+  const durStep = isMinute ? 15 : 1
+  const durHint = isMinute ? '1 小时 = 60，1 天 = 1440' : ''
 
   type TabKey = 'general' | 'pred' | 'succ' | 'constraint' | 'note' | 'history'
   const [tab, setTab] = useState<TabKey>('general')
@@ -117,14 +126,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     prevTaskId.current = taskId
     setName(task.name)
     setAssignee(task.assignee ?? '')
-    setStartDate(task.start_date?.split('T')[0] ?? '')
-    setEndDate(task.end_date?.split('T')[0] ?? '')
+    // 控件值：分钟级取前 16 位（含时间），天级取前 10 位（仅日期）
+    setStartDate((task.start_date ?? '').slice(0, dtSlice))
+    setEndDate((task.end_date ?? '').slice(0, dtSlice))
     setIsMilestone(task.is_milestone)
     setNote(task.note ?? '')
-    setDurationIn(task.duration != null ? String(task.duration) : '')
+    // 工期：DB 总是分钟；天级 UI 展示为天数
+    setDurationIn(task.duration != null ? String(Math.round((task.duration / durMul) * 100) / 100) : '')
     setConstraintType(task.constraint_type ?? 'asap')
-    setConstraintDate(task.constraint_date?.split('T')[0] ?? '')
-    setDeadline(task.deadline?.split('T')[0] ?? '')
+    setConstraintDate((task.constraint_date ?? '').slice(0, dtSlice))
+    setDeadline((task.deadline ?? '').slice(0, dtSlice))
     setManualSchedule(task.auto_schedule === false)
     setRollup(task.rollup ?? false)
     setInactive(task.inactive ?? false)
@@ -145,20 +156,48 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── 本地依赖变更后跑级联 ─────────────────────────────────────────────
   const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
-    const baseTasks = nextTasks ?? allTasks
+    let baseTasks = nextTasks ?? allTasks
+    const allChanged: Task[] = []
+    // 先做"自动起点锚定"：删了依赖后，没有任何前置的 auto 任务回到 anchor
+    // 天级项目锚到当天 00:00，分钟级精确到当前分钟。
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projStartRaw = toDateTimeStr(currentProject?.start_date ?? null)
+    const projStart = !isMinute && projStartRaw
+      ? `${projStartRaw.slice(0, 10)}T00:00:00`
+      : projStartRaw
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
+    if (anchored.length > 0) {
+      const byId = new Map(anchored.map(t => [t.id, t]))
+      baseTasks = baseTasks.map(t => byId.get(t.id) ?? t)
+      allChanged.push(...anchored)
+    }
     const cascaded = runFullCascade(baseTasks, nextDeps)
     if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-      // 同步本任务的输入框
-      const me = cascaded.find(t => t.id === taskId)
+      const cById = new Map(cascaded.map(t => [t.id, t]))
+      baseTasks = baseTasks.map(t => cById.get(t.id) ?? t)
+      // 合并：cascade 的结果覆盖 anchor 的
+      const merged = new Map<string, Task>()
+      for (const t of allChanged) merged.set(t.id, t)
+      for (const t of cascaded) merged.set(t.id, t)
+      allChanged.length = 0
+      allChanged.push(...merged.values())
+    }
+    if (allChanged.length > 0) {
+      dispatch(updateTasks(allChanged))
+      dispatch(markDirty(allChanged.map(t => t.id)))
+      const me = allChanged.find(t => t.id === taskId)
       if (me) {
-        setStartDate(me.start_date?.split('T')[0] ?? '')
-        setEndDate(me.end_date?.split('T')[0] ?? '')
-        setDurationIn(me.duration != null ? String(me.duration) : '')
+        setStartDate((me.start_date ?? '').slice(0, dtSlice))
+        setEndDate((me.end_date ?? '').slice(0, dtSlice))
+        setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
       }
     }
-  }, [dispatch, allTasks, taskId])
+  }, [dispatch, allTasks, taskId, currentProject?.start_date, dtSlice, durMul])
 
   // ── Add predecessor ──────────────────────────────────────────────────
   const handleAddPredecessor = useCallback((fromTaskId: string) => {
@@ -246,19 +285,23 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       dispatch(markDirty([task.id]))
       dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为手动排程` }))
     } else {
-      // Switch back to auto (空)
-      const projectStart = currentProject?.start_date
-        ? currentProject.start_date.split('T')[0]
-        : fmtDateStr(new Date())
-      const earliest = projectStart
+      // 切回自动排程：从项目起点开始 + 当前 duration（分钟）
+      const earliest = (currentProject?.start_date ?? '').slice(0, 16) ||
+                       (new Date().toISOString().slice(0, 16))
       const dur = task.duration ?? 0
-      const addD = (d: Date, n: number) => { const r = new Date(d); r.setDate(r.getDate()+n); return r }
-      const newEnd = fmtDateStr(addD(new Date(earliest + 'T00:00:00'), dur))
-      const updated = { ...task, auto_schedule: true, start_date: earliest, end_date: newEnd, duration: dur }
+      const startDt = new Date(earliest)
+      const endDt = new Date(startDt.getTime() + dur * 60_000)
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const fmtTok = (d: Date) => isMinute
+        ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+        : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+      const startStr = fmtTok(startDt)
+      const newEnd = fmtTok(endDt)
+      const updated = { ...task, auto_schedule: true, start_date: startStr, end_date: newEnd, duration: dur }
       dispatch(updateTasks([updated]))
       dispatch(markDirty([task.id]))
       dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为自动排程` }))
-      setStartDate(earliest)
+      setStartDate(startStr)
       setEndDate(newEnd)
     }
   }, [task, allTasks, currentProject, dispatch, projectId])
@@ -277,7 +320,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   if (!task) return null
 
   const durNum = durationIn !== '' ? Number(durationIn) : null
-  const duration = durNum != null && !isNaN(durNum) ? durNum : task.duration
+  // 用户输入按 UI 单位（分钟或天）；存储统一为分钟。
+  const duration = durNum != null && !isNaN(durNum) ? Math.round(durNum * durMul) : task.duration
 
   // Determine date editability based on dep types
   const hasFS_SS = incomingDeps.some(d => d.type === 2 || d.type === 0)
@@ -285,22 +329,29 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const startReadonly = hasDepMode ? hasFS_SS : !isManual
   const endReadonly   = hasDepMode ? hasFF_SF : false
 
-  const projStart = currentProject?.start_date?.split('T')[0] ?? ''
+  const projStart = (currentProject?.start_date ?? '').slice(0, dtSlice)
 
+  const pad2 = (n: number) => String(n).padStart(2, '0')
+  const fmtDtLocal = (d: Date) => isMinute
+    ? `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    : `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
+
+  // duration 输入单位：天级=天，分钟级=分钟；内部统一换算为分钟保存。
   const handleDurationChange = (val: string) => {
     setDurationIn(val)
     const n = Number(val)
     if (!isNaN(n) && n >= 0) {
+      const totalMins = n * durMul
       if (endReadonly && endDate) {
-        const d = new Date(endDate + 'T00:00:00')
-        d.setDate(d.getDate() - n)
-        let s = fmtDateStr(d)
+        const d = new Date(endDate)
+        d.setMinutes(d.getMinutes() - totalMins)
+        let s = fmtDtLocal(d)
         if (projStart && s < projStart) s = projStart
         setStartDate(s)
       } else if (startDate) {
-        const d = new Date(startDate + 'T00:00:00')
-        d.setDate(d.getDate() + n)
-        setEndDate(fmtDateStr(d))
+        const d = new Date(startDate)
+        d.setMinutes(d.getMinutes() + totalMins)
+        setEndDate(fmtDtLocal(d))
       }
     }
   }
@@ -669,45 +720,55 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
               <div className="flex gap-3">
                 <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 mb-1">开始日期</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '开始时间' : '开始日期'}</label>
                   {startReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
-                      {startDate || '—'}
+                      {startDate ? (isMinute ? startDate.replace('T', ' ') : startDate) : '—'}
                     </div>
                   ) : (
-                    <input type="date" value={startDate} min={projStart || undefined}
-                           onChange={e => {
-                             const v = e.target.value
-                             setStartDate(projStart && v < projStart ? projStart : v)
-                           }}
-                           className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <YmdDateInput
+                      value={startDate}
+                      min={projStart || undefined}
+                      includeTime={isMinute}
+                      onChange={e => {
+                        const v = e.target.value
+                        setStartDate(projStart && v < projStart ? projStart : v)
+                      }}
+                    />
                   )}
                 </div>
                 <div className="flex-1">
-                  <label className="block text-xs font-medium text-gray-500 mb-1">结束日期</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '结束时间' : '结束日期'}</label>
                   {endReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
-                      {endDate || '—'}
+                      {endDate ? (isMinute ? endDate.replace('T', ' ') : endDate) : '—'}
                     </div>
                   ) : (
-                    <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
-                           className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <YmdDateInput
+                      value={endDate}
+                      includeTime={isMinute}
+                      onChange={e => setEndDate(e.target.value)}
+                    />
                   )}
                 </div>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">工期（天）</label>
-                <input type="number" min={0} value={durationIn}
+                <label className="block text-xs font-medium text-gray-500 mb-1">
+                  {durLabel}{durHint && <span className="text-gray-400 ml-2">{durHint}</span>}
+                </label>
+                <input type="number" min={0} step={durStep} value={durationIn}
                        onChange={e => handleDurationChange(e.target.value)}
-                       placeholder="天数"
+                       placeholder={isMinute ? '分钟数' : '天数'}
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">截止日期</label>
+                <label className="block text-xs font-medium text-gray-500 mb-1">{isMinute ? '截止时间' : '截止日期'}</label>
                 <div className="flex items-center gap-2">
-                  <input type="date" value={deadline}
-                         onChange={e => setDeadline(e.target.value)}
-                         className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                  <YmdDateInput
+                    value={deadline}
+                    includeTime={isMinute}
+                    onChange={e => setDeadline(e.target.value)}
+                  />
                   {deadline && (
                     <button type="button"
                             onClick={() => setDeadline('')}
@@ -718,7 +779,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 {deadline && endDate && endDate > deadline && (
                   <div className="mt-1 text-[11px] text-red-600 flex items-center gap-1">
                     <span aria-hidden>⚠</span>
-                    <span>计划结束日期 {endDate} 已超出截止日期 {deadline}</span>
+                    <span>计划结束 {isMinute ? endDate.replace('T', ' ') : endDate} 已超出截止 {isMinute ? deadline.replace('T', ' ') : deadline}</span>
                   </div>
                 )}
               </div>
@@ -728,16 +789,15 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                          const checked = e.target.checked
                          setIsMilestone(checked)
                          if (checked) {
-                           // 转为里程碑：工期=0, end_date=start_date
                            setDurationIn('0')
                            if (startDate) setEndDate(startDate)
                          } else {
-                           // 转为普通任务：工期=1
-                           setDurationIn('1')
+                           // 默认工期 1 天：UI 单位换算
+                           setDurationIn(String(1440 / durMul))
                            if (startDate) {
                              const d = new Date(startDate)
-                             d.setDate(d.getDate() + 1)
-                             setEndDate(d.toISOString().split('T')[0])
+                             d.setMinutes(d.getMinutes() + 1440)
+                             setEndDate(fmtDtLocal(d))
                            }
                          }
                        }}
@@ -786,13 +846,14 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 <label className="text-sm text-gray-600 pl-4">手动排程</label>
                 <Toggle checked={manualSchedule} onChange={setManualSchedule} />
 
-                <label className="text-sm text-gray-600">限制日期</label>
-                <input type="date"
-                  value={constraintDate}
-                  disabled={!dateActive || manualSchedule}
-                  onChange={e => setConstraintDate(e.target.value)}
-                  className={`w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400
-                    ${(!dateActive || manualSchedule) ? 'bg-gray-50 text-gray-400' : 'bg-white'}`} />
+                <label className="text-sm text-gray-600">{isMinute ? '限制时间' : '限制日期'}</label>
+                <div className={(!dateActive || manualSchedule) ? 'opacity-50 pointer-events-none' : ''}>
+                  <YmdDateInput
+                    value={constraintDate}
+                    includeTime={isMinute}
+                    onChange={e => setConstraintDate(e.target.value)}
+                  />
+                </div>
                 <label className="text-sm text-gray-600 pl-4">打包</label>
                 <Toggle checked={rollup} onChange={setRollup} />
 

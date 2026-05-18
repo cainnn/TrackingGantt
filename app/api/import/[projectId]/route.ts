@@ -12,19 +12,21 @@ import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 
 type Params = { params: Promise<{ projectId: string }> }
 
-/** Normalize any date string to YYYY-MM-DD, or return null */
+/** 归一化为 ISO datetime 'YYYY-MM-DDTHH:mm:ss'，保留分钟级时间 */
 function toDateStr(v: unknown): string | null {
   if (!v) return null
   const s = String(v).trim()
   if (!s) return null
-  // Already YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
-  // YYYY-MM-DDT... or YYYY-MM-DD ...
-  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(s)) return s.slice(0, 10)
-  // Try parsing (handles "Mon Feb 23 2026 ..." etc.)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/)
+  if (m) {
+    const hh = m[2] ?? '00', mm = m[3] ?? '00', ss = m[4] ?? '00'
+    return `${m[1]}T${hh}:${mm}:${ss}`
+  }
   const d = new Date(s)
   if (!isNaN(d.getTime())) {
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}` +
+           `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   }
   return null
 }

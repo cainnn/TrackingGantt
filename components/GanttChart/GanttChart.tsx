@@ -12,7 +12,7 @@ import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -54,10 +54,10 @@ export const STATUS_META: Record<AutoStatus, { label: string; color: string }> =
   late:       { label: '延期',     color: '#dc2626' },
 }
 
-// 内部辅助：判断任务当前 end_date 是否相对上期基线被延长
+// 内部辅助：判断任务当前 end_date 是否相对上期基线被延长（分钟级比较）
 function isEndExtended(t: Pick<Task, 'end_date' | 'baseline_end_date'>): boolean {
-  const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-  const e = t.end_date ? String(t.end_date).split('T')[0] : null
+  const b = t.baseline_end_date ? String(t.baseline_end_date) : null
+  const e = t.end_date ? String(t.end_date) : null
   return !!(b && e && e > b)
 }
 
@@ -71,8 +71,8 @@ export function computeTaskStatus(
     seqMap?: Map<string, number>  // 左列"编号"的 DFS 序号映射，用于归因显示
   },
 ): { status: AutoStatus; reason: string } {
-  const baseline = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-  const curEnd   = t.end_date ? String(t.end_date).split('T')[0] : null
+  const baseline = t.baseline_end_date ? String(t.baseline_end_date) : null
+  const curEnd   = t.end_date ? String(t.end_date) : null
   const ref      = statusDate ?? new Date()
   const timePct  = timeBasedPercent(t, ref)
   if (timePct >= 100 || (t.percent_done ?? 0) >= 100) {
@@ -98,14 +98,12 @@ export function computeTaskStatus(
       const prevIds = ctx.prevTaskIds
       const isNew = (id: string) => !!prevIds && !prevIds.has(id)
       const isDelaySource = (p: Task) => isEndExtended(p) || isNew(p.id)
-      // 影响工期：延期任务 = 自身 end_delta；新增任务 = 自身 duration（它往链里插了这么多天）
-      const endDeltaDays = (tk: Task): number => {
-        const b = tk.baseline_end_date ? String(tk.baseline_end_date).split('T')[0] : null
-        const e = tk.end_date ? String(tk.end_date).split('T')[0] : null
-        if (!b || !e) return 0
-        return Math.round((new Date(e).getTime() - new Date(b).getTime()) / 86_400_000)
+      // 影响工期（分钟）：延期任务 = end - baseline；新增任务 = 自身 duration
+      const endDeltaMins = (tk: Task): number => {
+        if (!tk.baseline_end_date || !tk.end_date) return 0
+        return Math.round((new Date(tk.end_date).getTime() - new Date(tk.baseline_end_date).getTime()) / 60_000)
       }
-      const impactOf = (p: Task): number => isNew(p.id) ? (p.duration ?? 0) : endDeltaDays(p)
+      const impactOf = (p: Task): number => isNew(p.id) ? (p.duration ?? 0) : endDeltaMins(p)
 
       // 编号显示优先用左列 seq（可视位置）；没传 seqMap 时 fallback 到 task_code
       const displayCode = (p: Task): string => {
@@ -189,7 +187,7 @@ export function computeTaskStatus(
           trueRoots.sort((a, b) => b.impact - a.impact)
           const top = trueRoots[0]
           const label = `${top.code} ${top.name}`
-          const impactStr = top.impact !== 0 ? `（${top.impact > 0 ? '+' : ''}${top.impact}天）` : ''
+          const impactStr = top.impact !== 0 ? `（${fmtMinDur(top.impact, { signed: true })}）` : ''
           if (top.kind === 'new') {
             reasonParts.push(`受新增任务「${label}」插入影响${impactStr}`)
           } else {
@@ -201,7 +199,7 @@ export function computeTaskStatus(
           const p = byId.get(top.from_task_id)
           const pName = p?.name ?? '?'
           const pCode = p ? displayCode(p) : ''
-          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${top.lag}天)`)
+          reasonParts.push(`依赖延迟: ${pCode ? pCode + ' ' : ''}${pName}(lag=${fmtMinDur(top.lag ?? 0)})`)
         }
         if (!started) return { status: 'pushed', reason: reasonParts.join('; ') }
         return { status: 'late', reason: `${reasonParts.join('; ')}；自身工期也延长` }
@@ -248,22 +246,42 @@ export const INDICATOR_META: { key: keyof IndicatorsConfig; label: string }[] = 
 const INIT_LEFT_W = COL_NUM + COL_CHECK + COL_NAME + DEFAULT_VISIBLE_COLS.reduce((s, k) => s + (OPTIONAL_COL_META.find(c => c.key === k)?.width ?? 0), 0)
 
 // ─── Date helpers ──────────────────────────────────────────────────────────
+// 分钟级时间轴：addDays/diffDays 现在内部走分钟精度；调用方传"天"（可小数）。
 const sod      = (d: Date) => { const r=new Date(d); r.setHours(0,0,0,0); return r }
-const addDays  = (d: Date, n: number) => { const r=new Date(d); r.setDate(r.getDate()+n); return r }
-const diffDays = (a: Date, b: Date) => Math.round((sod(b).getTime()-sod(a).getTime())/86_400_000)
+const addMins  = (d: Date, n: number) => { const r=new Date(d); r.setMinutes(r.getMinutes()+n); return r }
+const diffMins = (a: Date, b: Date) => Math.round((b.getTime()-a.getTime())/60_000)
+const addDays  = (d: Date, n: number) => addMins(d, Math.round(n * 1440))
+const diffDays = (a: Date, b: Date) => diffMins(a, b) / 1440
 const fmtDate  = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
+const SNAP_MIN = 15
+
+/** 把分钟数格式化为人类可读：'1天3小时' / '5小时15分钟' / '45分钟' / '0分钟' */
+function fmtMinDur(mins: number, opts?: { signed?: boolean }): string {
+  const sign = opts?.signed ? (mins > 0 ? '+' : mins < 0 ? '-' : '') : ''
+  const abs = Math.abs(Math.round(mins))
+  if (abs === 0) return opts?.signed ? '0分钟' : '0分钟'
+  const d = Math.floor(abs / 1440)
+  const h = Math.floor((abs % 1440) / 60)
+  const m = abs % 60
+  const parts: string[] = []
+  if (d > 0) parts.push(`${d}天`)
+  if (h > 0) parts.push(`${h}小时`)
+  if (m > 0) parts.push(`${m}分钟`)
+  return `${sign}${parts.join('')}`
+}
 
 function timeBasedPercent(task: Task, statusDate: Date | null): number {
   if (!statusDate || !task.start_date || !task.end_date) return task.percent_done ?? 0
-  const start = sod(new Date(task.start_date))
-  const end   = sod(new Date(task.end_date))
-  const sd    = sod(statusDate)
-  if (sd >= end)   return 100
-  if (sd <= start) return 0
-  const total = end.getTime()  - start.getTime()
-  if (total <= 0)  return 100  // start === end 时视为已完成，防止除零
-  const done  = sd.getTime()   - start.getTime()
+  // 分钟级：直接按时间戳比较，不再 sod() 截断到日。
+  const start = new Date(task.start_date)
+  const end   = new Date(task.end_date)
+  if (statusDate >= end)   return 100
+  if (statusDate <= start) return 0
+  const total = end.getTime() - start.getTime()
+  if (total <= 0) return 100
+  const done = statusDate.getTime() - start.getTime()
   return Math.round((done / total) * 100)
 }
 
@@ -304,12 +322,12 @@ function cascadeLocal(
 
   // 初始化所有任务日期
   allTasks.forEach(t => {
-    if (t.start_date) localStart.set(t.id, sod(new Date(t.start_date)))
-    if (t.end_date)   localEnd.set(t.id, sod(new Date(t.end_date)))
+    if (t.start_date) localStart.set(t.id, new Date(t.start_date))
+    if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
   })
   // 覆盖已变更任务的日期
-  if (changedTask.start_date) localStart.set(changedTask.id, sod(new Date(changedTask.start_date)))
-  if (changedTask.end_date)   localEnd.set(changedTask.id, sod(new Date(changedTask.end_date)))
+  if (changedTask.start_date) localStart.set(changedTask.id, new Date(changedTask.start_date))
+  if (changedTask.end_date)   localEnd.set(changedTask.id, new Date(changedTask.end_date))
 
   const result: Record<string, Task> = {}
 
@@ -365,7 +383,7 @@ function cascadeLocal(
       if (e < s) e = s
       localStart.set(toId, s)
       localEnd.set(toId, e)
-      result[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+      result[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
       changed = true
     }
   }
@@ -390,8 +408,8 @@ function cascadeLocal(
       let maxE: string | null = null
       for (const c of children) {
         const ct = result[c.id] ?? (c.id === changedTask.id ? changedTask : c)
-        const s = ct.start_date?.split('T')[0] ?? null
-        const e2 = ct.end_date?.split('T')[0] ?? null
+        const s = ct.start_date ?? null
+        const e2 = ct.end_date ?? null
         if (s && (!minS || s < minS)) minS = s
         if (e2 && (!maxE || e2 > maxE)) maxE = e2
       }
@@ -402,7 +420,7 @@ function cascadeLocal(
             ...parent,
             start_date: minS,
             end_date: maxE,
-            duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))),
+            duration: diffMins(new Date(minS), new Date(maxE)),
           }
         }
       }
@@ -444,6 +462,7 @@ interface ConnectState {
 // ─── Props ─────────────────────────────────────────────────────────────────
 interface Props {
   projectId: string
+  isMinute?: boolean  // 项目精度：true=分钟级，false=天级
   statusDate?: string | null
   colW?: number
   searchQuery?: string
@@ -459,7 +478,9 @@ interface Props {
 }
 
 export default function GanttChart({
-  projectId, statusDate,
+  projectId,
+  isMinute = false,
+  statusDate,
   colW: colWProp,
   searchQuery = '',
   expandAllSignal = 0,
@@ -897,14 +918,16 @@ export default function GanttChart({
     return { origin:o, totalDays:diffDays(o, addDays(sod(mx),21)) }
   }, [tasks, currentProject?.start_date, currentProject?.end_date])
 
-  const dateToX = useCallback((d:Date)=>diffDays(origin,d)*colW, [origin, colW])
+  // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
+  const pxPerMin = colW / 1440
+  const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
 
   // ── 更新任务日期范围缓存 + 缩放居中 ────────────────────────────────────
   useEffect(() => {
     let mn = Infinity, mx = -Infinity
     tasks.forEach(t => {
-      if (t.start_date) { const d = diffDays(origin, sod(new Date(t.start_date))); if (d < mn) mn = d }
-      if (t.end_date)   { const d = diffDays(origin, sod(new Date(t.end_date)));   if (d > mx) mx = d }
+      if (t.start_date) { const d = diffDays(origin, new Date(t.start_date)); if (d < mn) mn = d }
+      if (t.end_date)   { const d = diffDays(origin, new Date(t.end_date));   if (d > mx) mx = d }
     })
     taskRangeRef.current = { minDay: mn === Infinity ? 0 : mn, maxDay: mx === -Infinity ? totalDays : mx, totalDays }
   }, [tasks, origin, totalDays])
@@ -917,7 +940,7 @@ export default function GanttChart({
     if (!el) return
     const viewW = el.clientWidth
     // 缩放时保持状态日期（或今天）居中
-    const target = statusDate ? sod(new Date(statusDate)) : sod(new Date())
+    const target = statusDate ? new Date(statusDate) : sod(new Date())
     const targetX = diffDays(origin, target) * colW
     syncTimelineScrollLeft(Math.max(0, targetX - viewW / 2))
   }, [colW, syncTimelineScrollLeft, statusDate, origin])
@@ -929,7 +952,7 @@ export default function GanttChart({
     // statusDate === undefined means project data hasn't loaded yet; wait for it
     if (statusDate === undefined) return
     scrolledForProject.current = projectId
-    const target = statusDate ? sod(new Date(statusDate)) : sod(new Date())
+    const target = statusDate ? new Date(statusDate) : sod(new Date())
     const x = dateToX(target)
     requestAnimationFrame(() => {
       const vw = rightRef.current?.clientWidth ?? 600
@@ -1090,7 +1113,7 @@ export default function GanttChart({
   const projectStartDate = useMemo(() => {
     if (currentProject?.start_date) return currentProject.start_date.split('T')[0]
     // Fallback: earliest task start date
-    const starts = tasks.filter(t => t.start_date).map(t => sod(new Date(t.start_date!)))
+    const starts = tasks.filter(t => t.start_date).map(t => new Date(t.start_date!))
     if (starts.length === 0) return fmtDate(sod(new Date()))
     return fmtDate(new Date(Math.min(...starts.map(x => x.getTime()))))
   }, [currentProject?.start_date, tasks])
@@ -1098,7 +1121,7 @@ export default function GanttChart({
   const defaultStart = useMemo(() => {
     let d = new Date(projectStartDate)
     if (statusDate) {
-      const sd = sod(new Date(statusDate))
+      const sd = new Date(statusDate)
       if (sd > d) d = sd
     }
     return fmtDate(d)
@@ -1232,7 +1255,7 @@ export default function GanttChart({
   }, [showCriticalPath, tasks, deps, summarySet])
 
   // ── 摘要任务进度（所有后代叶子任务按工期加权的完成度） ──────────────
-  const statusDateObj = useMemo(() => statusDate ? sod(new Date(statusDate)) : null, [statusDate])
+  const statusDateObj = useMemo(() => statusDate ? new Date(statusDate) : null, [statusDate])
   const summaryProgressMap = useMemo(() => {
     const map = new Map<string, number>()
     if (summarySet.size === 0) return map
@@ -1401,9 +1424,13 @@ export default function GanttChart({
           setDrag(prev => prev ? { ...prev, dragging: true } : null)
         }
 
-        // 只有在真正拖动时才更新日期
+        // 只有在真正拖动时才更新日期（分钟级精度，吸附到 15 分钟）
         if (drag.dragging) {
-          const days = Math.round(dx / colW)
+          const minsRaw = Math.round(dx * 1440 / colW)
+          // 天级项目吸附 1 天 (1440 min)，分钟级吸附 15 分钟。
+          const snap = isMinute ? SNAP_MIN : 1440
+          const mins = Math.round(minsRaw / snap) * snap
+          const days = mins / 1440
           const orig = tasks.find(t => t.id === drag.taskId)
           if (!orig) return
 
@@ -1421,19 +1448,19 @@ export default function GanttChart({
 
             // 初始化所有任务的原始日期
             tasks.forEach(t => {
-              if (t.start_date) localStart.set(t.id, sod(new Date(t.start_date)))
-              if (t.end_date)   localEnd.set(t.id, sod(new Date(t.end_date)))
+              if (t.start_date) localStart.set(t.id, new Date(t.start_date))
+              if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
             })
 
             // 平移所有后代
             for (const did of descendantIds) {
               const dt = tasks.find(t => t.id === did)
               if (!dt?.start_date || !dt?.end_date) continue
-              const s = addDays(sod(new Date(dt.start_date)), effectiveDays)
-              const e = addDays(sod(new Date(dt.end_date)), effectiveDays)
+              const s = addDays(new Date(dt.start_date), effectiveDays)
+              const e = addDays(new Date(dt.end_date), effectiveDays)
               localStart.set(did, s)
               localEnd.set(did, e)
-              map[did] = { ...dt, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+              map[did] = { ...dt, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
             }
 
             // 级联子树外部的下游依赖
@@ -1478,7 +1505,7 @@ export default function GanttChart({
                 if (eNew < s) eNew = s
                 localStart.set(toId, s)
                 localEnd.set(toId, eNew)
-                map[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(eNew), duration: diffDays(s, eNew) }
+                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(eNew), duration: diffMins(s, eNew) }
                 changed = true
               }
             }
@@ -1494,14 +1521,14 @@ export default function GanttChart({
                 let minS: string | null = null, maxE: string | null = null
                 for (const c of children) {
                   const ct = map[c.id] ?? c
-                  const s = ct.start_date?.split('T')[0] ?? null
-                  const e2 = ct.end_date?.split('T')[0] ?? null
+                  const s = ct.start_date ?? null
+                  const e2 = ct.end_date ?? null
                   if (s && (!minS || s < minS)) minS = s
                   if (e2 && (!maxE || e2 > maxE)) maxE = e2
                 }
                 if (minS && maxE) {
                   const p = tasks.find(x => x.id === curPid)
-                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))) }
+                  if (p) map[curPid] = { ...p, start_date: minS, end_date: maxE, duration: diffMins(new Date(minS), new Date(maxE)) }
                 }
                 curPid = tasks.find(x => x.id === curPid)?.parent_id ?? null
               }
@@ -1539,7 +1566,7 @@ export default function GanttChart({
           const map: Record<string, Task> = {
             [orig.id]: {
               ...orig,
-              start_date: fmtDate(newStart),
+              start_date: fmtDt(newStart),
               end_date:   fmtDate(newEnd),
               duration:   diffDays(newStart, newEnd),
             },
@@ -1551,8 +1578,8 @@ export default function GanttChart({
           localStart.set(drag.taskId, newStart)
           localEnd.set(drag.taskId, newEnd)
           tasks.forEach(t => {
-            if (t.start_date && !localStart.has(t.id)) localStart.set(t.id, sod(new Date(t.start_date)))
-            if (t.end_date && !localEnd.has(t.id))     localEnd.set(t.id, sod(new Date(t.end_date)))
+            if (t.start_date && !localStart.has(t.id)) localStart.set(t.id, new Date(t.start_date))
+            if (t.end_date && !localEnd.has(t.id))     localEnd.set(t.id, new Date(t.end_date))
           })
 
           const downstreamIds = downstreamCache.get(drag.taskId) || []
@@ -1608,7 +1635,7 @@ export default function GanttChart({
                 if (e < s) e = s
                 localStart.set(toId, s)
                 localEnd.set(toId, e)
-                map[toId] = { ...t, start_date: fmtDate(s), end_date: fmtDate(e), duration: diffDays(s, e) }
+                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
                 changed = true
               }
             }
@@ -1631,8 +1658,8 @@ export default function GanttChart({
               let maxE: string | null = null
               for (const c of children) {
                 const ct = map[c.id] ?? c
-                const s = ct.start_date?.split('T')[0] ?? null
-                const e2 = ct.end_date?.split('T')[0] ?? null
+                const s = ct.start_date ?? null
+                const e2 = ct.end_date ?? null
                 if (s && (!minS || s < minS)) minS = s
                 if (e2 && (!maxE || e2 > maxE)) maxE = e2
               }
@@ -1643,7 +1670,7 @@ export default function GanttChart({
                     ...parent,
                     start_date: minS,
                     end_date: maxE,
-                    duration: diffDays(sod(new Date(minS)), sod(new Date(maxE))),
+                    duration: diffMins(new Date(minS), new Date(maxE)),
                   }
                 }
               }
@@ -2040,14 +2067,34 @@ export default function GanttChart({
     dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
   }, [tasks, dispatch])
 
-  // ── 本地依赖变更后重算级联 + 摘要 ──────────────────────────────────────
+  // ── 本地依赖变更后重算：先 anchor（拉无依赖任务回 anchor），再 cascade ──
   const recascade = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
-    const cascaded = runFullCascade(nextTasks ?? tasks, nextDeps)
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
+    let baseTasks = nextTasks ?? tasks
+    // 计算 anchor：分钟级精确到分钟，天级对齐到 00:00
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
+    const projStart = !isMinute && projRaw
+      ? `${projRaw.slice(0, 10)}T00:00:00`
+      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
+    const merged = new Map<string, Task>()
+    if (anchored.length > 0) {
+      for (const t of anchored) merged.set(t.id, t)
+      baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     }
-  }, [dispatch, tasks])
+    const cascaded = runFullCascade(baseTasks, nextDeps)
+    for (const t of cascaded) merged.set(t.id, t)
+    if (merged.size > 0) {
+      const list = Array.from(merged.values())
+      dispatch(updateTasks(list))
+      dispatch(markDirty(list.map(t => t.id)))
+    }
+  }, [dispatch, tasks, isMinute, currentProject?.start_date])
 
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
@@ -2236,7 +2283,7 @@ export default function GanttChart({
     if (!t) return
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddBelow = useCallback((taskId: string) => {
@@ -2245,7 +2292,7 @@ export default function GanttChart({
     if (!t) return
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddMilestone = useCallback((taskId: string) => {
@@ -2263,7 +2310,7 @@ export default function GanttChart({
     const childCount = tasks.filter(x => x.parent_id === taskId).length
     const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
     const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate, auto_schedule: false })
+    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate })
     setExpanded(prev => ({ ...prev, [taskId]: true }))
   }, [tasks, addTask, defaultStart])
 
@@ -2447,6 +2494,21 @@ export default function GanttChart({
     recascade(remainDeps)
   }, [dispatch, deps, recascade])
 
+  const handleCtxToggleAutoSchedule = useCallback((taskId: string) => {
+    setCtxMenu(null)
+    const t = tasks.find(x => x.id === taskId)
+    if (!t) return
+    const next = t.auto_schedule === false  // 当前手动 → 改自动；当前自动 → 改手动
+    const updated = { ...t, auto_schedule: next }
+    dispatch(updateTasks([updated]))
+    dispatch(markDirty([taskId]))
+    // 从手动切回自动：跑级联 + anchor，让任务回到正确位置
+    if (next === true) {
+      const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
+      recascade(deps, nextTasks)
+    }
+  }, [tasks, deps, dispatch, recascade])
+
   const handleEnableAutoSchedule = useCallback(() => {
     setCtxMenu(null)
     if (!confirm('将为所有有依赖关系的任务启用自动排程，确认？')) return
@@ -2536,9 +2598,18 @@ export default function GanttChart({
       name:       Math.max(MIN_NAME_W, headerW('任务名称'), contentW(t => t.name ?? '') + 32),
       assignee:   Math.max(headerW('责任人'),   contentW(t => t.assignee ?? '')),
       pct:        Math.max(headerW('完成'),     contentW(t => `${Math.round(t.percent_done ?? 0)}%`)),
-      duration:   Math.max(headerW('持续时间'), contentW(t => t.duration != null ? `${t.duration}天` : '')),
-      start:      Math.max(headerW('开始时间'), contentW(t => (t.start_date ?? '').split('T')[0])),
-      end:        Math.max(headerW('完成时间'), contentW(t => (t.end_date ?? '').split('T')[0])),
+      duration:   Math.max(headerW('持续时间'), contentW(t => {
+        if (t.duration == null) return ''
+        return isMinute
+          ? (t.duration >= 60 && t.duration % 60 === 0 ? `${t.duration / 60}小时` : `${t.duration}分钟`)
+          : `${Math.round(t.duration / 1440 * 10) / 10}天`
+      })),
+      start:      Math.max(headerW('开始时间'), contentW(t => isMinute
+        ? (t.start_date ?? '').slice(0, 16).replace('T', ' ')
+        : (t.start_date ?? '').split('T')[0])),
+      end:        Math.max(headerW('完成时间'), contentW(t => isMinute
+        ? (t.end_date ?? '').slice(0, 16).replace('T', ' ')
+        : (t.end_date ?? '').split('T')[0])),
       pred:       headerW('前导'),
       succ:       headerW('后继'),
       lag:        headerW('延迟'),
@@ -2813,8 +2884,12 @@ export default function GanttChart({
               .map(d => flatRowIdx[d.to_task_id])
               .filter(Boolean)
               .join(',')
-            const fmtCell = (s: string | null) =>
-              s ? s.split('T')[0].slice(5) : ''  // MM-DD
+            const fmtCell = (s: string | null) => {
+              if (!s) return ''
+              return isMinute
+                ? `${s.slice(5, 10)} ${s.slice(11, 16)}`  // 'MM-DD HH:mm'
+                : s.split('T')[0].slice(5)  // 'MM-DD'
+            }
             const cellRing = (col: OptionalCol | 'name') =>
               selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
             const pickCell = (col: OptionalCol | 'name') => () => setSelectedCell({ taskId: t.id, col })
@@ -3027,7 +3102,13 @@ export default function GanttChart({
                                }}
                                onClick={e => e.stopPropagation()} />
                       : <span className="text-[11px] text-gray-600">
-                          {t.duration != null ? t.duration : ''}
+                          {t.duration != null
+                            ? (isMinute
+                                ? (t.duration >= 60 && t.duration % 60 === 0
+                                    ? `${t.duration / 60}小时`
+                                    : `${t.duration}分钟`)
+                                : `${Math.round(t.duration / 1440 * 10) / 10}天`)
+                            : ''}
                         </span>
                     }
                   </div>
@@ -3046,10 +3127,10 @@ export default function GanttChart({
                            const dt = inc.length > 0 ? (inc[0].type ?? 2) : -1
                            if (dt !== 3 && dt !== 1) return
                          }
-                         setCellEdit({ taskId: t.id, field: 'start_date', value: t.start_date?.split('T')[0] ?? '' })
+                         setCellEdit({ taskId: t.id, field: 'start_date', value: (t.start_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'start_date'
-                      ? <input autoFocus type="date"
+                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
                                className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
@@ -3080,10 +3161,10 @@ export default function GanttChart({
                            // FS/SS: 结束日期由工期推导，不可编辑；FF/SF: 结束日期可编辑
                            if (dt !== 3 && dt !== 1 && dt !== -1) return
                          }
-                         setCellEdit({ taskId: t.id, field: 'end_date', value: t.end_date?.split('T')[0] ?? '' })
+                         setCellEdit({ taskId: t.id, field: 'end_date', value: (t.end_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'end_date'
-                      ? <input autoFocus type="date"
+                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
                                className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
@@ -3380,109 +3461,261 @@ export default function GanttChart({
           >
             <rect x={0} y={0} width={Math.max(totalW, 800)} height={HDR_H} fill="#f9fafb" />
             <line x1={0} y1={HDR_H} x2={Math.max(totalW, 800)} y2={HDR_H} stroke="#d1d5db" />
-            {(() => {
-              const months: { label: string; startD: number; endD: number }[] = []
-              let mStart = 0
-              let mLabel = ''
-              for (let d = 0; d <= totalDays; d++) {
-                const date  = addDays(origin, d)
-                const label = `${date.getFullYear()}年${date.getMonth()+1}月`
-                if (d === 0) { mStart = 0; mLabel = label }
-                else if (label !== mLabel || d === totalDays) {
-                  months.push({ label: mLabel, startD: mStart, endD: d })
-                  mStart = d; mLabel = label
+            {!isMinute ? (
+              <>
+                {/* ── 天级项目：月头 + 周/日（保持稳定版样式） ─── */}
+                {(() => {
+                  const months: { label: string; startD: number; endD: number }[] = []
+                  let mStart = 0
+                  let mLabel = ''
+                  for (let d = 0; d <= totalDays; d++) {
+                    const date  = addDays(origin, d)
+                    const label = `${date.getFullYear()}年${date.getMonth()+1}月`
+                    if (d === 0) { mStart = 0; mLabel = label }
+                    else if (label !== mLabel || d === totalDays) {
+                      months.push({ label: mLabel, startD: mStart, endD: d })
+                      mStart = d; mLabel = label
+                    }
+                  }
+                  return months.map((m, i) => {
+                    const x = m.startD * colW
+                    const w = (m.endD - m.startD) * colW
+                    return (
+                      <g key={`hm${i}`}>
+                        <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
+                        <text x={x + w/2} y={HDR_H1-8} fontSize={11} textAnchor="middle"
+                              fill="#374151" fontWeight="600">
+                          {m.label}
+                        </text>
+                      </g>
+                    )
+                  })
+                })()}
+                {colW < 7
+                  ? null
+                  : colW < 14
+                  ? (() => {
+                      const nodes: React.ReactNode[] = []
+                      for (let d = 0; d < totalDays; d += 7) {
+                        const date = addDays(origin, d)
+                        const x = d * colW
+                        const w7 = Math.min(7, totalDays - d) * colW
+                        nodes.push(
+                          <g key={`hw${d}`}>
+                            <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#d1d5db" />
+                            <text x={x + w7 / 2} y={HDR_H - 6} fontSize={10} textAnchor="middle"
+                                  fill="#374151" fontWeight={600}>
+                              {`${date.getMonth()+1}/${date.getDate()}`}
+                            </text>
+                          </g>
+                        )
+                      }
+                      return nodes
+                    })()
+                  : Array.from({ length: totalDays }, (_,d) => {
+                      const date = addDays(origin,d)
+                      const dow  = date.getDay()
+                      const wknd = dow===0||dow===6
+                      const x    = d*colW
+                      return (
+                        <g key={`hd${d}`}>
+                          {wknd && (
+                            <rect x={x} y={HDR_H1} width={colW} height={HDR_H - HDR_H1} fill="#f3f4f6" opacity={0.45} />
+                          )}
+                          <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#e5e7eb" />
+                          <text x={x+colW/2} y={HDR_H - 6} fontSize={11} textAnchor="middle"
+                                fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
+                            {date.getDate()}
+                          </text>
+                        </g>
+                      )
+                    })
                 }
-              }
-              return months.map((m, i) => {
-                const x = m.startD * colW
-                const w = (m.endD - m.startD) * colW
-                return (
-                  <g key={`hm${i}`}>
-                    <line x1={x} y1={0} x2={x} y2={HDR_H1} stroke="#d1d5db" />
-                    <text x={x + w/2} y={HDR_H1-8} fontSize={11} textAnchor="middle"
-                          fill="#374151" fontWeight="600">
-                      {m.label}
-                    </text>
-                  </g>
-                )
-              })
-            })()}
-            {colW < 7
-              ? /* ── 月视图：只显示月份，第二行留空 ─────────────── */
-                null
-              : colW < 14
-              ? /* ── 周视图：每7天显示一个日期 ─────────────────── */
-                (() => {
+              </>
+            ) : colW >= 1200 ? (
+              <>
+                {/* ── 分钟级 + 高缩放：顶 = 日期+小时（每小时一格），二 = 15min ── */}
+                {(() => {
+                  // 顶层：每小时一格，标签 'MM-DD HH'
+                  const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
+                  const hourW = colW / 24
+                  const totalHours = totalDays * 24
+                  const pad = (n: number) => String(n).padStart(2, '0')
                   const nodes: React.ReactNode[] = []
-                  for (let d = 0; d < totalDays; d += 7) {
+                  for (let h = 0; h < totalHours; h++) {
+                    const d = Math.floor(h / 24)
+                    const hh = h % 24
                     const date = addDays(origin, d)
-                    const x = d * colW
-                    const w7 = Math.min(7, totalDays - d) * colW
+                    const x = h * hourW
+                    const isMidnight = hh === 0
+                    const dow = date.getDay()
+                    const wknd = dow === 0 || dow === 6
+                    // 标签自适应
+                    const label = hourW < 45
+                      ? `${pad(hh)}`
+                      : hourW < 90
+                      ? `${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(hh)}`
+                      : `${pad(date.getMonth()+1)}月${pad(date.getDate())}日(${WEEKDAY_CN[dow]}) ${pad(hh)}时`
                     nodes.push(
-                      <g key={`hw${d}`}>
-                        <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#d1d5db" />
-                        <text x={x + w7 / 2} y={HDR_H - 6} fontSize={10} textAnchor="middle"
-                              fill="#374151" fontWeight={600}>
-                          {`${date.getMonth()+1}/${date.getDate()}`}
+                      <g key={`hth${h}`}>
+                        {wknd && (
+                          <rect x={x} y={0} width={hourW} height={HDR_H1} fill="#f3f4f6" opacity={0.3} />
+                        )}
+                        <line x1={x} y1={0} x2={x} y2={HDR_H1}
+                              stroke={isMidnight ? '#9ca3af' : '#e5e7eb'} />
+                        <text x={x + hourW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
+                              fill={wknd ? '#9ca3af' : '#374151'} fontWeight={isMidnight ? 700 : 600}>
+                          {label}
                         </text>
                       </g>
                     )
                   }
                   return nodes
-                })()
-              : /* ── 日视图：每天一个日期 ──────────────────────── */
-                Array.from({ length: totalDays }, (_,d) => {
-                  const date = addDays(origin,d)
-                  const dow  = date.getDay()
-                  const wknd = dow===0||dow===6
-                  const x    = d*colW
+                })()}
+                {(() => {
+                  // 二级：15min 槽（每小时 4 格），标签 0/15/30/45
+                  const slotW = colW / 96
+                  const totalSlots = totalDays * 96
+                  const showLabel = slotW >= 12
+                  const nodes: React.ReactNode[] = []
+                  for (let s = 0; s < totalSlots; s++) {
+                    const slotInHour = s % 4
+                    const mm = slotInHour * 15
+                    const x = s * slotW
+                    const isHourBoundary = slotInHour === 0
+                    nodes.push(
+                      <g key={`hs${s}`}>
+                        <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
+                              stroke={isHourBoundary ? '#d1d5db' : '#f3f4f6'} />
+                        {showLabel && (
+                          <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
+                                textAnchor="middle"
+                                fill={isHourBoundary ? '#374151' : '#9ca3af'}>
+                            {mm}
+                          </text>
+                        )}
+                      </g>
+                    )
+                  }
+                  return nodes
+                })()}
+              </>
+            ) : (
+              <>
+                {/* ── 分钟级 + 默认：顶 = 日期(周X)，二 = 小时（每天 24 格）── */}
+                {Array.from({ length: totalDays }, (_, d) => {
+                  const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
+                  const date = addDays(origin, d)
+                  const dow = date.getDay()
+                  const wknd = dow === 0 || dow === 6
+                  const x = d * colW
+                  const wd = WEEKDAY_CN[dow]
+                  const pad = (n: number) => String(n).padStart(2, '0')
+                  const label = colW < 24
+                    ? `${date.getDate()}`
+                    : colW < 60
+                    ? `${date.getDate()} ${wd}`
+                    : colW < 180
+                    ? `${pad(date.getMonth() + 1)}月${pad(date.getDate())}日(${wd})`
+                    : `${date.getFullYear()}年${pad(date.getMonth() + 1)}月${pad(date.getDate())}日(${wd})`
+                  const prevDate = d > 0 ? addDays(origin, d - 1) : null
+                  const monthBoundary = prevDate && prevDate.getMonth() !== date.getMonth()
                   return (
-                    <g key={`hd${d}`}>
+                    <g key={`htd${d}`}>
                       {wknd && (
-                        <rect x={x} y={HDR_H1} width={colW} height={HDR_H - HDR_H1} fill="#f3f4f6" opacity={0.45} />
+                        <rect x={x} y={0} width={colW} height={HDR_H1} fill="#f3f4f6" opacity={0.4} />
                       )}
-                      <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H} stroke="#e5e7eb" />
-                      <text x={x+colW/2} y={HDR_H - 6} fontSize={11} textAnchor="middle"
-                            fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
-                        {date.getDate()}
-                      </text>
+                      <line x1={x} y1={0} x2={x} y2={HDR_H1}
+                            stroke={monthBoundary ? '#9ca3af' : '#e5e7eb'} />
+                      {colW >= 7 && (
+                        <text x={x + colW / 2} y={HDR_H1 - 8} fontSize={11} textAnchor="middle"
+                              fill={wknd ? '#9ca3af' : '#374151'} fontWeight={600}>
+                          {label}
+                        </text>
+                      )}
                     </g>
                   )
-                })
-            }
+                })}
+                {(() => {
+                  // 二级：小时网格，标签密度自适应。任何能塞下数字的宽度都尽量显示。
+                  const slotW = colW / 24
+                  // 至少显示 0/12（或 0/6/12/18）的稀疏标签
+                  const labelEvery =
+                    slotW >= 50 ? 1
+                    : slotW >= 28 ? 2
+                    : slotW >= 16 ? 3
+                    : slotW >= 8  ? 6
+                    : slotW >= 4  ? 12
+                    : 0
+                  // 网格线密度：颜色按重要性区分
+                  const showAllLines = slotW >= 8
+                  const nodes: React.ReactNode[] = []
+                  for (let d = 0; d < totalDays; d++) {
+                    for (let hh = 0; hh < 24; hh++) {
+                      const x = d * colW + hh * slotW
+                      const isMidnight = hh === 0
+                      const isMajor = labelEvery > 0 && hh % labelEvery === 0
+                      // 不显示所有线时只显示标签对应的整点线
+                      if (!showAllLines && !isMidnight && !isMajor) continue
+                      const showLabel = labelEvery > 0 && hh % labelEvery === 0
+                      nodes.push(
+                        <g key={`hh${d}_${hh}`}>
+                          <line x1={x} y1={HDR_H1} x2={x} y2={HDR_H}
+                                stroke={isMidnight ? '#d1d5db' : (isMajor ? '#e5e7eb' : '#f3f4f6')} />
+                          {showLabel && (
+                            <text x={x + slotW / 2} y={HDR_H - 6} fontSize={9}
+                                  textAnchor="middle"
+                                  fill={isMidnight ? '#374151' : '#6b7280'}>
+                              {hh}
+                            </text>
+                          )}
+                        </g>
+                      )
+                    }
+                  }
+                  return nodes
+                })()}
+              </>
+            )}
             {/* Date markers aligned under day numbers */}
             {(() => {
               const nodes: React.ReactNode[] = []
               const LBL_Y = HDR_H
-              const ps = currentProject?.start_date?.split('T')[0]
-              let pe = currentProject?.end_date?.split('T')[0]
-              if (!pe) {
-                let mx = ''
-                tasks.forEach(t => {
-                  const d = t.end_date?.split('T')[0]
-                  if (d && d > mx) mx = d
-                })
-                pe = mx || undefined
+              // 项目起止：结束日期始终取 max(项目设定 end_date, 所有任务最晚 end_date)
+              const psRaw = currentProject?.start_date ?? null
+              let maxTaskEnd = ''
+              tasks.forEach(t => {
+                const e = t.end_date ? String(t.end_date) : ''
+                if (e && e > maxTaskEnd) maxTaskEnd = e
+              })
+              const projEnd = currentProject?.end_date ? String(currentProject.end_date) : ''
+              let peRaw: string | null = null
+              if (projEnd && maxTaskEnd) peRaw = projEnd > maxTaskEnd ? projEnd : maxTaskEnd
+              else peRaw = projEnd || maxTaskEnd || null
+              const toMarkerDate = (s: string) => {
+                if (isMinute) return new Date(s)
+                const d = s.includes('T') ? s.split('T')[0] : s
+                return new Date(d + 'T00:00:00')
               }
-              if (ps) {
-                const x = dateToX(new Date(ps + 'T00:00:00'))
+              if (psRaw) {
+                const x = dateToX(toMarkerDate(psRaw))
                 nodes.push(
                   <text key="lbl-ps" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
-                        fill="#dc2626" fontWeight={600}>开始日期</text>
+                        fill="#dc2626" fontWeight={600}>{isMinute ? '开始时间' : '开始日期'}</text>
                 )
               }
               if (statusDate) {
                 const x = dateToX(new Date(statusDate))
                 nodes.push(
                   <text key="lbl-sd" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
-                        fill="#ef4444" fontWeight={600}>状态日期</text>
+                        fill="#ef4444" fontWeight={600}>{isMinute ? '状态时间' : '状态日期'}</text>
                 )
               }
-              if (pe) {
-                const x = dateToX(new Date(pe + 'T00:00:00'))
+              if (peRaw) {
+                const x = dateToX(toMarkerDate(peRaw))
                 nodes.push(
                   <text key="lbl-pe" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
-                        fill="#dc2626" fontWeight={600}>结束日期</text>
+                        fill="#dc2626" fontWeight={600}>{isMinute ? '结束时间' : '结束日期'}</text>
                 )
               }
               for (const pl of projectLines) {
@@ -3736,7 +3969,7 @@ export default function GanttChart({
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2
                   const lag = dep.lag ?? 0
-                  const lagLabel = `延迟 ${lag >= 0 ? '+' : ''}${lag} 天`
+                  const lagLabel = `延迟 ${fmtMinDur(lag, { signed: true })}`
                   const badgeW = Math.max(72, lagLabel.length * 8 + 12)
                   const badgeH = 20
                   const bx = mx - badgeW / 2
@@ -3779,7 +4012,10 @@ export default function GanttChart({
             const t = row.task
             if (!t.start_date || !t.end_date) return null
             const x  = dateToX(new Date(t.start_date))
-            const w  = Math.max(colW*0.4, dateToX(new Date(t.end_date))-x)
+            // 最小条宽：天级用 0.4 个列宽（保证不足一天的任务可见）；
+            // 分钟级走绝对像素，避免小时级任务被拉成"一天"宽。
+            const minW = isMinute ? 4 : colW * 0.4
+            const w  = Math.max(minW, dateToX(new Date(t.end_date))-x)
             const y  = i*ROW_H + BAR_TOP
             const isDragging = !!previewMap[t.id]
 
@@ -3966,7 +4202,7 @@ export default function GanttChart({
           {/* 依赖线拖拽中的 lag 提示 */}
           {depDrag && depDrag.dragging && (() => {
             const newLag = depDrag.startLag + depDrag.deltaDays
-            const label = `延迟 ${newLag >= 0 ? '+' : ''}${newLag} 天`
+            const label = `延迟 ${fmtMinDur(newLag, { signed: true })}`
             const badgeW = Math.max(72, label.length * 9)
             const bx = depDrag.labelX - badgeW/2
             const by = depDrag.labelY - 28
@@ -3996,18 +4232,24 @@ export default function GanttChart({
           {/* Project start / end lines */}
           {(() => {
             const nodes: React.ReactNode[] = []
-            const ps = currentProject?.start_date?.split('T')[0]
-            let pe = currentProject?.end_date?.split('T')[0]
-            if (!pe) {
-              let mx = ''
-              tasks.forEach(t => {
-                const d = t.end_date?.split('T')[0]
-                if (d && d > mx) mx = d
-              })
-              pe = mx || undefined
+            const psRaw = currentProject?.start_date ?? null
+            // 结束线对齐到 max(项目 end_date, 所有任务最晚 end_date)
+            let maxTaskEnd = ''
+            tasks.forEach(t => {
+              const e = t.end_date ? String(t.end_date) : ''
+              if (e && e > maxTaskEnd) maxTaskEnd = e
+            })
+            const projEnd = currentProject?.end_date ? String(currentProject.end_date) : ''
+            let peRaw: string | null = null
+            if (projEnd && maxTaskEnd) peRaw = projEnd > maxTaskEnd ? projEnd : maxTaskEnd
+            else peRaw = projEnd || maxTaskEnd || null
+            const toLineDate = (s: string) => {
+              if (isMinute) return new Date(s)
+              const d = s.includes('T') ? s.split('T')[0] : s
+              return new Date(d + 'T00:00:00')
             }
-            if (ps) {
-              const px = dateToX(new Date(ps + 'T00:00:00'))
+            if (psRaw) {
+              const px = dateToX(toLineDate(psRaw))
               nodes.push(
                 <g key="proj-start">
                   <line x1={px} y1={0} x2={px} y2={totalH}
@@ -4015,8 +4257,8 @@ export default function GanttChart({
                 </g>
               )
             }
-            if (pe) {
-              const px = dateToX(new Date(pe + 'T00:00:00'))
+            if (peRaw) {
+              const px = dateToX(toLineDate(peRaw))
               nodes.push(
                 <g key="proj-end">
                   <line x1={px} y1={0} x2={px} y2={totalH}
@@ -4140,10 +4382,13 @@ export default function GanttChart({
 
             <Sep />
 
-            {/* Group 3: Convert to milestone */}
+            {/* Group 3: Convert to milestone / toggle auto-schedule */}
             <Row icon={IcoDiamond}
                  label={task.is_milestone ? '转换为普通任务' : '转换为里程碑'}
                  onClick={() => handleCtxConvertMilestone(ctxMenu.taskId)} />
+            <Row icon={IcoAuto}
+                 label={task.auto_schedule === false ? '设为自动任务' : '设为手动任务'}
+                 onClick={() => handleCtxToggleAutoSchedule(ctxMenu.taskId)} />
 
             <Sep />
 

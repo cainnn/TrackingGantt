@@ -22,12 +22,14 @@ export async function GET(req: NextRequest) {
            COALESCE(SUM(
              t.duration *
              CASE
-               WHEN $2::date IS NULL THEN t.percent_done / 100.0
-               WHEN t.end_date <= $2::date THEN 1.0
-               WHEN t.start_date >= $2::date THEN 0
+               WHEN $2::timestamp IS NULL THEN t.percent_done / 100.0
+               WHEN t.end_date <= $2::timestamp THEN 1.0
+               WHEN t.start_date >= $2::timestamp THEN 0
                ELSE LEAST(1.0,
-                 GREATEST(0, ($2::date - t.start_date)::numeric
-                           / NULLIF((t.end_date - t.start_date)::numeric, 0)))
+                 GREATEST(0,
+                   EXTRACT(EPOCH FROM ($2::timestamp - t.start_date))
+                   / NULLIF(EXTRACT(EPOCH FROM (t.end_date - t.start_date)), 0)
+                 ))
              END
            ), 0) as completed_duration
          FROM tasks t
@@ -79,12 +81,14 @@ export async function POST(req: NextRequest) {
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 
   const body = await req.json()
-  const { name, start_date, end_date, status_date, copy_from } = body as {
+  const { name, start_date, end_date, status_date, copy_from, time_granularity, use_template } = body as {
     name?: string
     start_date?: string
     end_date?: string
     status_date?: string
-    copy_from?: string // source project id to copy tasks from
+    copy_from?: string
+    time_granularity?: 'day' | 'minute'
+    use_template?: boolean
   }
 
   if (!name) {
@@ -104,14 +108,21 @@ export async function POST(req: NextRequest) {
     srcProject = srcRes.rows[0]
   }
 
+  // 粒度：显式传入 > 复制源继承 > 默认天级
+  const granularity: 'day' | 'minute' =
+    time_granularity === 'minute' || time_granularity === 'day'
+      ? time_granularity
+      : ((srcProject?.time_granularity as 'day' | 'minute' | undefined) ?? 'day')
+
   const result = await pool.query(
-    'INSERT INTO projects (user_id, name, start_date, end_date, status_date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    'INSERT INTO projects (user_id, name, start_date, end_date, status_date, time_granularity) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
     [
       auth.value.userId,
       name,
       start_date ?? (srcProject?.start_date as string | null) ?? null,
       end_date ?? (srcProject?.end_date as string | null) ?? null,
       status_date ?? (srcProject?.status_date as string | null) ?? null,
+      granularity,
     ]
   )
   const newProject = result.rows[0]
@@ -183,6 +194,51 @@ export async function POST(req: NextRequest) {
     } catch (err) {
       console.error('Copy project tasks error:', err)
       // Project was created, tasks copy failed - still return project
+    }
+  } else if (use_template === true) {
+    // 新建（未复制、勾选默认模板）项目：种 10 个任务，链式 FS 依赖
+    //   分钟级：每个 1 小时（60 分钟），按 09:00 起每小时一格
+    //   天级：每个 1 天（1440 分钟），按当天 00:00 起每天一格
+    try {
+      const projectStart = newProject.start_date as Date | string | null
+      let startDt = projectStart instanceof Date
+        ? projectStart
+        : (projectStart ? new Date(projectStart as string) : new Date())
+      if (isNaN(startDt.getTime())) startDt = new Date()
+      // 天级：把起点对齐到 00:00
+      if (granularity === 'day') {
+        startDt = new Date(startDt.getFullYear(), startDt.getMonth(), startDt.getDate(), 0, 0, 0)
+      }
+      const stepMin = granularity === 'minute' ? 60 : 1440  // 每任务间隔 + 时长
+      const durUnit = granularity === 'minute' ? 'minute' : 'day'
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const fmt = (d: Date) =>
+        `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}` +
+        `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+      const taskIds: string[] = []
+      for (let i = 0; i < 10; i++) {
+        const tStart = new Date(startDt.getTime() + i * stepMin * 60_000)
+        const tEnd = new Date(startDt.getTime() + (i + 1) * stepMin * 60_000)
+        const id = randomUUID()
+        taskIds.push(id)
+        await pool.query(
+          `INSERT INTO tasks (id, project_id, task_code, name, start_date, end_date,
+            duration, duration_unit, is_milestone, auto_schedule, order_index,
+            is_deleted, percent_done, constraint_type)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,true,$9,false,0,'asap')`,
+          [id, newProject.id, String(i + 1), `任务${i + 1}`, fmt(tStart), fmt(tEnd), stepMin, durUnit, i + 1]
+        )
+      }
+      // 链式 FS 依赖：任务 i+1 → 任务 i+2
+      for (let i = 0; i < taskIds.length - 1; i++) {
+        await pool.query(
+          `INSERT INTO dependencies (project_id, from_task_id, to_task_id, type, lag)
+           VALUES ($1,$2,$3,2,0)`,
+          [newProject.id, taskIds[i], taskIds[i + 1]]
+        )
+      }
+    } catch (err) {
+      console.error('Seed project tasks error:', err)
     }
   }
 

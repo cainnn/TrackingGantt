@@ -54,11 +54,12 @@ export async function POST(req: NextRequest, { params }: Params) {
         return NextResponse.json(failure('Predecessor has no end date', 400), { status: 400 })
       }
 
-      // end_date 已是排他的（任务最后一天的下一天），直接作为后继任务开始日期
-      // 使用安全的本地日期解析，避免时区偏移
+      // 分钟级：保留 HH:mm:ss
+      const pad = (n: number) => String(n).padStart(2, '0')
       const predEnd = predecessorEndDate instanceof Date
-        ? `${predecessorEndDate.getFullYear()}-${String(predecessorEndDate.getMonth()+1).padStart(2,'0')}-${String(predecessorEndDate.getDate()).padStart(2,'0')}`
-        : String(predecessorEndDate).split('T')[0]
+        ? `${predecessorEndDate.getFullYear()}-${pad(predecessorEndDate.getMonth()+1)}-${pad(predecessorEndDate.getDate())}` +
+          `T${pad(predecessorEndDate.getHours())}:${pad(predecessorEndDate.getMinutes())}:${pad(predecessorEndDate.getSeconds())}`
+        : String(predecessorEndDate).replace(' ', 'T').slice(0, 19)
       const newStartDateStr = predEnd
 
       // 获取任务工期

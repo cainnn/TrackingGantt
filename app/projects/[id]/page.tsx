@@ -1,10 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setTasks, clearTasks, clearViewSnapshot } from '@/store/slices/tasksSlice'
+import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slices/tasksSlice'
+import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
+import { toDateTimeStr } from '@/lib/clientTime'
+import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
@@ -24,8 +27,9 @@ const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ),
 })
 
-const COL_W_MAX  = 56
-const ZOOM_LEVELS = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
+// colW = 像素 / 天。天级项目止于 56；分钟级延伸到 2880（每分钟 2px）。
+const ZOOM_LEVELS_DAY    = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
+const ZOOM_LEVELS_MINUTE = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56, 84, 120, 240, 480, 720, 1440, 2880]
 
 export default function ProjectPage() {
   const params    = useParams()
@@ -45,8 +49,22 @@ export default function ProjectPage() {
     return v?.status_date ?? currentProject?.status_date ?? null
   }, [viewSnapshot, versions, currentProject?.status_date])
   const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, effectiveStatusDate), [tasks, effectiveStatusDate])
+  // 项目精度（创建时固定）
+  const isMinute = currentProject?.time_granularity === 'minute'
+  const zoomLevels = isMinute ? ZOOM_LEVELS_MINUTE : ZOOM_LEVELS_DAY
+  const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
+  // 分钟级项目首次加载时把默认列宽提到 480（Mode 1 小时可见），
+  // 用户继续放大到 1440 自动切 Mode 2 (小时+15min)。
+  const colWInitRef = useRef(false)
+  useEffect(() => {
+    if (colWInitRef.current) return
+    if (currentProject?.time_granularity === 'minute' && colW === 28) {
+      setColW(480)
+    }
+    if (currentProject) colWInitRef.current = true
+  }, [currentProject, colW])
   const [searchQuery,       setSearchQuery]       = useState('')
   const [expandAllSignal,   setExpandAllSignal]   = useState(0)
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
@@ -112,12 +130,38 @@ export default function ProjectPage() {
         }
         dispatch(setCurrentProject(pr.value))
         if (tr.ok && tr.value) {
-          dispatch(
-            setTasks({
-              tasks: Array.isArray(tr.value.tasks) ? tr.value.tasks : [],
-              dependencies: Array.isArray(tr.value.dependencies) ? tr.value.dependencies : [],
-            })
-          )
+          let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
+          const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
+          // 自动起点锚定：无依赖 + auto_schedule 的任务起点不早于
+          //   max(项目开始时间, 当前时间)。
+          // 天级项目把锚点对齐到当天 00:00，避免任务带 sub-day 时间。
+          const projIsMinute = pr.value?.time_granularity === 'minute'
+          const now = new Date()
+          const pad = (n: number) => String(n).padStart(2, '0')
+          const nowStr = projIsMinute
+            ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+            : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+          const projStartRaw = toDateTimeStr(pr.value?.start_date ?? null)
+          const projStart = !projIsMinute && projStartRaw
+            ? `${projStartRaw.slice(0, 10)}T00:00:00`
+            : projStartRaw
+          const earliest = projStart && projStart > nowStr ? projStart : nowStr
+          const anchored = applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
+          let dirtyIds: string[] = []
+          if (anchored.length > 0) {
+            const byId = new Map(anchored.map(t => [t.id, t]))
+            loadedTasks = loadedTasks.map(t => byId.get(t.id) ?? t)
+            dirtyIds = anchored.map(t => t.id)
+            // 再跑一次级联，让下游跟着前移
+            const cascaded = runFullCascade(loadedTasks, loadedDeps)
+            if (cascaded.length > 0) {
+              const cByid = new Map(cascaded.map(t => [t.id, t]))
+              loadedTasks = loadedTasks.map(t => cByid.get(t.id) ?? t)
+              dirtyIds = [...new Set([...dirtyIds, ...cascaded.map(t => t.id)])]
+            }
+          }
+          dispatch(setTasks({ tasks: loadedTasks, dependencies: loadedDeps }))
+          if (dirtyIds.length > 0) dispatch(markDirty(dirtyIds))
         }
         if (plr.ok && Array.isArray(plr.value)) {
           dispatch(setProjectLines(plr.value))
@@ -182,14 +226,15 @@ export default function ProjectPage() {
       <GanttToolbar
         projectId={projectId}
         readOnly={isViewOnly}
+        isMinute={isMinute}
         colW={colW}
         onZoomIn={() => setColW(w => {
-          const idx = ZOOM_LEVELS.indexOf(w)
-          return idx < 0 ? Math.min(COL_W_MAX, w + 7) : ZOOM_LEVELS[Math.min(idx + 1, ZOOM_LEVELS.length - 1)]
+          const idx = zoomLevels.indexOf(w)
+          return idx < 0 ? Math.min(zoomMax, w + 7) : zoomLevels[Math.min(idx + 1, zoomLevels.length - 1)]
         })}
         onZoomOut={() => setColW(w => {
-          const idx = ZOOM_LEVELS.indexOf(w)
-          return idx < 0 ? Math.max(ZOOM_LEVELS[0], w - 7) : ZOOM_LEVELS[Math.max(idx - 1, 0)]
+          const idx = zoomLevels.indexOf(w)
+          return idx < 0 ? Math.max(zoomLevels[0], w - 7) : zoomLevels[Math.max(idx - 1, 0)]
         })}
         onExpandAll={() => setExpandAllSignal(n => n + 1)}
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
@@ -218,6 +263,7 @@ export default function ProjectPage() {
         <div className="flex-1 overflow-hidden">
           <GanttChart
             projectId={projectId}
+            isMinute={isMinute}
             statusDate={effectiveStatusDate}
             colW={colW}
             searchQuery={searchQuery}

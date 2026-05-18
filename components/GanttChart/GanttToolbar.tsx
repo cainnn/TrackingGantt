@@ -12,6 +12,8 @@ import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
+import { toDateTimeStr, addMinutesStr } from '@/lib/clientTime'
+import YmdDateInput from '@/components/YmdDateInput'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
 import { parseExcelFile, validateImportData, type ImportTask, type ImportDep, type ImportProjectLine } from '@/lib/client/excelImport'
@@ -20,7 +22,7 @@ import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsCon
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
 import { buildSaveDiff, hasAnyDiff } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import type { Dependency } from '@/types'
@@ -119,59 +121,13 @@ const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="n
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V2M5 5l3-3 3 3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 
-// 年-月-日顺序的日期输入：显示 YYYY-MM-DD，点击触发原生日历选择
-function YmdDateInput({
-  value, max, min, onChange,
-}: {
-  value: string
-  max?: string
-  min?: string
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
-}) {
-  const ref = useRef<HTMLInputElement>(null)
-  const openPicker = () => {
-    const el = ref.current
-    if (!el) return
-    if (typeof el.showPicker === 'function') {
-      try { el.showPicker(); return } catch { /* fall through to focus */ }
-    }
-    el.focus()
-  }
-  return (
-    <div className="relative inline-flex items-center">
-      <input
-        readOnly
-        type="text"
-        value={value}
-        placeholder="YYYY-MM-DD"
-        onClick={openPicker}
-        onFocus={openPicker}
-        className="border border-gray-300 rounded pl-2 pr-7 h-8 text-[13px] w-[120px] bg-white cursor-pointer focus:outline-none focus:border-blue-400"
-      />
-      <svg viewBox="0 0 24 24" width="14" height="14"
-           className="absolute right-2 pointer-events-none text-gray-500"
-           fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="4" width="18" height="18" rx="2"/>
-        <path d="M16 2v4M8 2v4M3 10h18"/>
-      </svg>
-      <input
-        ref={ref}
-        type="date"
-        value={value}
-        max={max}
-        min={min}
-        onChange={onChange}
-        className="absolute inset-0 opacity-0 pointer-events-none"
-        tabIndex={-1}
-      />
-    </div>
-  )
-}
+// YmdDateInput 提取到 components/YmdDateInput.tsx 复用
 
 // ── Props ─────────────────────────────────────────────────────────────────
 interface GanttToolbarProps {
   projectId: string
   readOnly?: boolean
+  isMinute?: boolean  // 项目精度：true=分钟级，false=天级
   colW: number
   onZoomIn: () => void
   onZoomOut: () => void
@@ -197,6 +153,7 @@ interface GanttToolbarProps {
 export default function GanttToolbar({
   projectId,
   readOnly,
+  isMinute = false,
   colW, onZoomIn, onZoomOut,
   onExpandAll, onCollapseAll,
   onFocusTask,
@@ -220,9 +177,10 @@ export default function GanttToolbar({
   const { versions } = useAppSelector(s => s.versions)
 
   // 上一版本带状态日期的快照（保存时校验：新版本状态日期必须严格大于旧版本）
+  // 分钟级：保留完整 datetime，不再裁到日。
   const lastVersionDate = React.useMemo(() => {
     const latest = versions.find(v => !v.is_autosave && v.status_date)
-    return latest?.status_date?.split('T')[0] ?? null
+    return toDateTimeStr(latest?.status_date ?? null)
   }, [versions])
 
   // Column settings dropdown
@@ -548,37 +506,154 @@ export default function GanttToolbar({
   const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0) &&
     changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
-  // 初始加载时，拉取版本列表
+  // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
+  const initVersionRef = useRef(false)
   useEffect(() => {
     authFetch(`/api/versions/${projectId}?list=1`)
       .then(r => r.json())
-      .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
+      .then(async d => {
+        if (!d.ok || !Array.isArray(d.value)) return
+        dispatch(setVersions(d.value))
+        if (initVersionRef.current) return
+        initVersionRef.current = true
+        if (readOnly) return
+        // 只在没有任何版本（含 autosave）且当前有任务时创建初始版本
+        const hasAny = d.value.length > 0
+        if (hasAny) return
+        const hasTasks = autosaveRef.current.tasks.some(t => !t.is_deleted)
+        if (!hasTasks) return
+        const now = new Date()
+        const pad = (n: number) => String(n).padStart(2, '0')
+        const sd = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}` +
+                   `T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+        try {
+          const r = await authFetch(`/api/versions/${projectId}`, {
+            method: 'POST',
+            headers: authFetchHeaders(true),
+            body: JSON.stringify({
+              tasks: autosaveRef.current.tasks,
+              dependencies: autosaveRef.current.dependencies,
+              status_date: sd,
+              name: '初始版本',
+              description: '项目首次进入时自动创建的基线快照',
+              is_autosave: false,
+            }),
+          })
+          if (r.ok) {
+            const r2 = await authFetch(`/api/versions/${projectId}?list=1`)
+            const d2 = await r2.json()
+            if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value))
+          }
+        } catch { /* silent */ }
+      })
       .catch(() => {})
-  }, [projectId, dispatch])
+  }, [projectId, dispatch, readOnly])
 
-  // ── 自动保存快照（5 分钟间隔，仅在有未保存编辑时触发） ──
+  // ── 自动保存：把脏数据直接落库到 tasks/dependencies（不创建版本快照） ──
+  // 用 ref 持有当前 state，定时器只在 mount 时建一次，避免每次编辑都重置 30 秒计时。
+  const autosaveRef = useRef({ tasks, dependencies, dirtyIds, baselineTasks, baselineDeps })
+  useEffect(() => {
+    autosaveRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
+  }, [tasks, dependencies, dirtyIds, baselineTasks, baselineDeps])
+
+  // ── 撤销历史栈：每次 tasks/deps 变化都压栈一份，"放弃更改"每点一次 pop 一步 ──
+  const historyRef = useRef<Array<{ tasks: Task[]; deps: Dependency[] }>>([])
+  const skipNextHistoryPushRef = useRef(false)
+  const HISTORY_MAX = 50
+  useEffect(() => {
+    if (skipNextHistoryPushRef.current) { skipNextHistoryPushRef.current = false; return }
+    const id = setTimeout(() => {
+      if (historyRef.current.length >= HISTORY_MAX) historyRef.current.shift()
+      historyRef.current.push({ tasks: tasks.map(t => ({ ...t })), deps: dependencies.map(d => ({ ...d })) })
+    }, 300)
+    return () => clearTimeout(id)
+  }, [tasks, dependencies])
+
   useEffect(() => {
     if (readOnly) return
-    const timer = setInterval(() => {
-      if (dirtyIds.length === 0) return
-      authFetch(`/api/versions/${projectId}`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({ tasks, dependencies, is_autosave: true }),
-      })
-        .then(r => r.json())
-        .then(d => {
-          if (d.ok) {
-            // 刷新版本列表
-            authFetch(`/api/versions/${projectId}?list=1`)
-              .then(r => r.json())
-              .then(d2 => { if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value)) })
-          }
-        })
-        .catch(() => {})
-    }, 5 * 60 * 1000)
-    return () => clearInterval(timer)
-  }, [projectId, readOnly, dirtyIds, tasks, dependencies, dispatch])
+    let busy = false
+    const flush = async () => {
+      if (busy) return
+      const cur = autosaveRef.current
+      if (cur.dirtyIds.length === 0) return
+      const diff = buildSaveDiff(cur.baselineTasks, cur.baselineDeps, cur.tasks, cur.dependencies)
+      if (!hasAnyDiff(diff)) return
+      busy = true
+      try {
+        for (const depId of diff.depsToDelete) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'DELETE', headers: authFetchHeaders(true),
+            body: JSON.stringify({ id: depId }),
+          })
+          if (!r.ok) throw new Error(`autosave del-dep ${r.status}`)
+        }
+        if (diff.tasksToDelete.length > 0) {
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'DELETE', headers: authFetchHeaders(true),
+            body: JSON.stringify({ ids: diff.tasksToDelete }),
+          })
+          if (!r.ok) throw new Error(`autosave del-task ${r.status}`)
+        }
+        if (diff.tasksToAdd.length > 0) {
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'POST', headers: authFetchHeaders(true),
+            body: JSON.stringify(diff.tasksToAdd),
+          })
+          if (!r.ok) throw new Error(`autosave add-task ${r.status}`)
+        }
+        if (diff.tasksToUpdate.length > 0) {
+          const payload = diff.tasksToUpdate.map(t => ({
+            id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
+            duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
+            order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
+            assignee: t.assignee, note: t.note,
+            constraint_type: t.constraint_type, constraint_date: t.constraint_date,
+            status: t.status, deadline: t.deadline,
+            rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
+            baseline_end_date: t.baseline_end_date, task_code: t.task_code,
+          }))
+          const r = await authFetch(`/api/tasks/${projectId}`, {
+            method: 'PUT', headers: authFetchHeaders(true),
+            body: JSON.stringify(payload),
+          })
+          if (!r.ok) throw new Error(`autosave upd-task ${r.status}`)
+        }
+        for (const dep of diff.depsToAdd) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'POST', headers: authFetchHeaders(true),
+            body: JSON.stringify({
+              id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
+              type: dep.type, lag: dep.lag, active: dep.active ?? true,
+            }),
+          })
+          if (!r.ok) throw new Error(`autosave add-dep ${r.status}`)
+        }
+        for (const dep of diff.depsToUpdate) {
+          const r = await authFetch(`/api/dependencies/${projectId}`, {
+            method: 'PUT', headers: authFetchHeaders(true),
+            body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true }),
+          })
+          if (!r.ok) throw new Error(`autosave upd-dep ${r.status}`)
+        }
+        // 成功：更新基线 + 清 dirty
+        const living = cur.tasks.filter(t => !t.is_deleted)
+        setBaselineTasks(living.map(t => ({ ...t })))
+        setBaselineDeps(cur.dependencies.map(d => ({ ...d })))
+        dispatch(clearDirty())
+      } catch (e) {
+        console.warn('[autosave] failed:', e)
+      } finally {
+        busy = false
+      }
+    }
+    const timer = setInterval(flush, 10 * 1000)  // 10 秒一次
+    const onBeforeUnload = () => { void flush() }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+    }
+  }, [projectId, readOnly, dispatch])
 
   // ── Export ─────────────────────────────────────────────────────────────
   const projectLines = useAppSelector(s => s.projectLines.lines)
@@ -1264,25 +1339,24 @@ export default function GanttToolbar({
 
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
-    const sd = currentProject?.status_date?.split('T')[0] ?? null
+    const sd = toDateTimeStr(currentProject?.status_date ?? null)
     if (!sd || statusDateSaving) return
 
-    // 保存时校验状态日期：1) 不晚于今天 2) 不早于今天-3 3) 严格大于上一版本
-    const now = new Date()
-    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    const today = fmt(now)
-    if (sd > today) {
-      alert(`无法保存：状态日期 ${sd} 晚于今天 (${today})`)
+    // 保存时校验：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
+    const sdLabel = isMinute ? '状态时间' : '状态日期'
+    const nowStr = toDateTimeStr(new Date())!
+    const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
+    if (sd > nowStr) {
+      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
       return
     }
-    const earliest = new Date(now); earliest.setDate(earliest.getDate() - 3)
-    const earliestStr = fmt(earliest)
+    const earliestStr = addMinutesStr(nowStr, -3 * 24 * 60)!
     if (sd < earliestStr) {
-      alert(`无法保存：状态日期 ${sd} 早于 ${earliestStr}（仅允许保存最近 3 天内的状态日期）`)
+      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 早于 ${fmtDt(earliestStr)}（仅允许最近 72 小时内）`)
       return
     }
     if (lastVersionDate && sd <= lastVersionDate) {
-      alert(`无法保存：状态日期必须晚于上一版本 (${lastVersionDate})`)
+      alert(`无法保存：${sdLabel}必须晚于上一版本 (${fmtDt(lastVersionDate)})`)
       return
     }
 
@@ -1441,17 +1515,59 @@ export default function GanttToolbar({
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
       baselineTasks, baselineDeps, lastVersionDate])
 
-  // ── 放弃更改：重新加载 DB 状态（所有本地编辑被丢弃，因为它们从未入库）
+  // ── 重排对齐：把无前置依赖 + 自动模式的任务强制 snap 到 anchor，并跑级联 ──
+  const handleRealign = useCallback(() => {
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const nowStr = isMinute
+      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
+      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
+    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
+    const projStart = !isMinute && projRaw
+      ? `${projRaw.slice(0, 10)}T00:00:00`
+      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
+    const anchor = projStart && projStart > nowStr ? projStart : nowStr
+    let baseTasks = tasks
+    const merged = new Map<string, Task>()
+    // 重排对齐用 snap 模式：无依赖任务整体对齐到 anchor（push + pull 都做）
+    const anchored = applyAutoStartAnchor(baseTasks, dependencies, anchor, 'snap')
+    for (const t of anchored) merged.set(t.id, t)
+    if (anchored.length > 0) baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
+    const cascaded = runFullCascade(baseTasks, dependencies)
+    for (const t of cascaded) merged.set(t.id, t)
+    if (merged.size === 0) {
+      // 已对齐：给个无操作反馈
+      alert('所有任务已对齐到当前 anchor，无需重排')
+      return
+    }
+    const list = Array.from(merged.values())
+    dispatch(updateTasks(list))
+    dispatch(markDirty(list.map(t => t.id)))
+  }, [tasks, dependencies, isMinute, currentProject?.start_date, dispatch])
+
+  // ── 放弃更改：先尝试从撤销栈 pop 一步（多步可用），栈空再 reload DB ──
   const handleRefresh = useCallback(async () => {
+    // 至少需要 2 条历史：当前状态 + 上一步
+    if (historyRef.current.length >= 2) {
+      historyRef.current.pop()  // 弹掉当前
+      const prev = historyRef.current[historyRef.current.length - 1]
+      skipNextHistoryPushRef.current = true
+      dispatch(setTasks({ tasks: prev.tasks, dependencies: prev.deps }))
+      // dirtyIds 保持，由 autosave 决定后续是否落库
+      return
+    }
+    // 历史栈空 → 回退到 DB 状态
     try {
       const res = await authFetch(`/api/tasks/${projectId}`)
       const data = await res.json()
       if (data.ok && data.value) {
         const freshTasks = Array.isArray(data.value.tasks) ? data.value.tasks : []
         const freshDeps = Array.isArray(data.value.dependencies) ? data.value.dependencies : []
+        skipNextHistoryPushRef.current = true
         dispatch(setTasks({ tasks: freshTasks, dependencies: freshDeps }))
         dispatch(clearDirty())
         dispatch(clearComparison())
+        historyRef.current = []
         const livingTasks = freshTasks.filter((t: Task) => !t.is_deleted)
         setBaseline(livingTasks.map((t: Task) => ({
           id: t.id, task_code: t.task_code, name: t.name,
@@ -1562,33 +1678,34 @@ export default function GanttToolbar({
 
             {/* Status date */}
             <div className="flex items-center gap-1.5 relative">
-              <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
+              <span className="text-xs text-gray-500 whitespace-nowrap">{isMinute ? '状态时间' : '状态日期'}</span>
               {(() => {
-                const v = currentProject?.status_date?.split('T')[0] ?? ''
+                const v = currentProject?.status_date ?? ''
                 return (
-                  <YmdDateInput value={v} onChange={handleStatusDatePick} />
+                  <YmdDateInput value={v} onChange={handleStatusDatePick} includeTime={isMinute} />
                 )
               })()}
               {(() => {
-                const sd = currentProject?.status_date?.split('T')[0] ?? null
-                const now = new Date()
-                const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-                const isFuture = !!sd && sd > today
+                const sd = toDateTimeStr(currentProject?.status_date ?? null)
+                const nowStr = toDateTimeStr(new Date())!
+                const isFuture = !!sd && sd > nowStr
                 const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
+                const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
+                const sdLabel = isMinute ? '状态时间' : '状态日期'
                 const tip = !sd
-                  ? '请先设置状态日期'
-                  : isFuture ? `状态日期不能晚于今天 (${today})`
+                  ? `请先设置${sdLabel}`
+                  : isFuture ? `${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
-                      if (!sd) { alert('请先设置状态日期'); return }
-                      if (sd > today) {
-                        alert(`状态日期不能晚于今天 (${today})`); return
+                      if (!sd) { alert(`请先设置${sdLabel}`); return }
+                      if (sd > nowStr) {
+                        alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
                       }
                       if (lastVersionDate && sd < lastVersionDate) {
-                        alert(`状态日期不能早于上一版本 (${lastVersionDate})`); return
+                        alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
                       }
                       openReview()
                     }}
@@ -1608,13 +1725,19 @@ export default function GanttToolbar({
               })()}
               {!readOnly && (
                 <button
+                  onClick={handleRealign}
+                  title="把无前置依赖 + 自动模式的任务拉回今天（或项目开始日期），并跑链式级联"
+                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
+                >
+                  <IcoRefresh />
+                  重排对齐
+                </button>
+              )}
+              {!readOnly && (
+                <button
                   onClick={handleRefresh}
-                  disabled={!hasChanges}
-                  title="放弃所有未保存的更改"
-                  className={`inline-flex items-center gap-1 px-2.5 h-8 rounded border text-[13px] font-medium transition-colors
-                    ${hasChanges
-                      ? 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer'
-                      : 'border-gray-200 text-gray-300 bg-gray-50 cursor-not-allowed'}`}
+                  title="撤销一步本地编辑；栈空后回到数据库的当前状态"
+                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
                 >
                   <IcoRefresh />
                   放弃更改
@@ -1706,10 +1829,11 @@ export default function GanttToolbar({
         {readOnly && (
           <>
             {sep}
-            <span className="text-xs text-gray-500 whitespace-nowrap">状态日期</span>
+            <span className="text-xs text-gray-500 whitespace-nowrap">{isMinute ? '状态时间' : '状态日期'}</span>
             <YmdDateInput
-              value={currentProject?.status_date?.split('T')[0] ?? ''}
+              value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
+              includeTime={isMinute}
             />
           </>
         )}

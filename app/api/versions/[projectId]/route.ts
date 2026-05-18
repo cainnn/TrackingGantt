@@ -91,13 +91,21 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
     const lastVersion = lastRes.rows[0] ?? null
     if (statusDate && lastVersion?.status_date) {
-      const lastSD = typeof lastVersion.status_date === 'string'
-        ? lastVersion.status_date.split('T')[0]
-        : new Date(lastVersion.status_date).toISOString().split('T')[0]
-      if (statusDate < lastSD) {
+      // 分钟级：完整 datetime 比较，避免同日不同时间被误判
+      const toIso = (v: unknown): string => {
+        if (v instanceof Date) {
+          const pad = (n: number) => String(n).padStart(2, '0')
+          return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}` +
+                 `T${pad(v.getHours())}:${pad(v.getMinutes())}:${pad(v.getSeconds())}`
+        }
+        return String(v).replace(' ', 'T').slice(0, 19)
+      }
+      const lastSD = toIso(lastVersion.status_date)
+      const curSD = toIso(statusDate)
+      if (curSD < lastSD) {
         await client.query('ROLLBACK')
         client.release()
-        return NextResponse.json(failure(`状态日期不能早于上一版本 (${lastSD})`, 400), { status: 400 })
+        return NextResponse.json(failure(`状态日期不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
       }
     }
 

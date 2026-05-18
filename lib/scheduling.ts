@@ -16,45 +16,28 @@ export type DepRow = {
   lag: number
 }
 
-// ── 日期工具函数（统一使用本地时间避免时区偏移） ──────────────────────────
-/** 将各种日期格式归一化为 YYYY-MM-DD 字符串 */
+// ── 日期工具函数（分钟级；保留原函数名以减少改动面） ──────────────────────
+// 由 lib/clientTime.ts 提供的原语统一处理 'YYYY-MM-DDTHH:mm:00' 本地时间字符串。
+import { toDateTimeStr, addMinutesStr, diffMinutesStr, parseLocal } from './clientTime'
+
+/** 归一化为 ISO datetime 'YYYY-MM-DDTHH:mm:00' */
 export function toDateStr(v: string | Date | null | undefined): string | null {
-  if (!v) return null
-  if (v instanceof Date) {
-    if (isNaN(v.getTime())) return null
-    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`
-  }
-  const s = String(v).trim()
-  if (!s) return null
-  const part = s.includes('T') ? s.split('T')[0] : s.split(/\s/)[0]
-  return part || null
+  return toDateTimeStr(v)
 }
 
-/** 安全地将 YYYY-MM-DD 字符串解析为本地 Date（避免 UTC 偏移） */
+/** 解析为本地 Date 对象 */
 export function parseDateLocal(s: string | null): Date | null {
-  if (!s) return null
-  // 关键：使用 'T00:00:00' 后缀确保按本地时间解析，而非 UTC
-  const d = new Date(s + 'T00:00:00')
-  if (isNaN(d.getTime())) return null
-  return d
+  return parseLocal(s)
 }
 
-/** 日期加减天数，返回 YYYY-MM-DD */
-export function addDaysStr(dateStr: string | null, days: number): string | null {
-  const s = toDateStr(dateStr)
-  if (!s) return null
-  const d = parseDateLocal(s)
-  if (!d) return null
-  d.setDate(d.getDate() + days)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+/** 加减分钟（callers 仍按"分钟数"传参；duration / lag 现在均为分钟） */
+export function addDaysStr(dateStr: string | null, minutes: number): string | null {
+  return addMinutesStr(dateStr, minutes)
 }
 
-/** 计算两个日期字符串之间的天数差 */
+/** 两个 datetime 字符串之间的分钟差 */
 export function diffDaysStr(a: string, b: string): number {
-  const da = parseDateLocal(toDateStr(a)!)
-  const db = parseDateLocal(toDateStr(b)!)
-  if (!da || !db) return 0
-  return Math.round((db.getTime() - da.getTime()) / 86400000)
+  return diffMinutesStr(a, b)
 }
 
 // ── 循环依赖检测 ─────────────────────────────────────────────────────────

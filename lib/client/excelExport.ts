@@ -4,11 +4,19 @@ import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine } from '@/types'
 import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
+import { formatMinDuration } from '@/lib/clientTime'
 
-function diffDaysYMD(a: string, b: string): number {
-  const sa = new Date(a + 'T00:00:00').getTime()
-  const sb = new Date(b + 'T00:00:00').getTime()
-  return Math.round((sb - sa) / 86_400_000)
+function diffMinsRaw(a: string, b: string): number {
+  return Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60_000)
+}
+
+// 单元格 datetime 显示：'YYYY-MM-DD HH:mm'，无时间则只显示日期
+function fmtCellDt(v: string | null | undefined): string {
+  if (!v) return ''
+  const s = String(v)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}))?/)
+  if (!m) return s
+  return m[2] ? `${m[1]} ${m[2]}:${m[3]}` : m[1]
 }
 
 function buildStatusText(
@@ -27,12 +35,12 @@ function buildStatusText(
   const label = (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed'))
     ? `新任务，${baseLabel}`
     : baseLabel
-  const b = t.baseline_end_date ? String(t.baseline_end_date).split('T')[0] : null
-  const e = t.end_date ? String(t.end_date).split('T')[0] : null
+  const b = t.baseline_end_date ? String(t.baseline_end_date) : null
+  const e = t.end_date ? String(t.end_date) : null
   let delta = ''
   if (b && e) {
-    const days = diffDaysYMD(b, e)
-    if (days !== 0) delta = ` ${days > 0 ? '+' : ''}${days}天`
+    const mins = diffMinsRaw(b, e)
+    if (mins !== 0) delta = ` ${formatMinDuration(mins, { signed: true })}`
   }
   const reasonSuffix = reason ? `（${reason}）` : ''
   return `${label}${delta}${reasonSuffix}`
@@ -103,7 +111,7 @@ const COLUMNS: Partial<ExcelJS.Column>[] = [
   { header: '责任人',   key: 'assignee',  width: 12 },
   { header: '开始日期', key: 'start_date', width: 13 },
   { header: '结束日期', key: 'end_date',  width: 13 },
-  { header: '工期',     key: 'duration',  width: 7 },
+  { header: '工期(分钟)', key: 'duration',  width: 11 },
   { header: '里程碑',   key: 'milestone', width: 7 },
   { header: '自动排程', key: 'auto_schedule', width: 9 },
   { header: '前置依赖', key: 'predecessors', width: 22 },
@@ -160,8 +168,8 @@ function buildRowData(
     parent_code: parentCodeMap.get(t.id) ?? '',
     name: t.name,
     assignee: t.assignee ?? '',
-    start_date: t.start_date?.split('T')[0] ?? '',
-    end_date: t.end_date?.split('T')[0] ?? '',
+    start_date: fmtCellDt(t.start_date),
+    end_date: fmtCellDt(t.end_date),
     duration: t.duration ?? 0,
     milestone: t.is_milestone ? '是' : '否',
     auto_schedule: t.auto_schedule !== false ? '是' : '否',
@@ -169,13 +177,13 @@ function buildRowData(
     lag: getPredecessorLag(t.id, deps),
     percent_done: t.percent_done ?? 0,
     constraint_type: t.constraint_type ? (CTYPE_LABELS[t.constraint_type] ?? t.constraint_type) : '',
-    constraint_date: t.constraint_date?.split('T')[0] ?? '',
+    constraint_date: fmtCellDt(t.constraint_date),
     rollup: t.rollup ? '是' : '否',
     inactive: t.inactive ? '是' : '否',
     project_boundary: t.project_boundary ?? '',
     status: buildStatusText(t, statusDate, allTasks, deps, prevTaskIds, seqMap),
-    deadline: t.deadline?.split('T')[0] ?? '',
-    baseline_end_date: t.baseline_end_date?.split('T')[0] ?? '',
+    deadline: fmtCellDt(t.deadline),
+    baseline_end_date: fmtCellDt(t.baseline_end_date),
     note: t.note ?? '',
   }
 }

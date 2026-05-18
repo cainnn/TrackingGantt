@@ -6,13 +6,16 @@ import { useAppDispatch } from '@/store/hooks'
 import { deleteProject, updateProject } from '@/store/slices/projectSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import type { Project } from '@/types'
+import YmdDateInput from '@/components/YmdDateInput'
 
 interface ProjectCardProps {
   project: Project
   readOnly?: boolean
+  selected?: boolean
+  onToggleSelect?: () => void
 }
 
-export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
+export default function ProjectCard({ project, readOnly, selected, onToggleSelect }: ProjectCardProps) {
   const dispatch = useAppDispatch()
   const [editing, setEditing] = useState(false)
   const [editName, setEditName] = useState(project.name)
@@ -64,8 +67,17 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
   const progressColor = progress >= 80 ? 'text-green-600' : progress >= 50 ? 'text-blue-600' : progress >= 20 ? 'text-yellow-600' : 'text-gray-600'
 
   return (
-    <div className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
+    <div className={`border rounded-lg p-4 hover:shadow-md transition-shadow bg-white ${selected ? 'border-blue-400 ring-1 ring-blue-200' : 'border-gray-200'}`}>
       <div className="flex items-start justify-between">
+        {!readOnly && onToggleSelect && (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onToggleSelect}
+            className="mt-1 mr-2 w-4 h-4 accent-blue-500 cursor-pointer flex-none"
+            title="选择此项目"
+          />
+        )}
         <div className="flex-1 min-w-0">
           {editing ? (
             <form onSubmit={handleSave} className="flex items-center gap-2 mb-2">
@@ -95,10 +107,15 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
             </form>
           ) : (
             <div className="flex items-center gap-2 mb-2">
-              <Link href={`/projects/${project.id}`} className="flex-1 min-w-0">
+              <Link href={`/projects/${project.id}`} className="flex-1 min-w-0 flex items-center gap-1.5">
                 <h3 className="font-semibold text-gray-900 hover:text-blue-600 truncate">
                   {project.name}
                 </h3>
+                {project.time_granularity === 'minute' && (
+                  <span className="flex-none text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
+                    分钟级
+                  </span>
+                )}
               </Link>
               {!readOnly && (
               <button
@@ -114,11 +131,17 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
           <div className="text-sm text-gray-500 space-y-1">
             <div className="flex items-center gap-1">
               <span className="text-gray-500">开始：</span>
-              {readOnly
-                ? <span className="text-gray-700 text-xs">{project.start_date?.split('T')[0] ?? ''}</span>
-                : <input
-                    type="date"
-                    value={project.start_date?.split('T')[0] ?? ''}
+              {(() => {
+                const isMinute = project.time_granularity === 'minute'
+                const sliceLen = isMinute ? 16 : 10
+                const ctlVal = (project.start_date ?? '').slice(0, sliceLen)
+                const dispVal = isMinute ? ctlVal.replace('T', ' ') : ctlVal
+                if (readOnly) return <span className="text-gray-700 text-xs">{dispVal}</span>
+                return (
+                  <YmdDateInput
+                    value={ctlVal}
+                    includeTime={isMinute}
+                    size="compact"
                     onChange={async e => {
                       const val = e.target.value || null
                       const res = await authFetch(`/api/projects/${project.id}`, {
@@ -129,19 +152,25 @@ export default function ProjectCard({ project, readOnly }: ProjectCardProps) {
                       const data = await res.json()
                       if (data.ok) dispatch(updateProject({ ...project, start_date: val }))
                     }}
-                    className="border border-gray-200 rounded px-1 py-0.5 text-xs focus:outline-none focus:border-blue-400 text-gray-700"
                   />
-              }
+                )
+              })()}
             </div>
             {project.estimated_end_date && (
               <div className="flex items-center gap-1">
                 <span className="text-gray-500">预计完成：</span>
-                <span className="text-gray-700 text-xs font-medium">{project.estimated_end_date}</span>
+                <span className="text-gray-700 text-xs font-medium">
+                  {project.time_granularity === 'minute'
+                    ? project.estimated_end_date.slice(0, 16).replace('T', ' ')
+                    : project.estimated_end_date.slice(0, 10)}
+                </span>
               </div>
             )}
             {project.status_date && (
               <p className="text-blue-600">
-                状态日期：{new Date(project.status_date).toLocaleDateString('zh-CN')}
+                状态日期：{project.time_granularity === 'minute'
+                  ? project.status_date.slice(0, 16).replace('T', ' ')
+                  : new Date(project.status_date).toLocaleDateString('zh-CN')}
               </p>
             )}
             <p className={`font-semibold ${progressColor}`}>

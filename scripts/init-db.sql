@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS projects (
   start_date DATE,
   end_date DATE,
   status_date DATE,
+  time_granularity VARCHAR(10) DEFAULT 'day',  -- 'day' | 'minute'，创建时固定
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

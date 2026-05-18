@@ -4,6 +4,7 @@
  * 用于 "保存版本" 流程：先将所有本地编辑落库，然后创建版本快照。
  */
 import type { Task, Dependency } from '@/types'
+import { toDateTimeStr } from './clientTime'
 
 const TASK_FIELDS = [
   'name', 'parent_id', 'assignee', 'start_date', 'end_date',
@@ -15,19 +16,14 @@ const TASK_FIELDS = [
 
 const DEP_FIELDS = ['type', 'lag', 'active'] as const
 
-function normDate(v: unknown): string | null {
-  if (v == null) return null
-  const s = String(v)
-  return s.includes('T') ? s.split('T')[0] : s
-}
-
 function taskFieldsEqual(a: Task, b: Task): boolean {
   for (const f of TASK_FIELDS) {
     let av = a[f] as unknown
     let bv = b[f] as unknown
     if (f === 'start_date' || f === 'end_date' || f === 'constraint_date'
         || f === 'baseline_end_date' || f === 'deadline') {
-      av = normDate(av); bv = normDate(bv)
+      av = toDateTimeStr(av as string | Date | null | undefined)
+      bv = toDateTimeStr(bv as string | Date | null | undefined)
     }
     if ((av ?? null) !== (bv ?? null)) return false
   }

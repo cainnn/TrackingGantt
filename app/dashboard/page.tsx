@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setProjects, addProject } from '@/store/slices/projectSlice'
+import { setProjects, addProject, deleteProject } from '@/store/slices/projectSlice'
 import ProjectCard from '@/components/ProjectCard'
 import { logout } from '@/store/slices/authSlice'
 import { authFetch } from '@/lib/client/authFetch'
@@ -19,10 +19,51 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<'projects' | 'users'>('projects')
   const [creating, setCreating] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [newGranularity, setNewGranularity] = useState<'day' | 'minute'>('day')
+  const [useTemplate, setUseTemplate] = useState(false)
   const [copyFrom, setCopyFrom] = useState('')
   const [loading, setLoading] = useState(true)
   const [createLoading, setCreateLoading] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+  const selectAll = () => setSelectedIds(new Set(projects.map(p => p.id)))
+  const invertSelect = () => setSelectedIds(prev => {
+    const next = new Set<string>()
+    for (const p of projects) if (!prev.has(p.id)) next.add(p.id)
+    return next
+  })
+  const clearSelect = () => setSelectedIds(new Set())
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return
+    if (!confirm(`确定删除选中的 ${selectedIds.size} 个项目？此操作不可撤销。`)) return
+    setBulkDeleting(true)
+    try {
+      const ids = Array.from(selectedIds)
+      const results = await Promise.allSettled(ids.map(id =>
+        authFetch(`/api/projects/${id}`, { method: 'DELETE' }).then(r => r.json()).then(d => ({ id, ok: d.ok }))
+      ))
+      const okIds: string[] = []
+      const failed: string[] = []
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.ok) okIds.push(r.value.id)
+        else failed.push(r.status === 'fulfilled' ? r.value.id : '?')
+      }
+      okIds.forEach(id => dispatch(deleteProject(id)))
+      setSelectedIds(new Set())
+      if (failed.length > 0) alert(`${failed.length} 个项目删除失败`)
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
 
   useEffect(() => {
     if (!user) {
@@ -45,11 +86,18 @@ export default function DashboardPage() {
 
     setCreateLoading(true)
     try {
-      const payload: Record<string, string> = {
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+      // 分钟级项目默认从今天早上 09:00 开始；天级仍为日期串
+      const startDefault = newGranularity === 'minute' ? `${today}T09:00:00` : today
+      const payload: Record<string, string | boolean> = {
         name: newProjectName,
-        start_date: new Date().toISOString().split('T')[0],
+        start_date: startDefault,
+        time_granularity: newGranularity,
       }
       if (copyFrom) payload.copy_from = copyFrom
+      else if (useTemplate) payload.use_template = true
       const res = await authFetch('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -70,6 +118,8 @@ export default function DashboardPage() {
       dispatch(addProject(data.value as any))
       setNewProjectName('')
       setCopyFrom('')
+      setNewGranularity('day')
+      setUseTemplate(false)
       setCreating(false)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : '创建失败')
@@ -165,7 +215,66 @@ export default function DashboardPage() {
               </select>
             </div>
             {copyFrom && (
-              <p className="text-xs text-gray-500">将复制选中项目的所有任务和依赖关系到新项目</p>
+              <p className="text-xs text-gray-500">将复制选中项目的所有任务和依赖关系到新项目（精度跟随源项目）</p>
+            )}
+            {!copyFrom && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-gray-600 flex-none">时间精度：</label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="granularity"
+                    value="day"
+                    checked={newGranularity === 'day'}
+                    onChange={() => setNewGranularity('day')}
+                    className="accent-blue-500"
+                  />
+                  <span>天级（YYYY-MM-DD，日历日）</span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="granularity"
+                    value="minute"
+                    checked={newGranularity === 'minute'}
+                    onChange={() => setNewGranularity('minute')}
+                    className="accent-blue-500"
+                  />
+                  <span>分钟级（YYYY-MM-DD HH:mm，15min 吸附）</span>
+                </label>
+              </div>
+            )}
+            {!copyFrom && (
+              <p className="text-xs text-gray-400">创建后不可更改。短期项目建议分钟级；长期排期建议天级。</p>
+            )}
+            {!copyFrom && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-gray-600 flex-none">初始内容：</label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="template"
+                    value="empty"
+                    checked={!useTemplate}
+                    onChange={() => setUseTemplate(false)}
+                    className="accent-blue-500"
+                  />
+                  <span>空项目</span>
+                </label>
+                <label className="inline-flex items-center gap-1.5 cursor-pointer text-sm">
+                  <input
+                    type="radio"
+                    name="template"
+                    value="template"
+                    checked={useTemplate}
+                    onChange={() => setUseTemplate(true)}
+                    className="accent-blue-500"
+                  />
+                  <span>
+                    默认模板（10 个任务，{newGranularity === 'minute' ? '每个 1 小时' : '每个 1 天'}，FS 链式依赖）
+                  </span>
+                </label>
+              </div>
             )}
             <div className="flex gap-2">
               <button
@@ -197,11 +306,46 @@ export default function DashboardPage() {
             暂无项目，点击「新建项目」开始
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {projects.map(p => (
-              <ProjectCard key={p.id} project={p} readOnly={isViewOnly} />
-            ))}
-          </div>
+          <>
+            {!isViewOnly && (
+              <div className="mb-3 flex items-center gap-2 text-sm">
+                <button
+                  onClick={selectAll}
+                  className="px-3 py-1.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-100"
+                >全选</button>
+                <button
+                  onClick={invertSelect}
+                  className="px-3 py-1.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-100"
+                >反选</button>
+                <button
+                  onClick={clearSelect}
+                  disabled={selectedIds.size === 0}
+                  className="px-3 py-1.5 border border-gray-300 rounded text-gray-700 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >清空</button>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={selectedIds.size === 0 || bulkDeleting}
+                  className="px-3 py-1.5 border border-red-300 rounded text-red-700 bg-red-50 hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {bulkDeleting ? '删除中...' : `批量删除 (${selectedIds.size})`}
+                </button>
+                <span className="text-xs text-gray-500 ml-auto">
+                  已选 {selectedIds.size} / {projects.length}
+                </span>
+              </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {projects.map(p => (
+                <ProjectCard
+                  key={p.id}
+                  project={p}
+                  readOnly={isViewOnly}
+                  selected={selectedIds.has(p.id)}
+                  onToggleSelect={() => toggleSelect(p.id)}
+                />
+              ))}
+            </div>
+          </>
         )}
         </>
         )}
