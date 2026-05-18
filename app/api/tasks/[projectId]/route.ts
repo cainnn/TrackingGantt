@@ -117,27 +117,41 @@ export async function GET(req: NextRequest, { params }: Params) {
 
   const allTasks = tasksRes.rows
   const allDeps = depsRes.rows
-  const parentIds = new Set(allTasks.filter((t: { parent_id: string | null }) => t.parent_id).map((t: { parent_id: string }) => t.parent_id))
 
   // 检查依赖级联和摘要任务是否需要修正
+  // 优化：预先构建 byId / childrenByParent / 归一化日期，避免 O(n²) 的 find/filter。
   {
     let needsFix = false
-    // 检查依赖级联
-    const taskMap = new Map<string, { start: string; end: string; dur: number; auto: boolean; parent_id: string | null }>()
+    type T = { id: string; start: string; end: string; dur: number; auto: boolean; parent_id: string | null }
+    const byId = new Map<string, T>()
+    const childrenByParent = new Map<string, T[]>()
     for (const t of allTasks) {
-      taskMap.set(t.id, { start: toDateStr(t.start_date) ?? '', end: toDateStr(t.end_date) ?? '', dur: t.duration ?? 0, auto: t.auto_schedule !== false, parent_id: t.parent_id })
+      const node: T = {
+        id: t.id,
+        start: toDateStr(t.start_date) ?? '',
+        end: toDateStr(t.end_date) ?? '',
+        dur: t.duration ?? 0,
+        auto: t.auto_schedule !== false,
+        parent_id: t.parent_id,
+      }
+      byId.set(t.id, node)
+      if (t.parent_id) {
+        const arr = childrenByParent.get(t.parent_id)
+        if (arr) arr.push(node)
+        else childrenByParent.set(t.parent_id, [node])
+      }
     }
     // 判断 ancestorId 是否是 taskId 的祖先
     const isAnc = (ancestorId: string, taskId: string): boolean => {
-      let cur = taskMap.get(taskId); const visited = new Set<string>()
-      while (cur?.parent_id) { if (cur.parent_id === ancestorId) return true; if (visited.has(cur.parent_id)) break; visited.add(cur.parent_id); cur = taskMap.get(cur.parent_id) }
+      let cur = byId.get(taskId); const visited = new Set<string>()
+      while (cur?.parent_id) { if (cur.parent_id === ancestorId) return true; if (visited.has(cur.parent_id)) break; visited.add(cur.parent_id); cur = byId.get(cur.parent_id) }
       return false
     }
     for (const d of allDeps) {
       // 跳过父子关系的依赖
       if (isAnc(d.from_task_id, d.to_task_id) || isAnc(d.to_task_id, d.from_task_id)) continue
-      const from = taskMap.get(d.from_task_id)
-      const to = taskMap.get(d.to_task_id)
+      const from = byId.get(d.from_task_id)
+      const to = byId.get(d.to_task_id)
       if (!from?.start || !from?.end || !to?.start || !to?.end || !to.auto) continue
       const depType = d.type ?? 2
       let rs: string | null = null
@@ -147,16 +161,19 @@ export async function GET(req: NextRequest, { params }: Params) {
       else if (depType === 1) rs = addDaysStr(from.start, (d.lag ?? 0) - to.dur)
       if (rs && rs !== to.start) { needsFix = true; break }
     }
-    // 检查摘要任务
+    // 检查摘要任务：用 childrenByParent 跑 min/max（线性，不再排序整个数组）
     if (!needsFix) {
-      for (const pid of parentIds) {
-        const parent = allTasks.find((t: { id: string }) => t.id === pid)
+      for (const [pid, children] of childrenByParent) {
+        const parent = byId.get(pid)
         if (!parent) continue
-        const children = allTasks.filter((t: { parent_id: string | null }) => t.parent_id === pid)
-        const starts = children.map((c: { start_date: string | null }) => toDateStr(c.start_date)).filter(Boolean) as string[]
-        const ends = children.map((c: { end_date: string | null }) => toDateStr(c.end_date)).filter(Boolean) as string[]
-        if (starts.length === 0 || ends.length === 0) continue
-        if (toDateStr(parent.start_date) !== starts.sort()[0] || toDateStr(parent.end_date) !== ends.sort().reverse()[0]) {
+        let minStart: string | null = null
+        let maxEnd: string | null = null
+        for (const c of children) {
+          if (c.start && (minStart === null || c.start < minStart)) minStart = c.start
+          if (c.end && (maxEnd === null || c.end > maxEnd)) maxEnd = c.end
+        }
+        if (minStart === null || maxEnd === null) continue
+        if (parent.start !== minStart || parent.end !== maxEnd) {
           needsFix = true; break
         }
       }
