@@ -249,6 +249,8 @@ export default function GanttToolbar({
   const [baseline, setBaseline] = useState<SnapshotTask[] | null>(null)
   const [baselineTasks, setBaselineTasks] = useState<Task[]>([])
   const [baselineDeps, setBaselineDeps] = useState<Dependency[]>([])
+  // 状态日期同样进入"待确认"流程：捕获原始值，确认变更时落库，放弃更改时回滚。
+  const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(null)
 
   // 任务首次加载完成时，捕获当前状态作为基线
   const baselineCapturedRef = useRef(false)
@@ -258,6 +260,7 @@ export default function GanttToolbar({
       setBaseline(null)
       setBaselineTasks([])
       setBaselineDeps([])
+      setBaselineStatusDate(null)
       return
     }
     if (baselineCapturedRef.current) return
@@ -272,6 +275,7 @@ export default function GanttToolbar({
     })))
     setBaselineTasks(livingTasks.map(t => ({ ...t })))
     setBaselineDeps(dependencies.map(d => ({ ...d })))
+    setBaselineStatusDate(toDateTimeStr(currentProject?.status_date ?? null))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasks.length])
 
@@ -358,7 +362,8 @@ export default function GanttToolbar({
     return { items, added, updated, removed, total: items.length }
   }, [baselineDeps, dependencies, baselineTasks, tasks])
 
-  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0
+  const statusDateChanged = toDateTimeStr(currentProject?.status_date ?? null) !== baselineStatusDate
+  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged
 
   // 变更审核弹窗状态
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -1325,16 +1330,12 @@ export default function GanttToolbar({
   // ── Status date: free movement + separate confirm button ────────
   const [statusDateSaving, setStatusDateSaving] = useState(false)
 
-  // 自由移动状态日期（仅更新 Redux + 后端，不创建版本）
-  // 允许任意历史日期以便查看进展；保存版本时再做合规校验
-  const handleStatusDatePick = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 状态日期：进入"待确认"流程，仅改 Redux，不直接落库。
+  // 允许任意历史日期以便预览进展；用户点"确认变更"才一并保存（带合规校验和版本快照），
+  // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
+  const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value || null
     dispatch(setStatusDate({ projectId, statusDate: val }))
-    await authFetch(`/api/projects/${projectId}`, {
-      method: 'PUT',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ status_date: val }),
-    })
   }, [dispatch, projectId])
 
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
@@ -1467,6 +1468,23 @@ export default function GanttToolbar({
       return
     }
 
+    // 2.5 状态日期若有变更，先把它持久化到 projects 表
+    //     （版本快照只写 project_versions.status_date，不会同步 projects.status_date）
+    if (statusDateChanged) {
+      try {
+        const r = await authFetch(`/api/projects/${projectId}`, {
+          method: 'PUT',
+          headers: authFetchHeaders(true),
+          body: JSON.stringify({ status_date: sd }),
+        })
+        if (!r.ok) throw new Error(`保存状态日期失败 (${r.status})`)
+      } catch (err) {
+        setStatusDateSaving(false)
+        alert(`保存状态日期失败：${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+    }
+
     // 3. 创建版本快照
     const reasonMap: Record<string, string> = {}
     for (const d of changeDiffs) {
@@ -1503,6 +1521,7 @@ export default function GanttToolbar({
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
       setBaselineDeps(dependencies.map(d => ({ ...d })))
+      setBaselineStatusDate(sd)
 
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
@@ -1513,7 +1532,7 @@ export default function GanttToolbar({
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
-      baselineTasks, baselineDeps, lastVersionDate])
+      baselineTasks, baselineDeps, lastVersionDate, statusDateChanged])
 
   // ── 重排对齐：把无前置依赖 + 自动模式的任务强制 snap 到 anchor，并跑级联 ──
   const handleRealign = useCallback(() => {
@@ -1556,13 +1575,15 @@ export default function GanttToolbar({
       // dirtyIds 保持，由 autosave 决定后续是否落库
       return
     }
-    // 历史栈空 → 回退到 DB 状态
+    // 历史栈空 → 回退到 DB 状态（含状态日期）
     try {
-      const res = await authFetch(`/api/tasks/${projectId}`)
-      const data = await res.json()
-      if (data.ok && data.value) {
-        const freshTasks = Array.isArray(data.value.tasks) ? data.value.tasks : []
-        const freshDeps = Array.isArray(data.value.dependencies) ? data.value.dependencies : []
+      const [tasksRes, projRes] = await Promise.all([
+        authFetch(`/api/tasks/${projectId}`).then(r => r.json()),
+        authFetch(`/api/projects/${projectId}`).then(r => r.json()),
+      ])
+      if (tasksRes.ok && tasksRes.value) {
+        const freshTasks = Array.isArray(tasksRes.value.tasks) ? tasksRes.value.tasks : []
+        const freshDeps = Array.isArray(tasksRes.value.dependencies) ? tasksRes.value.dependencies : []
         skipNextHistoryPushRef.current = true
         dispatch(setTasks({ tasks: freshTasks, dependencies: freshDeps }))
         dispatch(clearDirty())
@@ -1578,6 +1599,12 @@ export default function GanttToolbar({
         })))
         setBaselineTasks(livingTasks.map((t: Task) => ({ ...t })))
         setBaselineDeps(freshDeps.map((d: Dependency) => ({ ...d })))
+      }
+      // 状态日期回滚到 DB 值（即便任务拉取失败，也尝试恢复以保持 UI 与基线一致）
+      if (projRes.ok && projRes.value) {
+        const freshSd = toDateTimeStr(projRes.value.status_date ?? null)
+        dispatch(setStatusDate({ projectId, statusDate: freshSd }))
+        setBaselineStatusDate(freshSd)
       }
     } catch { /* ignore */ }
   }, [dispatch, projectId])
