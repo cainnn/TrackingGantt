@@ -21,8 +21,9 @@
  */
 const { Pool, types } = require('pg')
 
-// 与 lib/db.ts 一致：DATE 类型直接返回字符串，避免 UTC 漂移
+// 与 lib/db.ts 一致：DATE / TIMESTAMP 都返回字符串，避免 UTC 漂移
 types.setTypeParser(1082, v => v)
+types.setTypeParser(1114, v => (v ? String(v).replace(' ', 'T') : v))
 
 function envInt(name, fallback) {
   const v = process.env[name]
@@ -58,15 +59,29 @@ function toLocalDtStr(d) {
          `T${pad(d.getHours())}:${pad(d.getMinutes())}:00`
 }
 
+/** 把 row.start_date / end_date（可能是字符串 'YYYY-MM-DDTHH:MM:SS' 或 Date）
+ *  解析成本地 Date 对象 */
+function toLocalDate(v) {
+  if (v == null) return null
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : new Date(v)
+  if (typeof v === 'string') {
+    const m = v.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/)
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
+    const md = v.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+    if (md) return new Date(+md[1], +md[2] - 1, +md[3])
+  }
+  return null
+}
+
 /** start_date floor 到当天 00:00，duration 圆整到整天，end = start + duration */
 function snapTaskFields(row) {
-  const s = row.start_date instanceof Date ? new Date(row.start_date) : null
+  const s = toLocalDate(row.start_date)
   if (!s) return null
+  const e = toLocalDate(row.end_date)
   const srcDur = (row.duration != null && Number.isFinite(Number(row.duration)))
     ? Number(row.duration)
     : null
   // 缺 duration 时，从 end - start 推算（分钟）
-  const e = row.end_date instanceof Date ? new Date(row.end_date) : null
   const fallbackDur = (s && e) ? Math.round((e.getTime() - s.getTime()) / 60000) : 0
   const baseDur = srcDur != null ? srcDur : fallbackDur
   const days = Math.max(0, Math.round(baseDur / 1440))
