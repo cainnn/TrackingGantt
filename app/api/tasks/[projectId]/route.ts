@@ -7,6 +7,7 @@ import {
   type TaskLike,
   toDateStr, addDaysStr, diffDaysStr,
   cascadeDependencies, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
+  snapTasksToDayLevel,
 } from '@/lib/scheduling'
 
 type Params = { params: Promise<{ projectId: string }> }
@@ -65,15 +66,31 @@ const FIELD_LABELS: Record<string, string> = {
   parent_id: '父任务', is_milestone: '里程碑', note: '备注',
 }
 
-function fmtFieldVal(field: string, val: unknown): string {
+function fmtFieldVal(field: string, val: unknown, opts?: { isMinute?: boolean }): string {
   if (val === null || val === undefined || val === '') return '(空)'
-  if (field === 'start_date' || field === 'end_date') {
+  if (field === 'start_date' || field === 'end_date' || field === 'constraint_date' || field === 'deadline') {
+    // Date 对象（pg timestamp 列返回值）→ 按本地 TZ 格式化为 'YYYY-MM-DD HH:mm'
+    if (val instanceof Date) {
+      if (isNaN(val.getTime())) return ''
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return `${val.getFullYear()}-${pad(val.getMonth()+1)}-${pad(val.getDate())} ` +
+             `${pad(val.getHours())}:${pad(val.getMinutes())}`
+    }
     // 'YYYY-MM-DDTHH:mm:ss' → 'YYYY-MM-DD HH:mm'，无时间则保持原样
     const s = String(val)
     const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
     return m ? `${m[1]} ${m[2]}` : s
   }
-  if (field === 'duration') return `${val} 分钟`
+  if (field === 'duration') {
+    const n = Number(val)
+    if (!Number.isFinite(n)) return String(val)
+    // 天级项目：duration 是分钟，但按天换算显示；分钟级保留原值
+    if (opts?.isMinute === false) {
+      const days = Math.round(n / 1440)
+      return `${days} 天`
+    }
+    return `${n} 分钟`
+  }
   if (field === 'percent_done') return `${val}%`
   if (field === 'is_milestone') return val ? '是' : '否'
   return String(val)
@@ -101,7 +118,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
   }
 
-  const [tasksRes, depsRes] = await Promise.all([
+  const [tasksRes, depsRes, projRes] = await Promise.all([
     pool.query(
       'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index ASC',
       [projectId]
@@ -113,10 +130,12 @@ export async function GET(req: NextRequest, { params }: Params) {
        WHERE d.project_id = $1`,
       [projectId]
     ),
+    pool.query('SELECT time_granularity FROM projects WHERE id = $1', [projectId]),
   ])
 
   const allTasks = tasksRes.rows
   const allDeps = depsRes.rows
+  const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
 
   // 检查依赖级联和摘要任务是否需要修正
   // 优化：预先构建 byId / childrenByParent / 归一化日期，避免 O(n²) 的 find/filter。
@@ -178,12 +197,28 @@ export async function GET(req: NextRequest, { params }: Params) {
         }
       }
     }
+    // 天级项目：发现任一任务带非整天的时分秒，需要 snap 到 00:00
+    if (!needsFix && !projIsMinute) {
+      for (const t of allTasks) {
+        const s = t.start_date instanceof Date ? t.start_date : (t.start_date ? new Date(t.start_date) : null)
+        const e = t.end_date   instanceof Date ? t.end_date   : (t.end_date   ? new Date(t.end_date)   : null)
+        const dur = t.duration as number | null
+        const offDay =
+          (s && (s.getHours() !== 0 || s.getMinutes() !== 0 || s.getSeconds() !== 0)) ||
+          (e && (e.getHours() !== 0 || e.getMinutes() !== 0 || e.getSeconds() !== 0)) ||
+          (dur != null && dur % 1440 !== 0)
+        if (offDay) { needsFix = true; break }
+      }
+    }
     if (needsFix) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
         await cascadeDependencies(client, projectId)
+        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
         await updateSummaryTasksDates(client, projectId)
+        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
         await client.query('COMMIT')
         const refreshRes = await pool.query(
           'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index ASC',
@@ -309,6 +344,8 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // 更新摘要任务的时间范围
     await updateSummaryTasksDates(client, projectId)
+    // 天级项目：把任何残留的非整天时间统一 snap 到 00:00
+    await snapTasksToDayLevel(client, projectId)
 
     await client.query('COMMIT')
   } catch (err) {
@@ -405,11 +442,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
 
-    // 查询项目的 status_date 用于判定"历史修改"
-    const projRes = await client.query('SELECT status_date FROM projects WHERE id = $1', [projectId])
+    // 查询项目的 status_date 用于判定"历史修改"，并取粒度用于日志单位
+    const projRes = await client.query(
+      'SELECT status_date, time_granularity FROM projects WHERE id = $1',
+      [projectId],
+    )
     const projStatusDate: string | null = projRes.rows[0]?.status_date
       ? toDateStr(projRes.rows[0].status_date as string)
       : null
+    const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
 
     // ── Batch fetch all old tasks in one query ────────────────────────────
     const inputIds = taskInputs.map((t: Record<string, unknown>) => t.id as string).filter(Boolean)
@@ -610,9 +651,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
       console.log(`[lifecycle] task ${code}: checking fields`, Object.keys(task as Record<string, unknown>).filter(k => COMPARE_FIELDS.includes(k)))
       for (const f of COMPARE_FIELDS) {
         if (!(f in task)) continue
-        // 分钟级比较：保留 HH:mm，避免同日不同时间被误判为"无变更"
+        // 分钟级比较：保留 HH:mm，避免同日不同时间被误判为"无变更"。
+        // 日期字段如果是 pg 返回的 Date 对象，先取本地 YYYY-MM-DDTHH:mm 再比较，
+        // 否则 String(Date) 会变成 "Thu May 21 2026 16:00:00 GMT+0800" 让比较失效。
         const norm = (v: unknown) => {
           if (v === null || v === undefined) return ''
+          if (v instanceof Date) {
+            if (isNaN(v.getTime())) return ''
+            const pad = (n: number) => String(n).padStart(2, '0')
+            return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}` +
+                   `T${pad(v.getHours())}:${pad(v.getMinutes())}`
+          }
           const s = String(v)
           const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
           return m ? `${m[1]}${m[2] ? `T${m[2]}` : ''}` : s
@@ -622,14 +671,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
         console.log(`[lifecycle] task ${code}.${f}: old="${ov}" new="${nv}" changed=${ov !== nv}`)
         if (ov === nv) continue
         const label = FIELD_LABELS[f] ?? f
-        const ovStr = fmtFieldVal(f, old[f])
-        const nvStr = fmtFieldVal(f, cur[f])
+        const ovStr = fmtFieldVal(f, old[f], { isMinute: projIsMinute })
+        const nvStr = fmtFieldVal(f, cur[f], { isMinute: projIsMinute })
         let desc: string
         if (f === 'duration') {
-          const diff = Number(cur[f] ?? 0) - Number(old[f] ?? 0)
-          desc = diff > 0
-            ? `任务「${cur.name}」（${code}）工期延长 ${diff} 天（${ovStr} → ${nvStr}）`
-            : `任务「${cur.name}」（${code}）工期缩短 ${Math.abs(diff)} 天（${ovStr} → ${nvStr}）`
+          const diffMins = Number(cur[f] ?? 0) - Number(old[f] ?? 0)
+          // 天级项目：按天显示；分钟级：按分钟显示
+          const unit = projIsMinute ? '分钟' : '天'
+          const diffShown = projIsMinute ? diffMins : Math.round(diffMins / 1440)
+          desc = diffMins > 0
+            ? `任务「${cur.name}」（${code}）工期延长 ${diffShown} ${unit}（${ovStr} → ${nvStr}）`
+            : `任务「${cur.name}」（${code}）工期缩短 ${Math.abs(diffShown)} ${unit}（${ovStr} → ${nvStr}）`
         } else if (f === 'name') {
           desc = `任务（${code}）重命名：「${ovStr}」→「${nvStr}」`
         } else {
@@ -721,6 +773,21 @@ export async function PUT(req: NextRequest, { params }: Params) {
     if (summaryUpdated.length > 0) {
       summaryUpdated.forEach(r => {
         if (!updated.some((u: TaskLike) => u.id === r.id)) updated.push(r)
+      })
+    }
+
+    // 天级项目：把级联/摘要算出的非整天时间统一 snap 到 00:00
+    const snappedIds = await snapTasksToDayLevel(client, projectId)
+    if (snappedIds.length > 0) {
+      const ph = snappedIds.map((_, i) => `$${i + 2}`).join(',')
+      const snappedRows = await client.query(
+        `SELECT * FROM tasks WHERE project_id = $1 AND id IN (${ph})`,
+        [projectId, ...snappedIds]
+      )
+      snappedRows.rows.forEach((r: TaskLike) => {
+        const idx = updated.findIndex((u: TaskLike) => u.id === r.id)
+        if (idx >= 0) updated[idx] = r
+        else updated.push(r)
       })
     }
 

@@ -391,3 +391,69 @@ export async function updateSummaryTaskDateRecursive(
 
   return updated
 }
+
+// ── 天级项目对齐 ──────────────────────────────────────────────────────────
+/**
+ * 天级项目（time_granularity != 'minute'）里所有任务的 start_date / end_date
+ * 必须落在 00:00；duration 必须是 1440 分钟的整数倍。
+ *
+ * 触发场景：导入残留分钟、级联从带时分的源任务推算 start、历史数据迁移遗留。
+ * 该函数会找出所有不合规的任务并就地 snap：
+ *   - start_date → 同一天 00:00（floor）
+ *   - duration   → 四舍五入到整天
+ *   - end_date   → start_date + duration（按上面已圆整的 duration）
+ *
+ * 返回被修正的任务 id 列表。
+ */
+export async function snapTasksToDayLevel(
+  client: PoolClient,
+  projectId: string,
+): Promise<string[]> {
+  const granRes = await client.query(
+    'SELECT time_granularity FROM projects WHERE id = $1',
+    [projectId],
+  )
+  if (granRes.rows[0]?.time_granularity === 'minute') return []
+
+  const res = await client.query(
+    `SELECT id, start_date, end_date, duration FROM tasks
+     WHERE project_id = $1 AND is_deleted = false
+       AND start_date IS NOT NULL AND end_date IS NOT NULL
+       AND (
+         EXTRACT(HOUR   FROM start_date) <> 0
+         OR EXTRACT(MINUTE FROM start_date) <> 0
+         OR EXTRACT(SECOND FROM start_date) <> 0
+         OR EXTRACT(HOUR   FROM end_date) <> 0
+         OR EXTRACT(MINUTE FROM end_date) <> 0
+         OR EXTRACT(SECOND FROM end_date) <> 0
+         OR (duration IS NOT NULL AND duration % 1440 <> 0)
+       )`,
+    [projectId],
+  )
+  const touched: string[] = []
+  for (const r of res.rows) {
+    const sStr = toDateStr(r.start_date as string | Date | null)
+    const eStr = toDateStr(r.end_date as string | Date | null)
+    if (!sStr || !eStr) continue
+    const s = parseLocal(sStr)
+    if (!s) continue
+    // 来源 duration：优先用存的 duration，否则用 end - start
+    const srcMins = (r.duration != null && Number.isFinite(r.duration))
+      ? Number(r.duration)
+      : diffMinutesStr(sStr, eStr)
+    // 天数四舍五入，最小 0（保留 milestone）
+    const days = Math.max(0, Math.round(srcMins / 1440))
+    const newDur = days * 1440
+    s.setHours(0, 0, 0, 0)
+    const newStartStr = toDateStr(s)
+    const newEndStr = addMinutesStr(newStartStr, newDur)
+    if (!newStartStr || !newEndStr) continue
+    await client.query(
+      `UPDATE tasks SET start_date = $1, end_date = $2, duration = $3, updated_at = NOW()
+       WHERE id = $4 AND project_id = $5`,
+      [newStartStr, newEndStr, newDur, r.id, projectId],
+    )
+    touched.push(r.id as string)
+  }
+  return touched
+}

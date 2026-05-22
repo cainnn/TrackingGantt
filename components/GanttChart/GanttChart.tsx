@@ -2611,7 +2611,7 @@ export default function GanttChart({
         if (t.duration == null) return ''
         return isMinute
           ? (t.duration >= 60 && t.duration % 60 === 0 ? `${t.duration / 60}小时` : `${t.duration}分钟`)
-          : `${Math.round(t.duration / 1440 * 10) / 10}天`
+          : `${Math.round(t.duration / 1440)}天`
       })),
       start:      Math.max(headerW('开始时间'), contentW(t => isMinute
         ? (t.start_date ?? '').slice(0, 16).replace('T', ' ')
@@ -3116,7 +3116,7 @@ export default function GanttChart({
                                 ? (t.duration >= 60 && t.duration % 60 === 0
                                     ? `${t.duration / 60}小时`
                                     : `${t.duration}分钟`)
-                                : `${Math.round(t.duration / 1440 * 10) / 10}天`)
+                                : `${Math.round(t.duration / 1440)}天`)
                             : ''}
                         </span>
                     }
