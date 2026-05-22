@@ -476,6 +476,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           statusDate: currentProject?.status_date ?? null,
           progress: computeProjectProgressPercent(tasks, currentProject?.status_date),
           prevTaskIds: prevSnapshotTaskIds,
+          isMinute: currentProject?.time_granularity === 'minute',
         }),
       })
 
@@ -516,6 +517,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             dependencies,
             versionChanges,
             prevTaskIds: prevSnapshotTaskIds,
+            isMinute: currentProject?.time_granularity === 'minute',
           }),
         })
         const followData = await followRes.json()

@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { projectName, messages, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds } = body as {
+  const { projectName, messages, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds, isMinute } = body as {
     projectName: string
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     messages: any[]
@@ -30,9 +30,13 @@ export async function POST(req: NextRequest) {
     statusDate?: string | null
     progress?: number | null
     prevTaskIds?: string[]
+    isMinute?: boolean
   }
 
-  const systemPrompt = buildSystemPrompt(projectName, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds)
+  const systemPrompt = buildSystemPrompt(
+    projectName, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds,
+    isMinute ?? true,
+  )
 
   try {
     const apiMessages: ChatCompletionMessageParam[] = [

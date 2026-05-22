@@ -165,8 +165,12 @@ export function buildSystemPrompt(
   statusDate?: string | null,
   progress?: number | null,
   prevTaskIds?: string[],  // 上期快照存在的任务 ID，缺失则视为本期新增
+  isMinute: boolean = true,  // 项目粒度：true=分钟级（默认），false=天级 → 时长摘要按整天输出
 ): string {
   const prevIdSet = prevTaskIds ? new Set(prevTaskIds) : null
+  const dayOnly = !isMinute
+  const fmtDur = (mins: number, signed = false) =>
+    formatMinDuration(mins, { signed, dayOnly })
   const codeById = new Map(tasks.map(t => [t.id, t.task_code]))
   const taskById = new Map(tasks.map(t => [t.id, t] as const))
 
@@ -185,8 +189,8 @@ export function buildSystemPrompt(
     let delayFlag = ''
     if (baseline && curEnd && baseline !== curEnd) {
       const mins = Math.round((new Date(curEnd).getTime() - new Date(baseline).getTime()) / 60_000)
-      if (mins > 0) delayFlag = `延期${formatMinDuration(mins, { signed: true })}`
-      else if (mins < 0) delayFlag = `提前${formatMinDuration(mins, { signed: true })}`
+      if (mins > 0) delayFlag = `延期${fmtDur(mins, true)}`
+      else if (mins < 0) delayFlag = `提前${fmtDur(mins, true)}`
     }
     // 计算延期原因
     let delayReason = ''
@@ -215,16 +219,19 @@ export function buildSystemPrompt(
       if (lagPreds.length > 0) {
         const descs = lagPreds.map(d => {
           const p = taskById.get(d.from_task_id)
-          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${formatMinDuration(d.lag ?? 0)})`
+          return `${p?.task_code ?? '?'} ${p?.name ?? '?'}(lag=${fmtDur(d.lag ?? 0)})`
         }).slice(0, 3)
         reasons.push(`依赖延迟(${descs.join(',')})`)
       }
       delayReason = reasons.length > 0 ? reasons.join('; ') : '自身工期延长'
     }
+    const durDisplay = t.duration == null
+      ? ''
+      : (dayOnly ? `${Math.round(t.duration / 1440)}天` : `${t.duration}分钟`)
     return [
       t.task_code, t.name,
       t.start_date?.split('T')[0] ?? '', curEnd,
-      t.duration ?? '', t.assignee ?? '', pct,
+      durDisplay, t.assignee ?? '', pct,
       parentCode, t.is_milestone ? 'Y' : '',
       baseline, delayFlag, delayReason,
     ].join(' | ')
@@ -270,10 +277,15 @@ Today: ${today}
 ${statusDate ? `Status date: ${typeof statusDate === 'string' && statusDate.includes('T') ? statusDate.split('T')[0] : statusDate}` : 'Status date: not set'}
 ${progress != null ? `Overall progress: ${progress}%` : ''}
 
+Project granularity: ${isMinute ? '分钟级（minute）—— 时长用分钟/小时/天混合输出' : '天级（day）—— 所有时长统一按整天输出，不要出现分钟、小时'}
 Tasks (code | name | start | end | duration | assignee | %done | parent_code | milestone | baseline_end | delay_flag | delay_reason):
 - **baseline_end** 是上一期版本快照中的计划结束日期。
-- **delay_flag** 格式："延期+N天"（end 晚于 baseline_end N 天）或"提前-N天"（end 早于 baseline_end）；为空表示无变化。这是判定任务延期/提前的权威依据，优先使用，总结时必须明确列出天数。
-- **delay_reason** 延期原因说明："自身工期延长"表示任务本身被拉长；"前置任务延期(任务名)"表示因上游任务延期被拖累；"依赖延迟(任务名lag=N分钟/小时/天)"表示因依赖关系的lag设置导致延期。总结时必须说明延期原因。所有时长单位以分钟为内部表示。
+- **delay_flag** 格式：${dayOnly
+  ? '"延期+N天" / "提前-N天"；这是判定延期/提前的权威依据，总结时必须列出天数。本项目是天级项目，禁止使用分钟、小时单位。'
+  : '"延期+N天" / "提前-N天" / "延期+N小时" / "延期+N分钟"，根据实际时长精度输出；为空表示无变化。这是判定延期/提前的权威依据，总结时必须列出。'}
+- **delay_reason** 延期原因说明："自身工期延长"表示任务本身被拉长；"前置任务延期(任务名)"表示因上游任务延期被拖累；"依赖延迟(任务名lag=...)"表示因依赖关系的lag设置导致延期。${dayOnly
+  ? '总结时所有时长用整天（X 天）描述，禁止出现分钟、小时。'
+  : '总结时按实际时长精度描述。所有时长内部以分钟存储；输出时按需换算为分钟/小时/天。'}
 ${taskRows.length > 0 ? taskRows.join('\n') : '(empty)'}
 ${tasks.length > 200 ? `... and ${tasks.length - 200} more tasks` : ''}
 
