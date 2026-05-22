@@ -508,7 +508,9 @@ export default function GanttToolbar({
     setReasons(prefilled)
     setReviewOpen(true)
   }, [editDescriptions, tasks, primaryCodes])
-  const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0) &&
+  // 有任意变更（任务/依赖/状态日期）即视为可提交；
+  // 任务变更里所有主动项需要填理由，纯状态日期变更不需要理由。
+  const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged) &&
     changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
   // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
@@ -2193,7 +2195,21 @@ export default function GanttToolbar({
             {/* Diff list */}
             <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 min-h-0">
               {changeDiffs.length === 0 && depDiff.total === 0 && (
-                <div className="text-center text-gray-400 py-8 text-sm">没有检测到变更</div>
+                statusDateChanged ? (
+                  <div className="text-center text-gray-600 py-6 text-sm">
+                    仅状态日期变化：
+                    <span className="font-medium text-gray-800">
+                      {baselineStatusDate?.split('T')[0] ?? '(空)'}
+                    </span>
+                    {' → '}
+                    <span className="font-medium text-blue-700">
+                      {currentProject?.status_date?.split('T')[0] ?? '(空)'}
+                    </span>
+                    <div className="text-xs text-gray-400 mt-1">将以当前任务状态创建一个新版本快照</div>
+                  </div>
+                ) : (
+                  <div className="text-center text-gray-400 py-8 text-sm">没有检测到变更</div>
+                )
               )}
               {changeDiffs.map((d, i) => (
                 <div key={`task-${i}`} className={`rounded border px-3 py-2 text-[13px] ${
