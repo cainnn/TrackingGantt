@@ -25,6 +25,7 @@ set -euo pipefail
 #   APP_DIR       VPS 上安装目录    默认 /opt/gantt-app-minute
 #   APP_PORT      应用端口          默认 3001
 #   NODE_ENV      构建环境          默认 production
+#   APP_TIME_ZONE 应用时区          默认 Asia/Shanghai
 #   SKIP_BACKUP   设为 1 跳过备份
 #   SKIP_MIGRATE  设为 1 跳过数据库迁移
 #   LOCAL_BUILD   设为 1 本地构建后上传
@@ -78,6 +79,7 @@ VPS_PORT="${VPS_PORT:-22}"
 APP_NAME="gantt-app-minute"
 APP_DIR="${APP_DIR:-/opt/gantt-app-minute}"
 APP_PORT="${APP_PORT:-3001}"
+APP_TIME_ZONE="${APP_TIME_ZONE:-Asia/Shanghai}"
 DB_NAME="gantt_app_minute"
 BACKUP_DIR="/var/backups/gantt-app-minute"
 KEEP_DAYS=7
@@ -169,6 +171,7 @@ echo " 甘特图 VPS 部署（分钟级分支）"
 echo " 目标:   ${REMOTE_TARGET}:${VPS_PORT} → ${APP_DIR}"
 echo " 应用:   ${APP_NAME} @ :${APP_PORT}"
 echo " 数据库: ${DB_NAME}"
+echo " 时区:   ${APP_TIME_ZONE}"
 echo " 模式: $(
   [[ "$LOCAL_BUILD" -eq 1 ]] && echo "本地构建" || echo "远程构建"
 ) | 备份: $(
@@ -227,6 +230,7 @@ set -euo pipefail
 APP_NAME="gantt-app-minute"
 APP_DIR="__APP_DIR__"
 APP_PORT="__APP_PORT__"
+APP_TIME_ZONE="__APP_TIME_ZONE__"
 DB_NAME="__DB_NAME__"
 BACKUP_DIR="/var/backups/gantt-app-minute"
 KEEP_DAYS=7
@@ -239,6 +243,7 @@ echo "====== VPS 远程部署开始（分钟级）======"
 echo "安装目录: $APP_DIR"
 echo "数据库:   $DB_NAME"
 echo "端口:     $APP_PORT"
+echo "应用时区: $APP_TIME_ZONE"
 echo ""
 
 # 备份数据库
@@ -281,7 +286,11 @@ DB_USER=postgres
 DB_PASSWORD=\${DB_PASSWORD:-changeme}
 NODE_ENV=production
 PORT=${APP_PORT}
+APP_TIME_ZONE=${APP_TIME_ZONE}
 ENVEOF
+fi
+if ! grep -q '^APP_TIME_ZONE=' .env; then
+  echo "APP_TIME_ZONE=${APP_TIME_ZONE}" >> .env
 fi
 
 # 确保数据库存在
@@ -327,7 +336,7 @@ fi
 # 启动（指定端口）
 echo ">> 启动服务 @ :${APP_PORT}..."
 pm2 delete "$APP_NAME" 2>/dev/null || true
-PORT="$APP_PORT" pm2 start npm --name "$APP_NAME" -- start
+PORT="$APP_PORT" APP_TIME_ZONE="$APP_TIME_ZONE" TZ="$APP_TIME_ZONE" pm2 start npm --name "$APP_NAME" -- start
 pm2 save 2>/dev/null || true
 
 echo ""
@@ -339,6 +348,7 @@ REMOTE_EOF
 # 替换占位符
 sed -i.bak "s|__APP_DIR__|${APP_DIR}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__APP_PORT__|${APP_PORT}|g" "$TMP_SCRIPT"
+sed -i.bak "s|__APP_TIME_ZONE__|${APP_TIME_ZONE}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__DB_NAME__|${DB_NAME}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__SKIP_BACKUP__|${SKIP_BACKUP}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__SKIP_MIGRATE__|${SKIP_MIGRATE}|g" "$TMP_SCRIPT"

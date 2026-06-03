@@ -52,17 +52,33 @@ export async function GET(req: NextRequest, { params }: Params) {
   const taskSummary: Record<string, {
     task_code: string
     changes: { field: string; old: string; new: string; at: string }[]
+    dependency_changes: { type: string; description: string; at: string }[]
     created: boolean
     deleted: boolean
+    created_at: string | null
+    deleted_at: string | null
   }> = {}
 
   for (const row of res.rows) {
     if (!taskSummary[row.task_code]) {
-      taskSummary[row.task_code] = { task_code: row.task_code, changes: [], created: false, deleted: false }
+      taskSummary[row.task_code] = {
+        task_code: row.task_code,
+        changes: [],
+        dependency_changes: [],
+        created: false,
+        deleted: false,
+        created_at: null,
+        deleted_at: null,
+      }
     }
     const entry = taskSummary[row.task_code]
-    if (row.event_type === 'created') entry.created = true
-    else if (row.event_type === 'deleted') entry.deleted = true
+    if (row.event_type === 'created') {
+      entry.created = true
+      entry.created_at = row.created_at
+    } else if (row.event_type === 'deleted') {
+      entry.deleted = true
+      entry.deleted_at = row.created_at
+    }
     else if (row.event_type === 'updated' && row.field_name) {
       entry.changes.push({
         field: row.field_name,
@@ -75,6 +91,12 @@ export async function GET(req: NextRequest, { params }: Params) {
         field: row.field_name,
         old: row.old_value ?? '',
         new: row.new_value ?? '',
+        at: row.created_at,
+      })
+    } else if (String(row.event_type).startsWith('dep_')) {
+      entry.dependency_changes.push({
+        type: row.event_type,
+        description: row.description ?? '',
         at: row.created_at,
       })
     }

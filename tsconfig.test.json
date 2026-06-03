@@ -13,6 +13,7 @@
   "include": [
     "tests/**/*.ts",
     "lib/clientTime.ts",
+    "lib/statusDatePolicy.ts",
     "lib/projectProgress.ts",
     "lib/scheduling.ts",
     "types/**/*.ts"

@@ -12,7 +12,8 @@ import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
-import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor, collapseDeletedTaskSuccessors, rollupSummaryTasks } from '@/lib/clientScheduling'
+import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -683,7 +684,7 @@ export default function GanttChart({
   const [dropIdx, setDropIdx] = useState<number|null>(null)
 
   // ── Context menu ────────────────────────────────────────────────────────
-  interface CtxMenu { x: number; y: number; taskId: string; submenu: 'add' | 'delete-dep' | 'add-dep' | null; subX?: number; subY?: number }
+  interface CtxMenu { x: number; y: number; taskId: string; submenu: 'add' | 'delete-dep' | null; subX?: number; subY?: number }
   const [ctxMenu, setCtxMenu] = useState<CtxMenu|null>(null)
 
   // ── Cell editing ────────────────────────────────────────────────────────
@@ -1102,6 +1103,19 @@ export default function GanttChart({
     return rows
   }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, statusDate])
 
+  const progressTasks = useMemo(() => {
+    if (Object.keys(previewMap).length === 0) return tasks
+    return tasks.map(t => previewMap[t.id] ?? t)
+  }, [tasks, previewMap])
+
+  const withSummaryRollupPreview = useCallback((map: Record<string, Task>): Record<string, Task> => {
+    const fullPreview = tasks.map(t => map[t.id] ?? t)
+    for (const summaryTask of rollupSummaryTasks(fullPreview)) {
+      map[summaryTask.id] = summaryTask
+    }
+    return map
+  }, [tasks])
+
   // ── Row index map (based on displayed rows for arrow positioning) ────────
   const rowIdx = useMemo(() => {
     const m: Record<string,number>={}
@@ -1265,38 +1279,10 @@ export default function GanttChart({
 
   // ── 摘要任务进度（所有后代叶子任务按工期加权的完成度） ──────────────
   const statusDateObj = useMemo(() => statusDate ? new Date(statusDate) : null, [statusDate])
-  const summaryProgressMap = useMemo(() => {
-    const map = new Map<string, number>()
-    if (summarySet.size === 0) return map
-    // 收集每个摘要任务的所有后代叶子（防止循环引用）
-    function getLeafDescendants(parentId: string, visited?: Set<string>): Task[] {
-      const seen = visited ?? new Set<string>()
-      if (seen.has(parentId)) return []
-      seen.add(parentId)
-      const leaves: Task[] = []
-      const children = tasks.filter(t => t.parent_id === parentId && !t.is_deleted)
-      for (const c of children) {
-        if (summarySet.has(c.id)) {
-          leaves.push(...getLeafDescendants(c.id, seen))
-        } else {
-          leaves.push(c)
-        }
-      }
-      return leaves
-    }
-    for (const sid of summarySet) {
-      const leaves = getLeafDescendants(sid)
-      if (leaves.length === 0) { map.set(sid, 0); continue }
-      let totalDur = 0, weightedSum = 0
-      for (const t of leaves) {
-        const dur = t.duration ?? 1
-        totalDur += dur
-        weightedSum += dur * timeBasedPercent(t, statusDateObj)
-      }
-      map.set(sid, totalDur > 0 ? Math.round(weightedSum / totalDur) : 0)
-    }
-    return map
-  }, [tasks, summarySet, statusDateObj])
+  const summaryProgressMap = useMemo(
+    () => computeSummaryProgressMap(progressTasks, statusDate),
+    [progressTasks, statusDate]
+  )
 
 
   // ── SVG mouse position helper ───────────────────────────────────────────
@@ -1552,7 +1538,7 @@ export default function GanttChart({
               }
             }
 
-            throttledSetPreview(map)
+            throttledSetPreview(withSummaryRollupPreview(map))
           } else {
           // ── 普通叶子任务拖动（原有逻辑） ──
           let newStart = drag.origStart, newEnd = drag.origEnd
@@ -1576,8 +1562,8 @@ export default function GanttChart({
             [orig.id]: {
               ...orig,
               start_date: fmtDt(newStart),
-              end_date:   fmtDate(newEnd),
-              duration:   diffDays(newStart, newEnd),
+              end_date:   fmtDt(newEnd),
+              duration:   diffMins(newStart, newEnd),
             },
           }
 
@@ -1687,7 +1673,7 @@ export default function GanttChart({
             }
           }
 
-          throttledSetPreview(map)
+          throttledSetPreview(withSummaryRollupPreview(map))
           } // end else (非摘要任务)
         }
       }
@@ -1734,12 +1720,13 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
     const onUp = async (e: MouseEvent) => {
       if (drag) {
+        const latestPreview = pendingPreview.current ?? previewMap
         // 清理节流定时器
         if (throttleTimer.current) {
           clearTimeout(throttleTimer.current)
@@ -1748,7 +1735,7 @@ export default function GanttChart({
         pendingPreview.current = null
 
         // Use pendingPreview if previewMap is stale (throttle dropped the last frame)
-        const finalPreview = drag.dragging ? Object.values(previewMap) : []
+        const finalPreview = drag.dragging ? Object.values(latestPreview) : []
         setDrag(null)
         setPreviewMap({})
 
@@ -1774,23 +1761,23 @@ export default function GanttChart({
             if (depType === 3 || depType === 1) {
               const fixedEnd = draggedTask.end_date!
               const newStart = dragged?.start_date ?? draggedTask.start_date
-              const newDur = newStart ? diffDays(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
+              const newDur = newStart ? diffMins(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
               dirtyList = [{
                 ...draggedTask,
                 start_date: newStart,
                 end_date: fixedEnd,
-                duration: Math.max(newDur, 1),
+                duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
               }]
             } else {
               const hasIncoming = incoming.length > 0
               const fixedStart = hasIncoming ? draggedTask.start_date! : (dragged?.start_date ?? draggedTask.start_date!)
               const newEnd = dragged?.end_date ?? draggedTask.end_date
-              const newDur = newEnd ? diffDays(new Date(fixedStart), new Date(newEnd)) : (draggedTask.duration ?? 0)
+              const newDur = newEnd ? diffMins(new Date(fixedStart), new Date(newEnd)) : (draggedTask.duration ?? 0)
               dirtyList = [{
                 ...draggedTask,
                 start_date: fixedStart,
                 end_date: newEnd,
-                duration: Math.max(newDur, 1),
+                duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
               }]
             }
           } else if (draggedTask) {
@@ -2279,12 +2266,16 @@ export default function GanttChart({
     setCtxMenu(null)
     // 同时移除关联依赖（本地）
     const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([taskId]))
     const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => t.id !== taskId)
-    recascade(remainDeps, remainTasks)
-  }, [dispatch, tasks, deps, recascade])
+    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date)
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
+    dispatch(deleteTasks([taskId]))
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
+    }
+  }, [dispatch, tasks, deps, currentProject?.status_date])
 
   const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2376,12 +2367,16 @@ export default function GanttChart({
     setCtxMenu(null)
     dispatch(copyTasks([taskId]))
     const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([taskId]))
     const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => t.id !== taskId)
-    recascade(remainDeps, remainTasks)
-  }, [dispatch, tasks, deps, recascade])
+    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date)
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
+    dispatch(deleteTasks([taskId]))
+    if (cascaded.length > 0) {
+      dispatch(updateTasks(cascaded))
+      dispatch(markDirty(cascaded.map(t => t.id)))
+    }
+  }, [dispatch, tasks, deps, currentProject?.status_date])
 
   const handleCtxPaste = useCallback(() => {
     setCtxMenu(null)
@@ -2474,27 +2469,6 @@ export default function GanttChart({
     recascade(remainDeps, nextTasks)
   }, [dispatch, tasks, deps, recascade])
 
-  const handleCtxAddDep = useCallback((fromId: string, toId: string) => {
-    setCtxMenu(null)
-    const already = deps.find(d => d.from_task_id === fromId && d.to_task_id === toId)
-    if (already) return
-    const newDep: Dependency = {
-      id: uuid(), project_id: projectId,
-      from_task_id: fromId, to_task_id: toId,
-      type: 2, lag: 0, active: true,
-    }
-    dispatch(addDependency(newDep))
-    let nextTasks = tasks
-    const toTask__ = tasks.find(x => x.id === toId)
-    if (toTask__ && toTask__.auto_schedule === false) {
-      const updatedTo = { ...toTask__, auto_schedule: true }
-      dispatch(updateTasks([updatedTo]))
-      dispatch(markDirty([toId]))
-      nextTasks = tasks.map(t => t.id === toId ? updatedTo : t)
-    }
-    recascade([...deps, newDep], nextTasks)
-  }, [dispatch, projectId, deps, tasks, recascade])
-
   const handleCtxRemoveAllDeps = useCallback((taskId: string) => {
     setCtxMenu(null)
     const taskDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
@@ -2517,33 +2491,6 @@ export default function GanttChart({
       recascade(deps, nextTasks)
     }
   }, [tasks, deps, dispatch, recascade])
-
-  const handleEnableAutoSchedule = useCallback(() => {
-    setCtxMenu(null)
-    if (!confirm('将为所有有依赖关系的任务启用自动排程，确认？')) return
-    const idsWithDeps = new Set<string>()
-    for (const d of deps) idsWithDeps.add(d.to_task_id)
-    const updates = tasks
-      .filter(t => idsWithDeps.has(t.id) && t.auto_schedule === false)
-      .map(t => ({ ...t, auto_schedule: true }))
-    if (updates.length === 0) { alert('没有需要启用的任务'); return }
-    dispatch(updateTasks(updates))
-    dispatch(markDirty(updates.map(t => t.id)))
-    const nextTasks = tasks.map(t => updates.find(u => u.id === t.id) ?? t)
-    recascade(deps, nextTasks)
-    alert(`已启用 ${updates.length} 个任务的自动排程`)
-  }, [tasks, deps, dispatch, recascade])
-
-  const handleFixProjectDates = useCallback(() => {
-    setCtxMenu(null)
-    if (!confirm('将根据依赖关系重新计算所有任务日期，确认？')) return
-    const cascaded = runFullCascade(tasks, deps)
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-    }
-    alert(`已重算 ${cascaded.length} 个任务的日期`)
-  }, [tasks, deps, dispatch])
 
   const toggle = useCallback((id: string) => {
     setExpanded(prev=>({ ...prev, [id]:!(prev[id]??true) }))
@@ -4306,7 +4253,6 @@ export default function GanttChart({
         const canIndent  = !!prevSibling
         const canOutdent = !!task.parent_id
         const isSummary = summarySet.has(ctxMenu.taskId)
-        const depCandidates = tasks.filter(t => t.id !== ctxMenu.taskId && !summarySet.has(t.id))
 
         // Smart positioning: clamp to viewport
         const menuH = 520
@@ -4340,7 +4286,18 @@ export default function GanttChart({
           </button>
         )
 
-        const SubRow = ({ icon, label, sub }: { icon: React.ReactNode; label: string; sub: 'add' | 'add-dep' | 'delete-dep' }) => (
+        const openSuccessorPopupFromMenu = () => {
+          const popupW = 300
+          const popupH = 320
+          const x = Math.min(Math.max(pad, left + menuW + 8), window.innerWidth - popupW - pad)
+          const y = Math.min(Math.max(pad, top), window.innerHeight - popupH - pad)
+          setCtxMenu(null)
+          setPredPopup(null)
+          setSuccFilter('')
+          setSuccPopup({ taskId: ctxMenu.taskId, x, y })
+        }
+
+        const SubRow = ({ icon, label, sub }: { icon: React.ReactNode; label: string; sub: 'add' | 'delete-dep' }) => (
           <div className="relative"
                onMouseEnter={(e) => {
                  const rect = e.currentTarget.getBoundingClientRect()
@@ -4415,18 +4372,13 @@ export default function GanttChart({
             {/* Group 6: Dependencies — 父级任务不允许依赖 */}
             {isSummary
               ? <Row icon={IcoLink} label="添加依赖关系" disabled />
-              : <SubRow icon={IcoLink} label="添加依赖关系" sub="add-dep" />}
+              : <Row icon={IcoLink} label="管理后续依赖" onClick={openSuccessorPopupFromMenu} />}
             {isSummary
               ? <Row icon={IcoUnlink} label="删除依赖关系" disabled />
               : hasDeps
                 ? <SubRow icon={IcoUnlink} label="删除依赖关系" sub="delete-dep" />
                 : <Row    icon={IcoUnlink} label="删除依赖关系" disabled />}
 
-            <Sep />
-
-            {/* Group 7: Auto Schedule */}
-            <Row icon={IcoAuto} label="批量启用自动排程" onClick={handleEnableAutoSchedule} />
-            <Row icon={IcoAuto} label="修复任务日期" onClick={handleFixProjectDates} />
           </div>
         )
       })()}
@@ -4456,12 +4408,6 @@ export default function GanttChart({
             ['添加前置任务', () => handleCtxAddPredecessor(ctxMenu.taskId)],
           ] as [string, () => void][]).map(([lbl, fn]) => (
             <button key={lbl} className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 whitespace-nowrap" onClick={fn}>{lbl}</button>
-          ))}
-          {ctxMenu.submenu === 'add-dep' && tasks.filter(t => t.id !== ctxMenu.taskId && !summarySet.has(t.id)).map(t => (
-            <button key={t.id} className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 whitespace-nowrap truncate max-w-[220px]"
-                    onClick={() => handleCtxAddDep(ctxMenu.taskId, t.id)}>
-              {t.name}
-            </button>
           ))}
           {ctxMenu.submenu === 'delete-dep' && deps.filter(d => d.from_task_id === ctxMenu.taskId || d.to_task_id === ctxMenu.taskId).map(dep => {
             const from = tasks.find(t => t.id === dep.from_task_id)

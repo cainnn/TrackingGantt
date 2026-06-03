@@ -3,6 +3,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
+import { getTodayYmd, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -74,9 +75,8 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     // 禁止保存"未来"日期的版本：状态日期不得超过服务器当前日期
     if (statusDate) {
-      const now = new Date()
-      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-      if (statusDate > today) {
+      const today = getTodayYmd()
+      if (isStatusDateAfterToday(statusDate, today)) {
         await client.query('ROLLBACK')
         return NextResponse.json(failure(`状态日期不能晚于今天 (${today})`, 400), { status: 400 })
       }

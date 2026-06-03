@@ -6,7 +6,7 @@ import { success, failure } from '@/lib/result'
 import {
   type TaskLike,
   toDateStr, addDaysStr, diffDaysStr,
-  cascadeDependencies, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
+  cascadeDependencies, collapseDeletedTaskSuccessors, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
   snapTasksToDayLevel,
 } from '@/lib/scheduling'
 
@@ -894,6 +894,9 @@ export async function DELETE(req: NextRequest, { params }: Params) {
        WHERE project_id = $1 AND id IN (${ph})`,
       [projectId, ...allIdArr]
     )
+
+    await collapseDeletedTaskSuccessors(client, projectId, allIdArr)
+    await updateSummaryTasksDates(client, projectId)
 
     // Lifecycle events
     for (const t of toDelete.rows) {

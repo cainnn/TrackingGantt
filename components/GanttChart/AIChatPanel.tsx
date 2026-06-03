@@ -8,7 +8,7 @@ import {
 } from '@/store/slices/tasksSlice'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
-import { runFullCascade } from '@/lib/clientScheduling'
+import { collapseDeletedTaskSuccessors, runFullCascade } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
 import type { Task, Dependency } from '@/types'
@@ -184,11 +184,17 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             if (ids.length === 0) { result = 'No matching tasks found'; break }
             const idSet = new Set(ids)
             const relatedDeps = dependencies.filter(d => idSet.has(d.from_task_id) || idSet.has(d.to_task_id))
-            for (const d of relatedDeps) dispatch(removeDependency(d.id))
-            dispatch(deleteTasks(ids))
             const remainTasks = tasks.filter(t => !idSet.has(t.id))
             const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
-            const cascaded = runFullCascade(remainTasks, remainDeps)
+            const cascaded = collapseDeletedTaskSuccessors(
+              remainTasks,
+              dependencies,
+              remainDeps,
+              idSet,
+              currentProject?.status_date,
+            )
+            for (const d of relatedDeps) dispatch(removeDependency(d.id))
+            dispatch(deleteTasks(ids))
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))
@@ -246,11 +252,23 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               const { events, summary } = data.value
               // Format for LLM consumption
               const lines: string[] = [`变更记录 (${args.from_date} ~ ${args.to_date}), 共 ${events.length} 条:`]
-              for (const [code, info] of Object.entries(summary) as [string, { task_code: string; changes: { field: string; old: string; new: string; at: string }[]; created: boolean; deleted: boolean }][]) {
-                if (info.created) lines.push(`  [新建] 任务 ${code}`)
-                if (info.deleted) lines.push(`  [删除] 任务 ${code}`)
+              for (const [code, info] of Object.entries(summary) as [string, {
+                task_code: string
+                changes: { field: string; old: string; new: string; at: string }[]
+                dependency_changes?: { type: string; description: string; at: string }[]
+                created: boolean
+                deleted: boolean
+                created_at?: string | null
+                deleted_at?: string | null
+              }][]) {
+                if (info.created) lines.push(`  [新建] 任务 ${code}${info.created_at ? ` (${info.created_at})` : ''}`)
+                if (info.deleted) lines.push(`  [删除] 任务 ${code}${info.deleted_at ? ` (${info.deleted_at})` : ''}`)
                 for (const c of info.changes) {
+                  if (c.field === 'percent_done' || c.field === '完成度') continue
                   lines.push(`  任务 ${code}: ${c.field} "${c.old}" → "${c.new}"`)
+                }
+                for (const d of info.dependency_changes ?? []) {
+                  lines.push(`  [依赖${d.type.replace('dep_', ':')}] 任务 ${code}: ${d.description}`)
                 }
               }
               if (events.length === 0) lines.push('  该时间段内没有任何变更记录。')
@@ -373,11 +391,23 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         lines.push('该时间段内没有任何变更记录。')
       } else {
         lines.push(`共 ${events.length} 条变更：`)
-        for (const [code, info] of Object.entries(summary) as [string, { task_code: string; changes: { field: string; old: string; new: string }[]; created: boolean; deleted: boolean }][]) {
-          if (info.created) lines.push(`  [新建] 任务 ${code}`)
-          if (info.deleted) lines.push(`  [删除] 任务 ${code}`)
+        for (const [code, info] of Object.entries(summary) as [string, {
+          task_code: string
+          changes: { field: string; old: string; new: string }[]
+          dependency_changes?: { type: string; description: string; at: string }[]
+          created: boolean
+          deleted: boolean
+          created_at?: string | null
+          deleted_at?: string | null
+        }][]) {
+          if (info.created) lines.push(`  [新建] 任务 ${code}${info.created_at ? ` (${info.created_at})` : ''}`)
+          if (info.deleted) lines.push(`  [删除] 任务 ${code}${info.deleted_at ? ` (${info.deleted_at})` : ''}`)
           for (const c of info.changes) {
+            if (c.field === 'percent_done' || c.field === '完成度') continue
             lines.push(`  任务 ${code}: ${c.field} "${c.old}" → "${c.new}"`)
+          }
+          for (const d of info.dependency_changes ?? []) {
+            lines.push(`  [依赖${d.type.replace('dep_', ':')}] 任务 ${code}: ${d.description}`)
           }
         }
       }
@@ -414,11 +444,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     lines.push(`\n【项目状态】`)
     lines.push(`项目名称: ${currentProject?.name ?? '未知'}`)
     lines.push(`状态日期: ${currentProject?.status_date?.split('T')[0] ?? '未设置'}`)
-    lines.push(`整体进度: ${progress}%`)
-    const overdue = tasks.filter(t => !t.is_deleted && t.end_date && new Date(t.end_date) < new Date() && (t.percent_done ?? 0) < 100)
-    if (overdue.length > 0) {
-      lines.push(`逾期任务 (${overdue.length}个): ${overdue.slice(0, 10).map(t => `${t.task_code} ${t.name}`).join(', ')}`)
-    }
+    lines.push(`整体进度参考值: ${progress}%（由状态日期自动计算，仅供参考，不作为工期变动分析依据）`)
 
     return lines.join('\n')
   }, [projectId, tasks, currentProject])

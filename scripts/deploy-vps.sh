@@ -22,6 +22,7 @@ set -euo pipefail
 #   SSH_IDENTITY  指定私钥路径
 #   APP_DIR       VPS 上安装目录    默认 /opt/gantt-app
 #   NODE_ENV      构建环境          默认 production
+#   APP_TIME_ZONE 应用时区          默认 Asia/Shanghai
 #   SKIP_BACKUP   设为 1 跳过备份
 #   SKIP_MIGRATE  设为 1 跳过数据库迁移
 #   LOCAL_BUILD   设为 1 本地构建后上传（适合 VPS 内存不足）
@@ -39,6 +40,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "环境变量："
   echo "  VPS_HOST=IP             VPS 地址（默认 159.75.40.209）"
   echo "  VPS_PASS=密码           使用密码登录（默认用 SSH 公钥）"
+  echo "  APP_TIME_ZONE=时区      应用日期时区（默认 Asia/Shanghai）"
   echo "  SKIP_BACKUP=1           跳过数据库备份"
   echo "  SKIP_MIGRATE=1          跳过数据库迁移"
   echo "  LOCAL_BUILD=1           本地构建后上传"
@@ -75,6 +77,7 @@ VPS_PASS="${3:-${VPS_PASS:-}}"
 VPS_PORT="${VPS_PORT:-22}"
 APP_NAME="gantt-app"
 APP_DIR="${APP_DIR:-/opt/gantt-app}"
+APP_TIME_ZONE="${APP_TIME_ZONE:-Asia/Shanghai}"
 BACKUP_DIR="/var/backups/gantt-app"
 KEEP_DAYS=7
 LOCAL_BUILD="${LOCAL_BUILD:-0}"
@@ -163,6 +166,7 @@ echo ""
 echo "============================================="
 echo " 甘特图 VPS 部署"
 echo " 目标: ${REMOTE_TARGET}:${VPS_PORT} → ${APP_DIR}"
+echo " 时区: ${APP_TIME_ZONE}"
 echo " 模式: $(
   [[ "$LOCAL_BUILD" -eq 1 ]] && echo "本地构建" || echo "远程构建"
 ) | 备份: $(
@@ -227,6 +231,7 @@ set -euo pipefail
 
 APP_NAME="gantt-app"
 APP_DIR="__APP_DIR__"
+APP_TIME_ZONE="__APP_TIME_ZONE__"
 BACKUP_DIR="/var/backups/gantt-app"
 KEEP_DAYS=7
 SKIP_BACKUP="__SKIP_BACKUP__"
@@ -236,6 +241,7 @@ LOCAL_BUILD="__LOCAL_BUILD__"
 echo ""
 echo "====== VPS 远程部署开始 ======"
 echo "安装目录: $APP_DIR"
+echo "应用时区: $APP_TIME_ZONE"
 echo ""
 
 # 备份数据库
@@ -279,7 +285,11 @@ DB_NAME=gantt_app
 DB_USER=postgres
 DB_PASSWORD=\${DB_PASSWORD:-changeme}
 NODE_ENV=production
+APP_TIME_ZONE=${APP_TIME_ZONE}
 ENVEOF
+fi
+if ! grep -q '^APP_TIME_ZONE=' .env; then
+  echo "APP_TIME_ZONE=${APP_TIME_ZONE}" >> .env
 fi
 
 # 确保数据库存在
@@ -326,7 +336,8 @@ fi
 
 # 启动
 echo ">> 启动服务..."
-pm2 restart "$APP_NAME" 2>/dev/null || pm2 start npm --name "$APP_NAME" -- start
+APP_TIME_ZONE="$APP_TIME_ZONE" TZ="$APP_TIME_ZONE" pm2 restart "$APP_NAME" --update-env 2>/dev/null || \
+  APP_TIME_ZONE="$APP_TIME_ZONE" TZ="$APP_TIME_ZONE" pm2 start npm --name "$APP_NAME" -- start
 pm2 save 2>/dev/null || true
 
 echo ""
@@ -337,6 +348,7 @@ REMOTE_EOF
 
 # 替换占位符
 sed -i.bak "s|__APP_DIR__|${APP_DIR}|g" "$TMP_SCRIPT"
+sed -i.bak "s|__APP_TIME_ZONE__|${APP_TIME_ZONE}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__SKIP_BACKUP__|${SKIP_BACKUP}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__SKIP_MIGRATE__|${SKIP_MIGRATE}|g" "$TMP_SCRIPT"
 sed -i.bak "s|__LOCAL_BUILD__|${LOCAL_BUILD}|g" "$TMP_SCRIPT"

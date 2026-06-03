@@ -22,8 +22,8 @@ import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsCon
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
-import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
-import { buildSaveDiff, hasAnyDiff } from '@/lib/clientSave'
+import { runFullCascade, collapseDeletedTaskSuccessors } from '@/lib/clientScheduling'
+import { buildSaveDiff } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import type { Dependency } from '@/types'
 
@@ -527,7 +527,7 @@ export default function GanttToolbar({
         // 只在没有任何版本（含 autosave）且当前有任务时创建初始版本
         const hasAny = d.value.length > 0
         if (hasAny) return
-        const hasTasks = autosaveRef.current.tasks.some(t => !t.is_deleted)
+        const hasTasks = currentStateRef.current.tasks.some(t => !t.is_deleted)
         if (!hasTasks) return
         const now = new Date()
         const pad = (n: number) => String(n).padStart(2, '0')
@@ -538,8 +538,8 @@ export default function GanttToolbar({
             method: 'POST',
             headers: authFetchHeaders(true),
             body: JSON.stringify({
-              tasks: autosaveRef.current.tasks,
-              dependencies: autosaveRef.current.dependencies,
+              tasks: currentStateRef.current.tasks,
+              dependencies: currentStateRef.current.dependencies,
               status_date: sd,
               name: '初始版本',
               description: '项目首次进入时自动创建的基线快照',
@@ -556,111 +556,12 @@ export default function GanttToolbar({
       .catch(() => {})
   }, [projectId, dispatch, readOnly])
 
-  // ── 自动保存：把脏数据直接落库到 tasks/dependencies（不创建版本快照） ──
-  // 用 ref 持有当前 state，定时器只在 mount 时建一次，避免每次编辑都重置 30 秒计时。
-  const autosaveRef = useRef({ tasks, dependencies, dirtyIds, baselineTasks, baselineDeps })
+  // ── 当前编辑态快照 ───────────────────────────────────────────────────
+  // 仅供初始化版本快照使用。任务/依赖编辑不能自动落库，必须由"确认变更"统一持久化。
+  const currentStateRef = useRef({ tasks, dependencies, dirtyIds, baselineTasks, baselineDeps })
   useEffect(() => {
-    autosaveRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
+    currentStateRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
   }, [tasks, dependencies, dirtyIds, baselineTasks, baselineDeps])
-
-  // ── 撤销历史栈：每次 tasks/deps 变化都压栈一份，"放弃更改"每点一次 pop 一步 ──
-  const historyRef = useRef<Array<{ tasks: Task[]; deps: Dependency[] }>>([])
-  const skipNextHistoryPushRef = useRef(false)
-  const HISTORY_MAX = 50
-  useEffect(() => {
-    if (skipNextHistoryPushRef.current) { skipNextHistoryPushRef.current = false; return }
-    const id = setTimeout(() => {
-      if (historyRef.current.length >= HISTORY_MAX) historyRef.current.shift()
-      historyRef.current.push({ tasks: tasks.map(t => ({ ...t })), deps: dependencies.map(d => ({ ...d })) })
-    }, 300)
-    return () => clearTimeout(id)
-  }, [tasks, dependencies])
-
-  useEffect(() => {
-    if (readOnly) return
-    let busy = false
-    const flush = async () => {
-      if (busy) return
-      const cur = autosaveRef.current
-      if (cur.dirtyIds.length === 0) return
-      const diff = buildSaveDiff(cur.baselineTasks, cur.baselineDeps, cur.tasks, cur.dependencies)
-      if (!hasAnyDiff(diff)) return
-      busy = true
-      try {
-        for (const depId of diff.depsToDelete) {
-          const r = await authFetch(`/api/dependencies/${projectId}`, {
-            method: 'DELETE', headers: authFetchHeaders(true),
-            body: JSON.stringify({ id: depId }),
-          })
-          if (!r.ok) throw new Error(`autosave del-dep ${r.status}`)
-        }
-        if (diff.tasksToDelete.length > 0) {
-          const r = await authFetch(`/api/tasks/${projectId}`, {
-            method: 'DELETE', headers: authFetchHeaders(true),
-            body: JSON.stringify({ ids: diff.tasksToDelete }),
-          })
-          if (!r.ok) throw new Error(`autosave del-task ${r.status}`)
-        }
-        if (diff.tasksToAdd.length > 0) {
-          const r = await authFetch(`/api/tasks/${projectId}`, {
-            method: 'POST', headers: authFetchHeaders(true),
-            body: JSON.stringify(diff.tasksToAdd),
-          })
-          if (!r.ok) throw new Error(`autosave add-task ${r.status}`)
-        }
-        if (diff.tasksToUpdate.length > 0) {
-          const payload = diff.tasksToUpdate.map(t => ({
-            id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
-            duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
-            order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
-            assignee: t.assignee, note: t.note,
-            constraint_type: t.constraint_type, constraint_date: t.constraint_date,
-            status: t.status, deadline: t.deadline,
-            rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
-            baseline_end_date: t.baseline_end_date, task_code: t.task_code,
-          }))
-          const r = await authFetch(`/api/tasks/${projectId}`, {
-            method: 'PUT', headers: authFetchHeaders(true),
-            body: JSON.stringify(payload),
-          })
-          if (!r.ok) throw new Error(`autosave upd-task ${r.status}`)
-        }
-        for (const dep of diff.depsToAdd) {
-          const r = await authFetch(`/api/dependencies/${projectId}`, {
-            method: 'POST', headers: authFetchHeaders(true),
-            body: JSON.stringify({
-              id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
-              type: dep.type, lag: dep.lag, active: dep.active ?? true,
-            }),
-          })
-          if (!r.ok) throw new Error(`autosave add-dep ${r.status}`)
-        }
-        for (const dep of diff.depsToUpdate) {
-          const r = await authFetch(`/api/dependencies/${projectId}`, {
-            method: 'PUT', headers: authFetchHeaders(true),
-            body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true }),
-          })
-          if (!r.ok) throw new Error(`autosave upd-dep ${r.status}`)
-        }
-        // 成功：更新基线 + 清 dirty
-        const living = cur.tasks.filter(t => !t.is_deleted)
-        setBaselineTasks(living.map(t => ({ ...t })))
-        setBaselineDeps(cur.dependencies.map(d => ({ ...d })))
-        dispatch(clearDirty())
-      } catch (e) {
-        console.warn('[autosave] failed:', e)
-      } finally {
-        busy = false
-      }
-    }
-    const timer = setInterval(flush, 10 * 1000)  // 10 秒一次
-    const onBeforeUnload = () => { void flush() }
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => {
-      clearInterval(timer)
-      window.removeEventListener('beforeunload', onBeforeUnload)
-    }
-  }, [projectId, readOnly, dispatch])
 
   // ── Export ─────────────────────────────────────────────────────────────
   const projectLines = useAppSelector(s => s.projectLines.lines)
@@ -1049,16 +950,22 @@ export default function GanttToolbar({
     // 同时移除关联依赖
     const ids = new Set(selectedIds)
     const relatedDeps = dependencies.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks(selectedIds))
     const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => !ids.has(t.id))
-    const cascaded = runFullCascade(remainTasks, remainDeps)
+    const cascaded = collapseDeletedTaskSuccessors(
+      remainTasks,
+      dependencies,
+      remainDeps,
+      ids,
+      currentProject?.status_date,
+    )
+    for (const d of relatedDeps) dispatch(removeDependency(d.id))
+    dispatch(deleteTasks(selectedIds))
     if (cascaded.length > 0) {
       dispatch(updateTasks(cascaded))
       dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [dispatch, selectedIds, hasSelection, tasks, dependencies])
+  }, [dispatch, selectedIds, hasSelection, tasks, dependencies, currentProject?.status_date])
 
   // ── Promote (升级) ────────────────────────────────────────────────────
   const handlePromote = useCallback(async () => {
@@ -1536,80 +1443,19 @@ export default function GanttToolbar({
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
       baselineTasks, baselineDeps, lastVersionDate, statusDateChanged])
 
-  // ── 重排对齐：把无前置依赖 + 自动模式的任务强制 snap 到 anchor，并跑级联 ──
-  const handleRealign = useCallback(() => {
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const nowStr = isMinute
-      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
-      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
-    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
-    const projStart = !isMinute && projRaw
-      ? `${projRaw.slice(0, 10)}T00:00:00`
-      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
-    const anchor = projStart && projStart > nowStr ? projStart : nowStr
-    let baseTasks = tasks
-    const merged = new Map<string, Task>()
-    // 重排对齐用 snap 模式：无依赖任务整体对齐到 anchor（push + pull 都做）
-    const anchored = applyAutoStartAnchor(baseTasks, dependencies, anchor, 'snap')
-    for (const t of anchored) merged.set(t.id, t)
-    if (anchored.length > 0) baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
-    const cascaded = runFullCascade(baseTasks, dependencies)
-    for (const t of cascaded) merged.set(t.id, t)
-    if (merged.size === 0) {
-      // 已对齐：给个无操作反馈
-      alert('所有任务已对齐到当前 anchor，无需重排')
-      return
-    }
-    const list = Array.from(merged.values())
-    dispatch(updateTasks(list))
-    dispatch(markDirty(list.map(t => t.id)))
-  }, [tasks, dependencies, isMinute, currentProject?.start_date, dispatch])
-
-  // ── 放弃更改：先尝试从撤销栈 pop 一步（多步可用），栈空再 reload DB ──
+  // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
-    // 至少需要 2 条历史：当前状态 + 上一步
-    if (historyRef.current.length >= 2) {
-      historyRef.current.pop()  // 弹掉当前
-      const prev = historyRef.current[historyRef.current.length - 1]
-      skipNextHistoryPushRef.current = true
-      dispatch(setTasks({ tasks: prev.tasks, dependencies: prev.deps }))
-      // dirtyIds 保持，由 autosave 决定后续是否落库
-      return
-    }
-    // 历史栈空 → 回退到 DB 状态（含状态日期）
-    try {
-      const [tasksRes, projRes] = await Promise.all([
-        authFetch(`/api/tasks/${projectId}`).then(r => r.json()),
-        authFetch(`/api/projects/${projectId}`).then(r => r.json()),
-      ])
-      if (tasksRes.ok && tasksRes.value) {
-        const freshTasks = Array.isArray(tasksRes.value.tasks) ? tasksRes.value.tasks : []
-        const freshDeps = Array.isArray(tasksRes.value.dependencies) ? tasksRes.value.dependencies : []
-        skipNextHistoryPushRef.current = true
-        dispatch(setTasks({ tasks: freshTasks, dependencies: freshDeps }))
-        dispatch(clearDirty())
-        dispatch(clearComparison())
-        historyRef.current = []
-        const livingTasks = freshTasks.filter((t: Task) => !t.is_deleted)
-        setBaseline(livingTasks.map((t: Task) => ({
-          id: t.id, task_code: t.task_code, name: t.name,
-          start_date: t.start_date, end_date: t.end_date,
-          duration: t.duration, assignee: t.assignee,
-          percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-          parent_id: t.parent_id,
-        })))
-        setBaselineTasks(livingTasks.map((t: Task) => ({ ...t })))
-        setBaselineDeps(freshDeps.map((d: Dependency) => ({ ...d })))
-      }
-      // 状态日期回滚到 DB 值（即便任务拉取失败，也尝试恢复以保持 UI 与基线一致）
-      if (projRes.ok && projRes.value) {
-        const freshSd = toDateTimeStr(projRes.value.status_date ?? null)
-        dispatch(setStatusDate({ projectId, statusDate: freshSd }))
-        setBaselineStatusDate(freshSd)
-      }
-    } catch { /* ignore */ }
-  }, [dispatch, projectId])
+    if (!baseline) return
+    const restoredTasks = baselineTasks.map(t => ({ ...t }))
+    const restoredDeps = baselineDeps.map(d => ({ ...d }))
+    dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
+    dispatch(setStatusDate({ projectId, statusDate: baselineStatusDate }))
+    dispatch(clearDirty())
+    dispatch(clearComparison())
+    dispatch(clearDiffFilter())
+    setReviewOpen(false)
+    setReasons({})
+  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
@@ -1752,16 +1598,6 @@ export default function GanttToolbar({
                   </button>
                 )
               })()}
-              {!readOnly && (
-                <button
-                  onClick={handleRealign}
-                  title="把无前置依赖 + 自动模式的任务拉回今天（或项目开始日期），并跑链式级联"
-                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
-                >
-                  <IcoRefresh />
-                  重排对齐
-                </button>
-              )}
               {!readOnly && (
                 <button
                   onClick={handleRefresh}

@@ -13,6 +13,19 @@ const toTimeStr = toDateTimeStr
 const addMinutes = addMinutesStr
 const diffMinutes = diffMinutesStr
 
+function timeBasedPercent(task: Task, statusDate: string | null): number {
+  const status = toTimeStr(statusDate)
+  const start = toTimeStr(task.start_date)
+  const end = toTimeStr(task.end_date)
+  if (!status || !start || !end) return task.percent_done ?? 0
+  if (status >= end) return 100
+  if (status <= start) return 0
+  const total = new Date(end).getTime() - new Date(start).getTime()
+  if (total <= 0) return 100
+  const done = new Date(status).getTime() - new Date(start).getTime()
+  return Math.round((done / total) * 100)
+}
+
 // ── 自动起点锚定 ────────────────────────────────────────────────────────
 /**
  * 无前置依赖 + 自动排程 + asap/none 约束 的任务，起点锚定到指定锚点。
@@ -97,6 +110,72 @@ interface TaskState {
   is_milestone: boolean
   original_start_date: string | null
   original_end_date: string | null
+}
+
+export function rollupSummaryTasks(allTasks: Task[]): Task[] {
+  const taskMap = new Map<string, Task>()
+  const childrenByParent = new Map<string, string[]>()
+
+  for (const task of allTasks) {
+    if (task.is_deleted) continue
+    taskMap.set(task.id, task)
+  }
+
+  for (const task of allTasks) {
+    if (task.is_deleted || !task.parent_id || task.parent_id === task.id) continue
+    if (!childrenByParent.has(task.parent_id)) childrenByParent.set(task.parent_id, [])
+    childrenByParent.get(task.parent_id)!.push(task.id)
+  }
+
+  const summaryIds = [...childrenByParent.keys()].filter(id => taskMap.has(id))
+  const depthOf = (id: string): number => {
+    let depth = 0
+    let cur = taskMap.get(id)
+    const seen = new Set<string>()
+    while (cur?.parent_id && !seen.has(cur.parent_id)) {
+      seen.add(cur.parent_id)
+      depth++
+      cur = taskMap.get(cur.parent_id)
+    }
+    return depth
+  }
+  summaryIds.sort((a, b) => depthOf(b) - depthOf(a))
+
+  const updates: Task[] = []
+  for (const parentId of summaryIds) {
+    const parent = taskMap.get(parentId)
+    if (!parent) continue
+    const childIds = childrenByParent.get(parentId) ?? []
+    let minStart: string | null = null
+    let maxEnd: string | null = null
+
+    for (const childId of childIds) {
+      const child = taskMap.get(childId)
+      const start = toTimeStr(child?.start_date)
+      const end = toTimeStr(child?.end_date)
+      if (start && (!minStart || start < minStart)) minStart = start
+      if (end && (!maxEnd || end > maxEnd)) maxEnd = end
+    }
+
+    if (!minStart || !maxEnd) continue
+    const duration = diffMinutes(minStart, maxEnd)
+    const changed =
+      toTimeStr(parent.start_date) !== minStart ||
+      toTimeStr(parent.end_date) !== maxEnd ||
+      parent.duration !== duration
+    if (!changed) continue
+
+    const next = {
+      ...parent,
+      start_date: minStart,
+      end_date: maxEnd,
+      duration,
+    }
+    taskMap.set(parentId, next)
+    updates.push(next)
+  }
+
+  return updates
 }
 
 /**
@@ -319,4 +398,71 @@ export function runFullCascade(
     })
   }
   return changedTasks
+}
+
+/**
+ * 删除任务后坍缩后继链：
+ * - 只处理原来依赖被删任务的直接后继任务；
+ * - 直接后继若开始时间在状态日期之后，则拉回状态日期并保持原工期；
+ * - 状态日期之前/当天已开始的任务不动；
+ * - 再基于剩余依赖做全量级联，让更下游任务跟随前移。
+ */
+export function collapseDeletedTaskSuccessors(
+  allTasks: Task[],
+  depsBeforeDelete: Dependency[],
+  remainingDeps: Dependency[],
+  deletedIds: Iterable<string>,
+  statusDate?: string | null,
+): Task[] {
+  const statusStart = toTimeStr(statusDate)
+  if (!statusStart) return runFullCascade(allTasks, remainingDeps)
+
+  const deletedSet = new Set(deletedIds)
+  const taskById = new Map(allTasks.filter(t => !t.is_deleted).map(t => [t.id, t]))
+  const directSuccessorIds = new Set<string>()
+
+  for (const dep of depsBeforeDelete) {
+    if (dep.active === false) continue
+    if (deletedSet.has(dep.from_task_id) && !deletedSet.has(dep.to_task_id)) {
+      directSuccessorIds.add(dep.to_task_id)
+    }
+  }
+
+  const anchored = new Map<string, Task>()
+  for (const id of directSuccessorIds) {
+    const task = taskById.get(id)
+    if (!task || task.auto_schedule === false || !task.start_date || !task.end_date) continue
+    const start = toTimeStr(task.start_date)
+    const end = toTimeStr(task.end_date)
+    if (!start || !end || start <= statusStart) continue
+
+    const duration = Math.max(0, diffMinutes(start, end))
+    const nextEnd = task.is_milestone ? statusStart : addMinutes(statusStart, duration)
+    if (!nextEnd) continue
+
+    const collapsed: Task = {
+      ...task,
+      start_date: statusStart,
+      end_date: nextEnd,
+      duration,
+    }
+    anchored.set(id, {
+      ...collapsed,
+      percent_done: timeBasedPercent(collapsed, statusStart),
+    })
+  }
+
+  const baseTasks = anchored.size > 0
+    ? allTasks.map(t => anchored.get(t.id) ?? t)
+    : allTasks
+  const merged = new Map<string, Task>(anchored)
+
+  for (const task of runFullCascade(baseTasks, remainingDeps)) {
+    merged.set(task.id, {
+      ...task,
+      percent_done: timeBasedPercent(task, statusStart),
+    })
+  }
+
+  return [...merged.values()]
 }

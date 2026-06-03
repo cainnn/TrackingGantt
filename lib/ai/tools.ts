@@ -39,7 +39,6 @@ export const AI_TOOLS = [
           end_date:     { type: 'string', description: 'YYYY-MM-DDTHH:mm or YYYY-MM-DD' },
           duration:     { type: 'number' },
           assignee:     { type: 'string' },
-          percent_done: { type: 'number', description: '0-100' },
           is_milestone: { type: 'boolean' },
           note:         { type: 'string' },
         },
@@ -106,7 +105,6 @@ export const AI_TOOLS = [
             type: 'object',
             properties: {
               assignee:     { type: 'string' },
-              percent_done: { type: 'number' },
               start_date:   { type: 'string' },
               end_date:     { type: 'string' },
               duration:     { type: 'number' },
@@ -230,6 +228,7 @@ export function buildSystemPrompt(
       : (dayOnly ? `${Math.round(t.duration / 1440)}天` : `${t.duration}分钟`)
     return [
       t.task_code, t.name,
+      t.created_at?.split('T')[0] ?? '',
       t.start_date?.split('T')[0] ?? '', curEnd,
       durDisplay, t.assignee ?? '', pct,
       parentCode, t.is_milestone ? 'Y' : '',
@@ -278,8 +277,10 @@ ${statusDate ? `Status date: ${typeof statusDate === 'string' && statusDate.incl
 ${progress != null ? `Overall progress: ${progress}%` : ''}
 
 Project granularity: ${isMinute ? '分钟级（minute）—— 时长用分钟/小时/天混合输出' : '天级（day）—— 所有时长统一按整天输出，不要出现分钟、小时'}
-Tasks (code | name | start | end | duration | assignee | %done | parent_code | milestone | baseline_end | delay_flag | delay_reason):
+Tasks (code | name | created | start | end | duration | assignee | %done_ref | parent_code | milestone | baseline_end | delay_flag | delay_reason):
+- **created** 是任务创建时间，用于判断本期新增任务及审计上下文。
 - **baseline_end** 是上一期版本快照中的计划结束日期。
+- **%done_ref** 是按状态日期自动计算出来的参考进度，只能作为背景信息；不要把它作为周报/计划变更分析的主要依据。
 - **delay_flag** 格式：${dayOnly
   ? '"延期+N天" / "提前-N天"；这是判定延期/提前的权威依据，总结时必须列出天数。本项目是天级项目，禁止使用分钟、小时单位。'
   : '"延期+N天" / "提前-N天" / "延期+N小时" / "延期+N分钟"，根据实际时长精度输出；为空表示无变化。这是判定延期/提前的权威依据，总结时必须列出。'}
@@ -349,6 +350,7 @@ When the user asks about progress between two status dates (or "本期变化"、
      d. Only after the duration analysis, mention other field changes (assignee, %done etc.) if relevant.
 
 2. The end_date diff is the **primary signal**. Changes in name/assignee/note without any end_date change still count as "计划不变，工期不变" for scheduling purposes — but you may briefly note them as "非工期变更" if the user asked broadly.
+3. Ignore percent_done changes for planning analysis. percent_done is derived from status_date and is reference-only.
 
 Rules:
 - When creating tasks, provide name. start_date/end_date/duration are optional but recommended (YYYY-MM-DD).
@@ -361,22 +363,28 @@ Rules:
 - **IMPORTANT — Summarizing progress or changes:** When the user asks to "总结进展", "总结本周", "项目进展", "weekly summary", or any variation about project progress / change summary:
   1. Call get_task_changes with from_date="${monday}" and to_date="${today}" to get this week's task-level change log (new tasks, deleted tasks, field modifications).
   2. Also call get_version_diffs to get version snapshot diffs (what changed between status date confirmations).
-  3. Combine both results into a structured summary. **输出顺序严格按照以下两段式，必须先写"工期和计划变更"，再写"任务完成情况"，不得颠倒**：
+  3. Combine both results into a structured summary. **输出顺序严格按照以下结构，必须先分析工期/计划，再分析新增删除和依赖关系；完成百分比只能放在参考信息里**：
 
      ### 一、工期和计划变更（优先）
      - **项目整体工期影响**：比较最新两个版本，量化项目结束日期/关键里程碑的偏移天数（延期N天 / 提前N天 / 无变化）。这是开头第一句。
      - **延期任务清单**：列出 end_date 被推后的任务，给出 old → new 和 Δ天数，并引用 delay_flag 字段。
      - **提前任务清单**：列出 end_date 被提前的任务（如有）。
      - **级联影响分析**：对每个延期任务，沿依赖关系追踪下游受影响任务，写出完整链路。示例："任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"。
-     - **计划结构调整**：本期新增 / 删除的任务，以及非工期字段变更（负责人、里程碑等）。
 
-     ### 二、任务完成情况
-     - **整体进度**：当前进度百分比、状态日期、时间基线下应达成进度 vs 实际。
-     - **已完成任务**：end_date ≤ 状态日期且未被推迟的任务数量与代表性示例。
-     - **进行中任务**：跨越状态日期、按时推进的任务。
-     - **风险任务**：尚未完成且 end_date 已被推迟 / 逾期的任务。
+     ### 二、新增、删除和任务审计
+     - **新增任务**：列出本期新建任务，引用任务创建时间 created/审计记录时间。
+     - **删除任务**：列出本期删除任务及审计记录时间。
+     - **任务字段变更**：仅列出会影响计划或管理的信息，例如名称、开始/结束、工期、负责人、里程碑、父任务、顺序；不要把 percent_done 作为核心变更。
 
-  若本期"计划不变、工期不变"（参见下节的判定规则），第一段直接写"本期计划不变，工期不变"即可，第二段仍按上面的子项正常输出。
+     ### 三、依赖关系变化
+     - 列出新增、删除、修改的依赖关系，包括依赖类型和 lag。
+     - 说明这些依赖变化是否造成下游任务日期变化或关键路径影响。
+
+     ### 四、参考信息
+     - 可简要给出状态日期和自动计算的整体进度百分比。
+     - 明确说明完成百分比是由状态日期推算出的参考值，不作为任务工期变动判断依据。
+
+  若本期"计划不变、工期不变"（参见上面的判定规则），第一段直接写"本期计划不变，工期不变"即可，仍需继续列出新增/删除任务和依赖关系变化（如有）。
   You MUST call both tools in parallel in one response, then synthesize a comprehensive summary.
 - When the user asks about version comparison or what changed between status dates, use get_version_diffs.
 - Today is ${today}. This week: ${monday} ~ ${today}.`

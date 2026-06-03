@@ -238,6 +238,81 @@ export async function cascadeDependencies(
   return cascadedIds
 }
 
+export async function collapseDeletedTaskSuccessors(
+  client: PoolClient,
+  projectId: string,
+  deletedIds: string[],
+): Promise<string[]> {
+  if (deletedIds.length === 0) return []
+
+  const projectRes = await client.query(
+    `SELECT status_date FROM projects WHERE id = $1`,
+    [projectId],
+  )
+  const statusDate = toDateStr(projectRes.rows[0]?.status_date ?? null)
+  if (!statusDate) return cascadeDependencies(client, projectId)
+
+  const ph = deletedIds.map((_, i) => `$${i + 2}`).join(',')
+  const succRes = await client.query(
+    `SELECT DISTINCT t.id, t.start_date, t.end_date, t.duration,
+            COALESCE(t.auto_schedule, true) AS auto_schedule,
+            COALESCE(t.is_milestone, false) AS is_milestone
+       FROM dependencies d
+       JOIN tasks t ON t.id = d.to_task_id
+      WHERE d.project_id = $1
+        AND d.from_task_id IN (${ph})
+        AND t.project_id = $1
+        AND t.is_deleted = false
+        AND t.id NOT IN (${ph})
+        AND COALESCE(d.active, true) = true`,
+    [projectId, ...deletedIds],
+  )
+
+  const changedIds: string[] = []
+  for (const row of succRes.rows as Array<{ id: string; start_date: string | null; end_date: string | null; duration: number | null; auto_schedule: boolean; is_milestone: boolean }>) {
+    if (row.auto_schedule === false) continue
+    const start = toDateStr(row.start_date)
+    const end = toDateStr(row.end_date)
+    if (!start || !end || start <= statusDate) continue
+
+    const duration = Math.max(0, diffDaysStr(start, end))
+    const newEnd = row.is_milestone ? statusDate : addDaysStr(statusDate, duration)
+    if (!newEnd) continue
+
+    await client.query(
+      `UPDATE tasks
+          SET start_date = $1, end_date = $2, duration = $3, updated_at = NOW()
+        WHERE id = $4 AND project_id = $5`,
+      [statusDate, newEnd, duration, row.id, projectId],
+    )
+    changedIds.push(row.id)
+  }
+
+  const cascadedIds = await cascadeDependencies(client, projectId)
+  const allChangedIds = [...new Set([...changedIds, ...cascadedIds])]
+  if (allChangedIds.length > 0) {
+    const changedPh = allChangedIds.map((_, i) => `$${i + 3}`).join(',')
+    await client.query(
+      `UPDATE tasks
+          SET percent_done = CASE
+                WHEN start_date IS NULL OR end_date IS NULL THEN percent_done
+                WHEN $2::timestamp >= end_date THEN 100
+                WHEN $2::timestamp <= start_date THEN 0
+                WHEN EXTRACT(EPOCH FROM (end_date - start_date)) <= 0 THEN 100
+                ELSE ROUND(
+                  EXTRACT(EPOCH FROM ($2::timestamp - start_date))
+                  / EXTRACT(EPOCH FROM (end_date - start_date))
+                  * 100
+                )::int
+              END,
+              updated_at = NOW()
+        WHERE project_id = $1 AND id IN (${changedPh})`,
+      [projectId, statusDate, ...allChangedIds],
+    )
+  }
+  return allChangedIds
+}
+
 // ── 摘要任务日期更新 ──────────────────────────────────────────────────────
 /** 更新项目中所有摘要任务的日期范围（与子任务范围一致） */
 export async function updateSummaryTasksDates(
