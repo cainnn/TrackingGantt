@@ -6,18 +6,17 @@ import { success, failure } from '@/lib/result'
 
 export async function POST(req: NextRequest) {
   const body = await req.json()
-  const { username, email, password, role } = body as {
+  const { username, email, password } = body as {
     username?: string
     email?: string
     password?: string
-    role?: string
   }
 
   if (!username || !email || !password) {
     return NextResponse.json(failure('username, email and password are required', 400), { status: 400 })
   }
 
-  const userRole = role === 'view' ? 'view' : role === 'administrator' ? 'administrator' : 'admin'
+  const userRole = 'admin'
   const passwordHash = await bcrypt.hash(password, 10)
 
   try {

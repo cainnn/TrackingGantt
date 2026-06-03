@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "outDir": ".test-dist",
+    "incremental": false,
+    "isolatedModules": false,
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "tests/**/*.ts",
+    "lib/clientTime.ts",
+    "lib/projectProgress.ts",
+    "lib/scheduling.ts",
+    "types/**/*.ts"
+  ],
+  "exclude": ["node_modules", ".next"]
+}

@@ -78,7 +78,6 @@ export async function POST(req: NextRequest, { params }: Params) {
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
       if (statusDate > today) {
         await client.query('ROLLBACK')
-        client.release()
         return NextResponse.json(failure(`状态日期不能晚于今天 (${today})`, 400), { status: 400 })
       }
     }
@@ -104,7 +103,6 @@ export async function POST(req: NextRequest, { params }: Params) {
       const curSD = toIso(statusDate)
       if (curSD < lastSD) {
         await client.query('ROLLBACK')
-        client.release()
         return NextResponse.json(failure(`状态日期不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
       }
     }

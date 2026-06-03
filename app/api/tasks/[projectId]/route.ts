@@ -525,7 +525,6 @@ export async function PUT(req: NextRequest, { params }: Params) {
         }
         if (errors.length > 0) {
           await client.query('ROLLBACK')
-          client.release()
           return NextResponse.json({ ok: false, errors }, { status: 400 })
         }
       }
@@ -648,7 +647,6 @@ export async function PUT(req: NextRequest, { params }: Params) {
       // ── Detect field updates (collect for batch lifecycle insert) ───────
       const COMPARE_FIELDS = ['name','start_date','end_date','duration','assignee','is_milestone','note']
       let dateChanged = false
-      console.log(`[lifecycle] task ${code}: checking fields`, Object.keys(task as Record<string, unknown>).filter(k => COMPARE_FIELDS.includes(k)))
       for (const f of COMPARE_FIELDS) {
         if (!(f in task)) continue
         // 分钟级比较：保留 HH:mm，避免同日不同时间被误判为"无变更"。
@@ -668,7 +666,6 @@ export async function PUT(req: NextRequest, { params }: Params) {
         }
         const ov = norm(old[f])
         const nv = norm(cur[f])
-        console.log(`[lifecycle] task ${code}.${f}: old="${ov}" new="${nv}" changed=${ov !== nv}`)
         if (ov === nv) continue
         const label = FIELD_LABELS[f] ?? f
         const ovStr = fmtFieldVal(f, old[f], { isMinute: projIsMinute })

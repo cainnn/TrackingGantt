@@ -4,6 +4,15 @@
 -- uuid 生成函数 gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- 创建更新时间触发器函数
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = CURRENT_TIMESTAMP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- 用户表
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -48,18 +57,18 @@ CREATE TABLE IF NOT EXISTS tasks (
   task_code VARCHAR(50),
   name VARCHAR(255) NOT NULL,
   assignee VARCHAR(100),
-  start_date DATE,
-  end_date DATE,
-  original_start_date DATE,
-  original_end_date DATE,
+  start_date TIMESTAMP,
+  end_date TIMESTAMP,
+  original_start_date TIMESTAMP,
+  original_end_date TIMESTAMP,
   duration INTEGER,
   duration_unit VARCHAR(20) DEFAULT 'day',
   percent_done INTEGER DEFAULT 0,
   is_milestone BOOLEAN DEFAULT false,
   auto_schedule BOOLEAN DEFAULT true,
   constraint_type VARCHAR(40) DEFAULT 'asap',
-  constraint_date DATE,
-  deadline DATE,
+  constraint_date TIMESTAMP,
+  deadline TIMESTAMP,
   status VARCHAR(20),
   note TEXT,
   order_index INTEGER DEFAULT 0,
@@ -144,13 +153,24 @@ ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS rollup BOOLEAN DEFAULT false;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS inactive BOOLEAN DEFAULT false;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS project_boundary VARCHAR(20) DEFAULT 'ask';
 ALTER TABLE dependencies ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT true;
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date DATE;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS original_start_date TIMESTAMP;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS original_end_date TIMESTAMP;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS baseline_end_date TIMESTAMP;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_type VARCHAR(40) DEFAULT 'asap';
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_date DATE;
-ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS deadline DATE;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS constraint_date TIMESTAMP;
+ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS deadline TIMESTAMP;
 ALTER TABLE tasks        ADD COLUMN IF NOT EXISTS status VARCHAR(20);
 ALTER TABLE tasks        DROP COLUMN IF EXISTS complexity;
 ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS is_autosave BOOLEAN DEFAULT false;
+
+-- 分钟级项目需要保留时分秒；旧库如果仍是 DATE，迁移为 TIMESTAMP。
+ALTER TABLE tasks ALTER COLUMN start_date TYPE TIMESTAMP USING start_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN end_date TYPE TIMESTAMP USING end_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN original_start_date TYPE TIMESTAMP USING original_start_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN original_end_date TYPE TIMESTAMP USING original_end_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN baseline_end_date TYPE TIMESTAMP USING baseline_end_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN constraint_date TYPE TIMESTAMP USING constraint_date::timestamp;
+ALTER TABLE tasks ALTER COLUMN deadline TYPE TIMESTAMP USING deadline::timestamp;
 
 -- 历史变更审计：记录对"状态日期之前"的任务所做的回溯修改
 CREATE TABLE IF NOT EXISTS task_change_log (
@@ -178,15 +198,6 @@ CREATE INDEX IF NOT EXISTS idx_dependencies_from_task ON dependencies(from_task_
 CREATE INDEX IF NOT EXISTS idx_dependencies_to_task ON dependencies(to_task_id);
 CREATE INDEX IF NOT EXISTS idx_task_lifecycle_task_id ON task_lifecycle(task_id);
 CREATE INDEX IF NOT EXISTS idx_task_lifecycle_project_id ON task_lifecycle(project_id);
-
--- 创建更新时间触发器函数
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = CURRENT_TIMESTAMP;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
 
 -- 为所有需要的表添加更新时间触发器
 DROP TRIGGER IF EXISTS update_users_updated_at ON users;
