@@ -181,11 +181,12 @@ export async function GET(req: NextRequest, { params }: Params) {
       const to = byId.get(d.to_task_id)
       if (!from?.start || !from?.end || !to?.start || !to?.end || !to.auto) continue
       const depType = d.type ?? 2
+      const lag = projIsMinute ? (d.lag ?? 0) : (d.lag ?? 0) * 1440
       let rs: string | null = null
-      if (depType === 2)      rs = addDaysStr(from.end, d.lag ?? 0)
-      else if (depType === 0) rs = addDaysStr(from.start, d.lag ?? 0)
-      else if (depType === 3) rs = addDaysStr(from.end, (d.lag ?? 0) - to.dur)
-      else if (depType === 1) rs = addDaysStr(from.start, (d.lag ?? 0) - to.dur)
+      if (depType === 2)      rs = addDaysStr(from.end, lag)
+      else if (depType === 0) rs = addDaysStr(from.start, lag)
+      else if (depType === 3) rs = addDaysStr(from.end, lag - to.dur)
+      else if (depType === 1) rs = addDaysStr(from.start, lag - to.dur)
       if (rs && rs !== to.start) { needsFix = true; break }
     }
     // 检查摘要任务：用 childrenByParent 跑 min/max（线性，不再排序整个数组）

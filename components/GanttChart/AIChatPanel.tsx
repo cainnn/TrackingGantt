@@ -49,6 +49,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   const { tasks, dependencies, diffFilter, comparison } = useAppSelector(s => s.tasks)
   const { versions } = useAppSelector(s => s.versions)
   const currentProject = useAppSelector(s => s.project.currentProject)
+  const isMinute = currentProject?.time_granularity === 'minute'
 
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -169,6 +170,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               const cascaded = runFullCascade(
                 tasks.map(t => t.id === id ? updated : t),
                 dependencies,
+                { isMinute },
               )
               if (cascaded.length > 0) {
                 dispatch(updateTasks(cascaded))
@@ -192,6 +194,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               remainDeps,
               idSet,
               currentProject?.status_date,
+              { isMinute },
             )
             for (const d of relatedDeps) dispatch(removeDependency(d.id))
             dispatch(deleteTasks(ids))
@@ -217,7 +220,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               active: true,
             }
             dispatch(addDependency(newDep))
-            const cascaded = runFullCascade(tasks, [...dependencies, newDep])
+            const cascaded = runFullCascade(tasks, [...dependencies, newDep], { isMinute })
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))
@@ -234,7 +237,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             if (!dep) { result = `Dependency not found`; break }
             dispatch(removeDependency(dep.id))
             const remainDeps = dependencies.filter(d => d.id !== dep.id)
-            const cascaded = runFullCascade(tasks, remainDeps)
+            const cascaded = runFullCascade(tasks, remainDeps, { isMinute })
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))
@@ -331,7 +334,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             dispatch(updateTasks(updatedTasks))
             dispatch(markDirty(ids))
             const nextTasks = tasks.map(t => updatedTasks.find(u => u.id === t.id) ?? t)
-            const cascaded = runFullCascade(nextTasks, dependencies)
+            const cascaded = runFullCascade(nextTasks, dependencies, { isMinute })
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))

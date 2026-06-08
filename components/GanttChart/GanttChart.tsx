@@ -1789,8 +1789,8 @@ export default function GanttChart({
                   nextTasks = tasks.map(t => t.id === toTask.id ? updatedTo : t)
                 }
                 const cascaded = isMinute
-                  ? runFullCascade(nextTasks, [...deps, newDep])
-                  : snapTaskUpdatesToDayLevel(runFullCascade(nextTasks, [...deps, newDep]))
+                  ? runFullCascade(nextTasks, [...deps, newDep], { isMinute })
+                  : snapTaskUpdatesToDayLevel(runFullCascade(nextTasks, [...deps, newDep], { isMinute }))
                 if (cascaded.length > 0) {
                   dispatch(updateTasks(cascaded))
                   dispatch(markDirty(cascaded.map(t => t.id)))
@@ -1940,7 +1940,7 @@ export default function GanttChart({
 
 
     const nextTasks = tasks.map(t => t.id === updated.id ? updated : t)
-    const cascadedRaw = runFullCascade(nextTasks, deps).filter(t => t.id !== updated.id)
+    const cascadedRaw = runFullCascade(nextTasks, deps, { isMinute }).filter(t => t.id !== updated.id)
     const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
     dispatch(updateTasks([updated, ...cascaded]))
     dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
@@ -1958,7 +1958,7 @@ export default function GanttChart({
     const updated = { ...t, ...patch }
     const isConstraintChange = 'constraint_type' in patch || 'constraint_date' in patch
     const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
-    const cascadedRaw = isConstraintChange ? runFullCascade(nextTasks, deps) : []
+    const cascadedRaw = isConstraintChange ? runFullCascade(nextTasks, deps, { isMinute }) : []
     const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
     const merged = new Map<string, Task>([[updated.id, updated]])
     for (const c of cascaded) merged.set(c.id, c)
@@ -2003,7 +2003,7 @@ export default function GanttChart({
       for (const t of anchored) merged.set(t.id, t)
       baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     }
-    const cascaded = runFullCascade(baseTasks, nextDeps)
+    const cascaded = runFullCascade(baseTasks, nextDeps, { isMinute })
     const normalizedCascaded = isMinute ? cascaded : snapTaskUpdatesToDayLevel(cascaded)
     for (const t of normalizedCascaded) merged.set(t.id, t)
     if (merged.size > 0) {
@@ -2189,14 +2189,14 @@ export default function GanttChart({
     const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
     const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => t.id !== taskId)
-    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date)
+    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date, { isMinute })
     for (const d of relatedDeps) dispatch(removeDependency(d.id))
     dispatch(deleteTasks([taskId]))
     if (cascaded.length > 0) {
       dispatch(updateTasks(cascaded))
       dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [dispatch, tasks, deps, currentProject?.status_date])
+  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute])
 
   const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2290,14 +2290,14 @@ export default function GanttChart({
     const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
     const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => t.id !== taskId)
-    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date)
+    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date, { isMinute })
     for (const d of relatedDeps) dispatch(removeDependency(d.id))
     dispatch(deleteTasks([taskId]))
     if (cascaded.length > 0) {
       dispatch(updateTasks(cascaded))
       dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [dispatch, tasks, deps, currentProject?.status_date])
+  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute])
 
   const handleCtxPaste = useCallback(() => {
     setCtxMenu(null)

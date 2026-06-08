@@ -100,6 +100,14 @@ export async function cascadeDependencies(
 ): Promise<string[]> {
   const cascadedIds: string[] = []
 
+  const projectRes = await client.query(
+    'SELECT time_granularity FROM projects WHERE id = $1',
+    [projectId],
+  )
+  const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
+  const toScheduleLag = (lag: number | null | undefined): number =>
+    isMinuteProject ? (lag ?? 0) : (lag ?? 0) * 1440
+
   const depsRes = await client.query(
     `SELECT d.id as dep_id, d.from_task_id, d.to_task_id, d.type, d.lag, COALESCE(d.active, true) AS active FROM dependencies d
      JOIN tasks ft ON ft.id = d.from_task_id AND ft.is_deleted = false
@@ -200,7 +208,7 @@ export async function cascadeDependencies(
         const from = taskMap.get(dep.from_task_id)
         if (!from?.start_date || !from?.end_date) continue
 
-        const lag = dep.lag ?? 0
+        const lag = toScheduleLag(dep.lag)
         const depType = dep.type ?? 2
         let rs: string | null = null
         if (depType === 2) {

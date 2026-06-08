@@ -176,7 +176,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       baseTasks = baseTasks.map(t => byId.get(t.id) ?? t)
       allChanged.push(...anchored)
     }
-    const cascaded = runFullCascade(baseTasks, nextDeps)
+    const cascaded = runFullCascade(baseTasks, nextDeps, { isMinute })
     if (cascaded.length > 0) {
       const cById = new Map(cascaded.map(t => [t.id, t]))
       baseTasks = baseTasks.map(t => cById.get(t.id) ?? t)
@@ -399,7 +399,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     const nextTasks = allTasks.map(t => t.id === task.id ? updated : t)
     if (depsChanged) recascadeAndUpdate(nextDeps, nextTasks)
     else {
-      const cascaded = isMinute ? runFullCascade(nextTasks, deps) : snapTaskUpdatesToDayLevel(runFullCascade(nextTasks, deps))
+      const cascadedRaw = runFullCascade(nextTasks, deps, { isMinute })
+      const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
       if (cascaded.length > 0) {
         dispatch(updateTasks(cascaded))
         dispatch(markDirty(cascaded.map(t => t.id)))

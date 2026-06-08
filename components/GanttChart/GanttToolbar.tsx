@@ -952,13 +952,14 @@ export default function GanttToolbar({
     const relatedDeps = dependencies.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
     const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => !ids.has(t.id))
-    const cascaded = collapseDeletedTaskSuccessors(
-      remainTasks,
-      dependencies,
-      remainDeps,
-      ids,
-      currentProject?.status_date,
-    )
+      const cascaded = collapseDeletedTaskSuccessors(
+        remainTasks,
+        dependencies,
+        remainDeps,
+        ids,
+        currentProject?.status_date,
+        { isMinute },
+      )
     for (const d of relatedDeps) dispatch(removeDependency(d.id))
     dispatch(deleteTasks(selectedIds))
     if (cascaded.length > 0) {
@@ -1227,6 +1228,7 @@ export default function GanttToolbar({
       const cascaded = runFullCascade(
         [...tasks, ...pastedTasks],
         [...dependencies, ...newDeps],
+        { isMinute },
       )
       if (cascaded.length > 0) {
         dispatch(updateTasks(cascaded))

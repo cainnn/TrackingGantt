@@ -159,7 +159,7 @@ export default function ProjectPage() {
             loadedTasks = loadedTasks.map(t => byId.get(t.id) ?? t)
             dirtyIds = anchored.map(t => t.id)
             // 再跑一次级联，让下游跟着前移
-            const cascaded = runFullCascade(loadedTasks, loadedDeps)
+            const cascaded = runFullCascade(loadedTasks, loadedDeps, { isMinute: projIsMinute })
             if (cascaded.length > 0) {
               const cByid = new Map(cascaded.map(t => [t.id, t]))
               loadedTasks = loadedTasks.map(t => cByid.get(t.id) ?? t)

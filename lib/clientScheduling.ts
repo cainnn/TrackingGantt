@@ -264,8 +264,12 @@ export function rollupSummaryTasks(allTasks: Task[]): Task[] {
 export function runFullCascade(
   allTasks: Task[],
   deps: Dependency[],
+  opts: { isMinute?: boolean } = {},
 ): Task[] {
   if (allTasks.length === 0) return []
+  const isMinuteProject = opts.isMinute !== false
+  const toScheduleLag = (lag: number | null | undefined): number =>
+    isMinuteProject ? (lag ?? 0) : (lag ?? 0) * 1440
 
   // ── 构建 task state map ───────────────────────────────────────────────
   const taskMap = new Map<string, TaskState>()
@@ -348,7 +352,7 @@ export function runFullCascade(
       for (const dep of toDepList) {
         const from = taskMap.get(dep.from_task_id)
         if (!from?.start_date || !from?.end_date) continue
-        const lag = dep.lag ?? 0
+        const lag = toScheduleLag(dep.lag)
         const depType = dep.type ?? 2
         let rs: string | null = null
         if (depType === 2) rs = addMinutes(from.end_date, lag)
@@ -498,9 +502,10 @@ export function collapseDeletedTaskSuccessors(
   remainingDeps: Dependency[],
   deletedIds: Iterable<string>,
   statusDate?: string | null,
+  opts: { isMinute?: boolean } = {},
 ): Task[] {
   const statusStart = toTimeStr(statusDate)
-  if (!statusStart) return runFullCascade(allTasks, remainingDeps)
+  if (!statusStart) return runFullCascade(allTasks, remainingDeps, opts)
 
   const deletedSet = new Set(deletedIds)
   const taskById = new Map(allTasks.filter(t => !t.is_deleted).map(t => [t.id, t]))
@@ -542,7 +547,7 @@ export function collapseDeletedTaskSuccessors(
     : allTasks
   const merged = new Map<string, Task>(anchored)
 
-  for (const task of runFullCascade(baseTasks, remainingDeps)) {
+  for (const task of runFullCascade(baseTasks, remainingDeps, opts)) {
     merged.set(task.id, {
       ...task,
       percent_done: timeBasedPercent(task, statusStart),

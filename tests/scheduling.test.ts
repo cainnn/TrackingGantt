@@ -178,6 +178,39 @@ test('snaps day-level cascade updates back to midnight', () => {
   assert.equal(updates[0].duration, 14 * 1440)
 })
 
+test('interprets dependency lag by project granularity', () => {
+  const tasks = [
+    task({
+      id: 'predecessor',
+      start_date: '2026-06-01T00:00:00',
+      end_date: '2026-06-03T00:00:00',
+      duration: 2 * 1440,
+      auto_schedule: true,
+    }),
+    task({
+      id: 'successor',
+      start_date: '2026-06-01T00:00:00',
+      end_date: '2026-06-02T00:00:00',
+      duration: 1440,
+      auto_schedule: true,
+    }),
+  ]
+
+  const dayUpdates = runFullCascade(
+    tasks,
+    [dep({ from_task_id: 'predecessor', to_task_id: 'successor', type: 2, lag: 1 })],
+    { isMinute: false },
+  )
+  assert.equal(dayUpdates.find(t => t.id === 'successor')?.start_date, '2026-06-04T00:00:00')
+
+  const minuteUpdates = runFullCascade(
+    tasks,
+    [dep({ from_task_id: 'predecessor', to_task_id: 'successor', type: 2, lag: 60 })],
+    { isMinute: true },
+  )
+  assert.equal(minuteUpdates.find(t => t.id === 'successor')?.start_date, '2026-06-03T01:00:00')
+})
+
 test('auto task honors finish-no-later-than when no dependency conflicts', () => {
   const tasks = [
     task({
