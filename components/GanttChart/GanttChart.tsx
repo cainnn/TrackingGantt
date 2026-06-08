@@ -18,6 +18,7 @@ import {
   collapseDeletedTaskSuccessors,
   rollupSummaryTasks,
   findUpperConstraintViolations,
+  snapTaskUpdatesToDayLevel,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { uuid } from '@/lib/uuid'
@@ -1787,7 +1788,9 @@ export default function GanttChart({
                   dispatch(markDirty([toTask.id]))
                   nextTasks = tasks.map(t => t.id === toTask.id ? updatedTo : t)
                 }
-                const cascaded = runFullCascade(nextTasks, [...deps, newDep])
+                const cascaded = isMinute
+                  ? runFullCascade(nextTasks, [...deps, newDep])
+                  : snapTaskUpdatesToDayLevel(runFullCascade(nextTasks, [...deps, newDep]))
                 if (cascaded.length > 0) {
                   dispatch(updateTasks(cascaded))
                   dispatch(markDirty(cascaded.map(t => t.id)))
@@ -1937,14 +1940,15 @@ export default function GanttChart({
 
 
     const nextTasks = tasks.map(t => t.id === updated.id ? updated : t)
-    const cascaded = runFullCascade(nextTasks, deps).filter(t => t.id !== updated.id)
+    const cascadedRaw = runFullCascade(nextTasks, deps).filter(t => t.id !== updated.id)
+    const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
     dispatch(updateTasks([updated, ...cascaded]))
     dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
     // 自动描述：单元格编辑
     const fieldLabels: Record<string, string> = { assignee: '责任人', duration: '工期', start_date: '开始日期', end_date: '结束日期' }
     dispatch(setEditDescription({ taskId: orig.id, description: `修改了「${orig.name}」的${fieldLabels[cellEdit.field] ?? cellEdit.field}` }))
     setCellEdit(null)
-  }, [cellEdit, tasks, deps, dispatch])
+  }, [cellEdit, tasks, deps, dispatch, isMinute])
 
   // ── 通用字段修改（限制类型/日期/状态等） ─────────────────────────
   const handleTaskFieldChange = useCallback((taskId: string, patch: Partial<Task>) => {
@@ -1954,7 +1958,8 @@ export default function GanttChart({
     const updated = { ...t, ...patch }
     const isConstraintChange = 'constraint_type' in patch || 'constraint_date' in patch
     const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
-    const cascaded = isConstraintChange ? runFullCascade(nextTasks, deps) : []
+    const cascadedRaw = isConstraintChange ? runFullCascade(nextTasks, deps) : []
+    const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
     const merged = new Map<string, Task>([[updated.id, updated]])
     for (const c of cascaded) merged.set(c.id, c)
     const updates = Array.from(merged.values())
@@ -1965,7 +1970,7 @@ export default function GanttChart({
     const fieldLabels: Record<string, string> = { constraint_type: '限制类型', constraint_date: '限制日期', status: '状态', deadline: '截止日期' }
     const label = fields.map(f => fieldLabels[f] ?? f).join('、')
     dispatch(setEditDescription({ taskId, description: `修改了「${t.name}」的${label}` }))
-  }, [tasks, dispatch])
+  }, [tasks, deps, dispatch, isMinute])
 
   // ── 自动排程开关 ────────────────────────────────────────────────────────
   const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
@@ -1999,7 +2004,8 @@ export default function GanttChart({
       baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     }
     const cascaded = runFullCascade(baseTasks, nextDeps)
-    for (const t of cascaded) merged.set(t.id, t)
+    const normalizedCascaded = isMinute ? cascaded : snapTaskUpdatesToDayLevel(cascaded)
+    for (const t of normalizedCascaded) merged.set(t.id, t)
     if (merged.size > 0) {
       const list = Array.from(merged.values())
       dispatch(updateTasks(list))

@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
-import { wouldCreateCycle, cascadeDependencies, updateSummaryTasksDates } from '@/lib/scheduling'
+import { wouldCreateCycle, cascadeDependencies, updateSummaryTasksDates, snapTasksToDayLevel } from '@/lib/scheduling'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -117,8 +117,9 @@ export async function POST(req: NextRequest, { params }: Params) {
 
       const cascadedIds = await cascadeDependencies(client, projectId)
       const summaryUpdated = await updateSummaryTasksDates(client, projectId)
+      const snappedIds = await snapTasksToDayLevel(client, projectId)
 
-      const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id)])]
+      const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
       let updatedTasks: Record<string, unknown>[] = []
       if (allUpdatedIds.length > 0) {
         const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')
@@ -210,8 +211,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
     const cascadedIds = await cascadeDependencies(client, projectId)
     const summaryUpdated = await updateSummaryTasksDates(client, projectId)
+    const snappedIds = await snapTasksToDayLevel(client, projectId)
 
-    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id)])]
+    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
     let updatedTasks: Record<string, unknown>[] = []
     if (allUpdatedIds.length > 0) {
       const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')
@@ -282,8 +284,9 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     // 删除依赖后重新级联，让后继任务回到独立排程
     const cascadedIds = await cascadeDependencies(client, projectId)
     const summaryUpdated = await updateSummaryTasksDates(client, projectId)
+    const snappedIds = await snapTasksToDayLevel(client, projectId)
 
-    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id)])]
+    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
     let updatedTasks: Record<string, unknown>[] = []
     if (allUpdatedIds.length > 0) {
       const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')

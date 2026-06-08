@@ -144,6 +144,35 @@ export function findUpperConstraintViolations(tasks: Task[]): UpperConstraintVio
     .filter((v): v is UpperConstraintViolation => v !== null)
 }
 
+export function snapTaskUpdatesToDayLevel(tasks: Task[]): Task[] {
+  return tasks.map(task => {
+    const start = toTimeStr(task.start_date)
+    const end = toTimeStr(task.end_date)
+    if (!start || !end) return task
+
+    const duration = task.is_milestone
+      ? 0
+      : Math.max(0, Math.round(diffMinutes(start, end) / 1440) * 1440)
+    const snappedStart = `${start.slice(0, 10)}T00:00:00`
+    const snappedEnd = addMinutes(snappedStart, duration)
+    if (!snappedEnd) return task
+
+    if (
+      start === snappedStart &&
+      end === snappedEnd &&
+      (task.duration ?? null) === duration
+    ) {
+      return task
+    }
+    return {
+      ...task,
+      start_date: snappedStart,
+      end_date: snappedEnd,
+      duration,
+    }
+  })
+}
+
 interface TaskState {
   start_date: string | null
   end_date: string | null

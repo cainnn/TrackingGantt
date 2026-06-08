@@ -7,7 +7,7 @@ import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
-import { runFullCascade, applyAutoStartAnchor } from '@/lib/clientScheduling'
+import { runFullCascade, applyAutoStartAnchor, snapTaskUpdatesToDayLevel } from '@/lib/clientScheduling'
 import { toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
@@ -188,9 +188,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       allChanged.push(...merged.values())
     }
     if (allChanged.length > 0) {
-      dispatch(updateTasks(allChanged))
-      dispatch(markDirty(allChanged.map(t => t.id)))
-      const me = allChanged.find(t => t.id === taskId)
+      const normalized = isMinute ? allChanged : snapTaskUpdatesToDayLevel(allChanged)
+      dispatch(updateTasks(normalized))
+      dispatch(markDirty(normalized.map(t => t.id)))
+      const me = normalized.find(t => t.id === taskId)
       if (me) {
         setStartDate((me.start_date ?? '').slice(0, dtSlice))
         setEndDate((me.end_date ?? '').slice(0, dtSlice))
@@ -398,7 +399,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     const nextTasks = allTasks.map(t => t.id === task.id ? updated : t)
     if (depsChanged) recascadeAndUpdate(nextDeps, nextTasks)
     else {
-      const cascaded = runFullCascade(nextTasks, deps)
+      const cascaded = isMinute ? runFullCascade(nextTasks, deps) : snapTaskUpdatesToDayLevel(runFullCascade(nextTasks, deps))
       if (cascaded.length > 0) {
         dispatch(updateTasks(cascaded))
         dispatch(markDirty(cascaded.map(t => t.id)))

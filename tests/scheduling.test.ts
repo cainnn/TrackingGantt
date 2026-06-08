@@ -6,6 +6,7 @@ import {
   findUpperConstraintViolations,
   rollupSummaryTasks,
   runFullCascade,
+  snapTaskUpdatesToDayLevel,
 } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
 
@@ -159,6 +160,22 @@ test('start-to-start dependency aligns successor start to predecessor start', ()
 
   assert.equal(successor?.start_date, '2026-06-01T00:00:00')
   assert.equal(successor?.end_date, '2026-06-03T00:00:00')
+})
+
+test('snaps day-level cascade updates back to midnight', () => {
+  const updates = snapTaskUpdatesToDayLevel([
+    task({
+      id: 'successor',
+      start_date: '2026-06-10T00:01:00',
+      end_date: '2026-06-24T00:01:00',
+      duration: 14 * 1440,
+      auto_schedule: true,
+    }),
+  ])
+
+  assert.equal(updates[0].start_date, '2026-06-10T00:00:00')
+  assert.equal(updates[0].end_date, '2026-06-24T00:00:00')
+  assert.equal(updates[0].duration, 14 * 1440)
 })
 
 test('auto task honors finish-no-later-than when no dependency conflicts', () => {
