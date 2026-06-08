@@ -812,6 +812,9 @@ export default function GanttChart({
   // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
   const pxPerMin = colW / 1440
   const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
+  const depLagToDays = useCallback((lag: number | null | undefined) => (
+    isMinute ? (lag ?? 0) / 1440 : (lag ?? 0)
+  ), [isMinute])
 
   // ── 更新任务日期范围缓存 + 缩放居中 ────────────────────────────────────
   useEffect(() => {
@@ -1219,9 +1222,9 @@ export default function GanttChart({
         if (incoming.length > 0) {
           const depType = incoming[0].type ?? 2
           if (depType === 3 || depType === 1) {
-            if (mode !== 'resize-left') return
+            if (mode !== 'move' && mode !== 'resize-left') return
           } else {
-            if (mode !== 'resize-right') return
+            if (mode !== 'move' && mode !== 'resize-right') return
           }
         }
       }
@@ -1362,7 +1365,7 @@ export default function GanttChart({
                   const pS = localStart.get(dep.from_task_id)
                   const pE = localEnd.get(dep.from_task_id)
                   if (!pS || !pE) continue
-                  const lag = dep.lag ?? 0
+                  const lag = depLagToDays(dep.lag)
                   const dt2 = dep.type ?? 2
                   let rs: Date
                   if (dt2 === 2)      rs = addDays(pE, lag)
@@ -1474,7 +1477,7 @@ export default function GanttChart({
                 const predStart = localStart.get(dep.from_task_id)
                 const predEnd   = localEnd.get(dep.from_task_id)
                 if (!predStart || !predEnd) continue
-                const lag = dep.lag ?? 0
+                const lag = depLagToDays(dep.lag)
                 const depType = dep.type ?? 2
 
                 let requiredStart: Date
@@ -1601,7 +1604,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
