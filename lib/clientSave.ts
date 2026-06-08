@@ -53,6 +53,36 @@ export interface SaveDiff {
   depsToDelete: string[]
 }
 
+function numericTaskCode(v: string | null | undefined): number | null {
+  if (!v || !/^\d+$/.test(v)) return null
+  const n = Number(v)
+  return Number.isSafeInteger(n) ? n : null
+}
+
+function normalizeAddedTaskCodes(baselineTasks: Task[], tasksToAdd: Task[]): Task[] {
+  if (tasksToAdd.length === 0) return tasksToAdd
+
+  const used = new Set<string>()
+  let maxCode = 0
+  for (const t of baselineTasks) {
+    if (!t.task_code) continue
+    used.add(t.task_code)
+    const n = numericTaskCode(t.task_code)
+    if (n != null && n > maxCode) maxCode = n
+  }
+
+  let nextCode = maxCode + 1
+  return tasksToAdd.map(t => {
+    let code = t.task_code?.trim() || ''
+    if (!code || used.has(code)) {
+      while (used.has(String(nextCode))) nextCode++
+      code = String(nextCode++)
+    }
+    used.add(code)
+    return code === t.task_code ? t : { ...t, task_code: code }
+  })
+}
+
 export function buildSaveDiff(
   baselineTasks: Task[],
   baselineDeps: Dependency[],
@@ -115,7 +145,7 @@ export function buildSaveDiff(
   })
 
   return {
-    tasksToAdd, tasksToUpdate, tasksToDelete,
+    tasksToAdd: normalizeAddedTaskCodes(baselineTasks, tasksToAdd), tasksToUpdate, tasksToDelete,
     depsToAdd, depsToUpdate, depsToDelete: filteredDepDelete,
   }
 }

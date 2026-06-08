@@ -40,6 +40,14 @@ async function nextTaskCode(client: PoolClient, projectId: string): Promise<stri
   return String(seq)
 }
 
+async function taskCodeExists(client: PoolClient, projectId: string, taskCode: string): Promise<boolean> {
+  const res = await client.query(
+    'SELECT 1 FROM tasks WHERE project_id = $1 AND task_code = $2 LIMIT 1',
+    [projectId, taskCode],
+  )
+  return res.rows.length > 0
+}
+
 // Insert a lifecycle event
 async function addLifecycle(
   client: PoolClient,
@@ -203,10 +211,14 @@ export async function GET(req: NextRequest, { params }: Params) {
         const s = t.start_date instanceof Date ? t.start_date : (t.start_date ? new Date(t.start_date) : null)
         const e = t.end_date   instanceof Date ? t.end_date   : (t.end_date   ? new Date(t.end_date)   : null)
         const dur = t.duration as number | null
+        const expectedDur = !t.is_milestone && t.start_date && t.end_date
+          ? Math.max(0, Math.round((e!.getTime() - s!.getTime()) / 86_400_000) * 1440)
+          : null
         const offDay =
           (s && (s.getHours() !== 0 || s.getMinutes() !== 0 || s.getSeconds() !== 0)) ||
           (e && (e.getHours() !== 0 || e.getMinutes() !== 0 || e.getSeconds() !== 0)) ||
-          (dur != null && dur % 1440 !== 0)
+          (dur != null && dur % 1440 !== 0) ||
+          (expectedDur != null && dur !== expectedDur)
         if (offDay) { needsFix = true; break }
       }
     }
@@ -277,7 +289,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       const clientId = (typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id)) ? id : null
       let code: string
       if (typeof task_code === 'string' && task_code.trim()) {
-        code = task_code.trim()
+        const requestedCode = task_code.trim()
+        code = await taskCodeExists(client, projectId, requestedCode)
+          ? await nextTaskCode(client, projectId)
+          : requestedCode
       } else {
         code = await nextTaskCode(client, projectId)
       }

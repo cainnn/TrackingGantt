@@ -98,6 +98,52 @@ export function wouldCreateCycle(
 // ── 依赖级联 + 摘要任务一体化更新 ────────────────────────────────────────
 const MAX_CASCADE_ITERATIONS = 500
 
+export interface UpperConstraintViolation {
+  taskId: string
+  taskName: string
+  constraintType: 'startnolaterthan' | 'finishnolaterthan'
+  constraintDate: string
+  actualDate: string
+}
+
+function latestStartForConstraint(
+  constraintType: string | null | undefined,
+  constraintDate: string | null,
+  duration: number,
+): string | null {
+  if (!constraintDate) return null
+  if (constraintType === 'startnolaterthan') return constraintDate
+  if (constraintType === 'finishnolaterthan') return addMinutes(constraintDate, -duration)
+  return null
+}
+
+export function getUpperConstraintViolation(task: Task): UpperConstraintViolation | null {
+  const constraintType = task.constraint_type
+  const constraintDate = toTimeStr(task.constraint_date)
+  if (!constraintDate || (constraintType !== 'startnolaterthan' && constraintType !== 'finishnolaterthan')) {
+    return null
+  }
+
+  const actualDate = constraintType === 'startnolaterthan'
+    ? toTimeStr(task.start_date)
+    : toTimeStr(task.end_date)
+  if (!actualDate || actualDate <= constraintDate) return null
+
+  return {
+    taskId: task.id,
+    taskName: task.name,
+    constraintType,
+    constraintDate,
+    actualDate,
+  }
+}
+
+export function findUpperConstraintViolations(tasks: Task[]): UpperConstraintViolation[] {
+  return tasks
+    .map(getUpperConstraintViolation)
+    .filter((v): v is UpperConstraintViolation => v !== null)
+}
+
 interface TaskState {
   start_date: string | null
   end_date: string | null
@@ -293,6 +339,16 @@ export function runFullCascade(
         else if (ct === 'finishnoearlierthan') {
           const s = addMinutes(cd, -dur)
           newStart = (maxRequired && s && maxRequired > s) ? maxRequired : s
+        }
+        const latestStart = latestStartForConstraint(ct, cd, dur)
+        if (latestStart) {
+          if (maxRequired && maxRequired > latestStart) {
+            newStart = maxRequired
+          } else if (newStart && newStart > latestStart) {
+            newStart = latestStart
+          } else if (!newStart && to.start_date > latestStart) {
+            newStart = latestStart
+          }
         }
       }
       if (!newStart) continue

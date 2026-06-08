@@ -40,6 +40,18 @@ export function diffDaysStr(a: string, b: string): number {
   return diffMinutesStr(a, b)
 }
 
+export function dayLevelDurationFromDates(
+  startDate: string | Date | null | undefined,
+  endDate: string | Date | null | undefined,
+  isMilestone: boolean = false,
+): number | null {
+  if (isMilestone) return 0
+  const start = toDateStr(startDate)
+  const end = toDateStr(endDate)
+  if (!start || !end) return null
+  return Math.max(0, Math.round(diffMinutesStr(start, end) / 1440) * 1440)
+}
+
 // ── 循环依赖检测 ─────────────────────────────────────────────────────────
 /**
  * 检测新增依赖 fromId → toId 是否会产生环路。
@@ -70,6 +82,17 @@ export function wouldCreateCycle(
 // ── 依赖自动级联 ─────────────────────────────────────────────────────────
 // 支持 SS(0)/SF(1)/FS(2)/FF(3)，迭代式处理直到所有后继任务满足约束
 const MAX_CASCADE_ITERATIONS = 500 // 安全阀，防止异常数据导致无限循环
+
+function latestStartForConstraint(
+  constraintType: string | null | undefined,
+  constraintDate: string | null,
+  duration: number,
+): string | null {
+  if (!constraintDate) return null
+  if (constraintType === 'startnolaterthan') return constraintDate
+  if (constraintType === 'finishnolaterthan') return addDaysStr(constraintDate, -duration)
+  return null
+}
 
 export async function cascadeDependencies(
   client: PoolClient,
@@ -207,7 +230,17 @@ export async function cascadeDependencies(
           const s = addDaysStr(cdate, -dur)
           newStart = (maxRequired && s && maxRequired > s) ? maxRequired : s
         }
-        // 上界约束（nolaterthan）不主动前移：有依赖时允许依赖推动（冲突时依赖胜）
+        const latestStart = latestStartForConstraint(ctype, cdate, dur)
+        if (latestStart) {
+          if (maxRequired && maxRequired > latestStart) {
+            // 依赖与上界约束冲突时，依赖链保持一致；由 UI/审计提示冲突。
+            newStart = maxRequired
+          } else if (newStart && newStart > latestStart) {
+            newStart = latestStart
+          } else if (!newStart && toStart > latestStart) {
+            newStart = latestStart
+          }
+        }
       }
 
       if (!newStart) continue
@@ -491,7 +524,7 @@ export async function snapTasksToDayLevel(
   if (granRes.rows[0]?.time_granularity === 'minute') return []
 
   const res = await client.query(
-    `SELECT id, start_date, end_date, duration FROM tasks
+    `SELECT id, start_date, end_date, duration, COALESCE(is_milestone, false) AS is_milestone FROM tasks
      WHERE project_id = $1 AND is_deleted = false
        AND start_date IS NOT NULL AND end_date IS NOT NULL
        AND (
@@ -502,6 +535,10 @@ export async function snapTasksToDayLevel(
          OR EXTRACT(MINUTE FROM end_date) <> 0
          OR EXTRACT(SECOND FROM end_date) <> 0
          OR (duration IS NOT NULL AND duration % 1440 <> 0)
+         OR (
+           COALESCE(is_milestone, false) = false
+           AND duration IS DISTINCT FROM GREATEST(0, ROUND(EXTRACT(EPOCH FROM (end_date - start_date)) / 86400.0)::int * 1440)
+         )
        )`,
     [projectId],
   )
@@ -512,13 +549,8 @@ export async function snapTasksToDayLevel(
     if (!sStr || !eStr) continue
     const s = parseLocal(sStr)
     if (!s) continue
-    // 来源 duration：优先用存的 duration，否则用 end - start
-    const srcMins = (r.duration != null && Number.isFinite(r.duration))
-      ? Number(r.duration)
-      : diffMinutesStr(sStr, eStr)
-    // 天数四舍五入，最小 0（保留 milestone）
-    const days = Math.max(0, Math.round(srcMins / 1440))
-    const newDur = days * 1440
+    const newDur = dayLevelDurationFromDates(sStr, eStr, r.is_milestone === true)
+    if (newDur == null) continue
     s.setHours(0, 0, 0, 0)
     const newStartStr = toDateStr(s)
     const newEndStr = addMinutesStr(newStartStr, newDur)

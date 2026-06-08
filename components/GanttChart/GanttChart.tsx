@@ -12,7 +12,13 @@ import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
-import { runFullCascade, applyAutoStartAnchor, collapseDeletedTaskSuccessors, rollupSummaryTasks } from '@/lib/clientScheduling'
+import {
+  runFullCascade,
+  applyAutoStartAnchor,
+  collapseDeletedTaskSuccessors,
+  rollupSummaryTasks,
+  findUpperConstraintViolations,
+} from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { uuid } from '@/lib/uuid'
 
@@ -313,132 +319,6 @@ function getDownstreamIds(taskId: string, deps: Dependency[]): string[] {
   }
   walk(taskId)
   return result
-}
-
-/**
- * 客户端即时级联：给定一个已变更的任务，计算所有下游依赖任务和摘要任务的新日期。
- * 返回所有需要更新的任务（不含触发任务本身）。
- */
-function cascadeLocal(
-  changedTask: Task,
-  allTasks: Task[],
-  deps: Dependency[],
-): Task[] {
-  const downstreamIds = getDownstreamIds(changedTask.id, deps)
-  if (downstreamIds.length === 0) return []
-
-  const localStart = new Map<string, Date>()
-  const localEnd   = new Map<string, Date>()
-
-  // 初始化所有任务日期
-  allTasks.forEach(t => {
-    if (t.start_date) localStart.set(t.id, new Date(t.start_date))
-    if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
-  })
-  // 覆盖已变更任务的日期
-  if (changedTask.start_date) localStart.set(changedTask.id, new Date(changedTask.start_date))
-  if (changedTask.end_date)   localEnd.set(changedTask.id, new Date(changedTask.end_date))
-
-  const result: Record<string, Task> = {}
-
-  // 迭代式级联
-  let changed = true, iter = 0
-  while (changed && iter++ < downstreamIds.length + 1) {
-    changed = false
-    for (const toId of downstreamIds) {
-      const t = allTasks.find(x => x.id === toId)
-      if (!t || !t.start_date || !t.end_date) continue
-
-      const incoming = deps.filter(d => d.to_task_id === toId)
-      if (incoming.length === 0 && t.auto_schedule === false) continue
-      let maxRequiredStart: Date | null = null
-
-      for (const dep of incoming) {
-        const predStart = localStart.get(dep.from_task_id)
-        const predEnd   = localEnd.get(dep.from_task_id)
-        if (!predStart || !predEnd) continue
-        const lag = dep.lag ?? 0
-        const depType = dep.type ?? 2
-
-        let requiredStart: Date
-        if (depType === 2) {
-          requiredStart = addDays(predEnd, lag)
-        } else if (depType === 0) {
-          requiredStart = addDays(predStart, lag)
-        } else if (depType === 3) {
-          const curS = localStart.get(toId)!
-          const curE = localEnd.get(toId)!
-          const dur = diffDays(curS, curE)
-          requiredStart = addDays(predEnd, lag - dur)
-        } else {
-          const curS = localStart.get(toId)!
-          const curE = localEnd.get(toId)!
-          const dur = diffDays(curS, curE)
-          requiredStart = addDays(predStart, lag - dur)
-        }
-
-        if (!maxRequiredStart || requiredStart > maxRequiredStart) {
-          maxRequiredStart = requiredStart
-        }
-      }
-
-      if (!maxRequiredStart) continue
-      const curStart = localStart.get(toId)!
-      if (curStart.getTime() === maxRequiredStart.getTime()) continue
-
-      const shift = diffDays(curStart, maxRequiredStart)
-      const s = addDays(curStart, shift)
-      let e = addDays(localEnd.get(toId)!, shift)
-      if (t.is_milestone) e = s
-      if (e < s) e = s
-      localStart.set(toId, s)
-      localEnd.set(toId, e)
-      result[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
-      changed = true
-    }
-  }
-
-  // 更新摘要任务（父任务）日期范围
-  const affectedParents = new Set<string>()
-  for (const id of Object.keys(result)) {
-    const tk = allTasks.find(x => x.id === id)
-    if (tk?.parent_id) affectedParents.add(tk.parent_id)
-  }
-  // 也检查直接变更任务的父级
-  if (changedTask.parent_id) affectedParents.add(changedTask.parent_id)
-
-  for (const pid of affectedParents) {
-    let curPid: string | null = pid
-    const seen = new Set<string>()
-    while (curPid && !seen.has(curPid)) {
-      seen.add(curPid)
-      const children = allTasks.filter(c => c.parent_id === curPid)
-      if (children.length === 0) break
-      let minS: string | null = null
-      let maxE: string | null = null
-      for (const c of children) {
-        const ct = result[c.id] ?? (c.id === changedTask.id ? changedTask : c)
-        const s = ct.start_date ?? null
-        const e2 = ct.end_date ?? null
-        if (s && (!minS || s < minS)) minS = s
-        if (e2 && (!maxE || e2 > maxE)) maxE = e2
-      }
-      if (minS && maxE) {
-        const parent = allTasks.find(x => x.id === curPid)
-        if (parent) {
-          result[curPid] = {
-            ...parent,
-            start_date: minS,
-            end_date: maxE,
-            duration: diffMins(new Date(minS), new Date(maxE)),
-          }
-        }
-      }
-      curPid = allTasks.find(x => x.id === curPid)?.parent_id ?? null
-    }
-  }
-
-  return Object.values(result)
 }
 
 /** 递归收集某任务的所有后代 ID（子、孙…） */
@@ -1474,8 +1354,8 @@ export default function GanttChart({
               for (const toId of extIds) {
                 const t = tasks.find(x => x.id === toId)
                 if (!t || !t.start_date || !t.end_date) continue
+                if (t.auto_schedule === false) continue
                 const incoming = deps.filter(d => d.to_task_id === toId)
-                if (incoming.length === 0 && t.auto_schedule === false) continue
                 let maxRS: Date | null = null
                 for (const dep of incoming) {
                   const pS = localStart.get(dep.from_task_id)
@@ -1584,9 +1464,9 @@ export default function GanttChart({
             for (const toId of downstreamIds) {
               const t = tasks.find(x => x.id === toId)
               if (!t || !t.start_date || !t.end_date) continue
+              if (t.auto_schedule === false) continue
 
               const incoming = deps.filter(d => d.to_task_id === toId)
-              if (incoming.length === 0 && t.auto_schedule === false) continue
               let maxRequiredStart: Date | null = null
 
               for (const dep of incoming) {
@@ -1742,7 +1622,7 @@ export default function GanttChart({
         const isSummaryDrag = summarySet.has(drag.taskId)
 
         // 保留完整列表用于乐观UI更新（包含级联下游 + 摘要任务）
-        const allUpdated = [...finalPreview]
+        let allUpdated = [...finalPreview]
 
         // dirtyList: 只标记需要服务端保存的任务（服务端自动级联 + 重算摘要）
         let dirtyList: Task[] = []
@@ -1758,7 +1638,15 @@ export default function GanttChart({
             const incoming = deps.filter(d => d.to_task_id === drag.taskId)
             const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
 
-            if (depType === 3 || depType === 1) {
+            if (drag.mode === 'move' && dragged) {
+              dirtyList = [{
+                ...draggedTask,
+                start_date: dragged.start_date,
+                end_date: dragged.end_date,
+                duration: dragged.duration ?? draggedTask.duration,
+                auto_schedule: false,
+              }]
+            } else if (depType === 3 || depType === 1) {
               const fixedEnd = draggedTask.end_date!
               const newStart = dragged?.start_date ?? draggedTask.start_date
               const newDur = newStart ? diffMins(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
@@ -1829,7 +1717,27 @@ export default function GanttChart({
         }
 
         if (dirtyList.length > 0 || allUpdated.length > 0) {
-      
+          if (dirtyList.length > 0) {
+            const dirtyById = new Map(dirtyList.map(t => [t.id, t]))
+            allUpdated = allUpdated.map(t => dirtyById.get(t.id) ?? t)
+            for (const t of dirtyList) {
+              if (!allUpdated.some(u => u.id === t.id)) allUpdated.push(t)
+            }
+          }
+
+          const originalById = new Map(tasks.map(t => [t.id, t]))
+          const constraintCheckTasks = (allUpdated.length > 0 ? allUpdated : dirtyList)
+            .filter(t => originalById.get(t.id)?.auto_schedule !== false)
+          const constraintViolations = findUpperConstraintViolations(constraintCheckTasks)
+          if (constraintViolations.length > 0) {
+            const msg = constraintViolations.map(v => {
+              const label = v.constraintType === 'finishnolaterthan' ? '完成' : '开始'
+              return `「${v.taskName}」计划${label} ${v.actualDate.slice(0, 10)} 晚于限制 ${v.constraintDate.slice(0, 10)}`
+            }).join('\n')
+            const ok = window.confirm(`${msg}\n\n确定 = 继续保存本次拖动\n取消 = 撤销本次拖动`)
+            if (!ok) return
+          }
+
           // 乐观更新UI：包含级联下游 + 摘要任务，界面立即反映关联变更
           dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
           // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
@@ -2028,8 +1936,8 @@ export default function GanttChart({
     const updated = { ...orig, ...patch } as typeof orig
 
 
-    // 客户端即时级联下游依赖任务
-    const cascaded = cascadeLocal(updated, tasks, deps)
+    const nextTasks = tasks.map(t => t.id === updated.id ? updated : t)
+    const cascaded = runFullCascade(nextTasks, deps).filter(t => t.id !== updated.id)
     dispatch(updateTasks([updated, ...cascaded]))
     dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
     // 自动描述：单元格编辑
@@ -2044,8 +1952,15 @@ export default function GanttChart({
     if (!t) return
 
     const updated = { ...t, ...patch }
-    dispatch(updateTasks([updated]))
-    dispatch(markDirty([taskId]))
+    const isConstraintChange = 'constraint_type' in patch || 'constraint_date' in patch
+    const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
+    const cascaded = isConstraintChange ? runFullCascade(nextTasks, deps) : []
+    const merged = new Map<string, Task>([[updated.id, updated]])
+    for (const c of cascaded) merged.set(c.id, c)
+    const updates = Array.from(merged.values())
+
+    dispatch(updateTasks(updates))
+    dispatch(markDirty(updates.map(x => x.id)))
     const fields = Object.keys(patch)
     const fieldLabels: Record<string, string> = { constraint_type: '限制类型', constraint_date: '限制日期', status: '状态', deadline: '截止日期' }
     const label = fields.map(f => fieldLabels[f] ?? f).join('、')

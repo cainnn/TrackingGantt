@@ -1252,20 +1252,22 @@ export default function GanttToolbar({
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
     if (!sd || statusDateSaving) return
 
-    // 保存时校验：1) 不晚于当前时刻 2) 不早于 72 小时前 3) 严格大于上一版本
+    // 保存时校验：1) 不晚于当前时刻 2) 非当天状态日期不早于 72 小时前 3) 非当天状态日期不早于上一版本。
+    // 当天状态日期允许反复保存，用于当天内多次确认当前进展。
     const sdLabel = isMinute ? '状态时间' : '状态日期'
     const nowStr = toDateTimeStr(new Date())!
+    const isTodayStatusDate = sd.slice(0, 10) === nowStr.slice(0, 10)
     const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
     if (sd > nowStr) {
       alert(`无法保存：${sdLabel} ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
       return
     }
     const earliestStr = addMinutesStr(nowStr, -3 * 24 * 60)!
-    if (sd < earliestStr) {
+    if (!isTodayStatusDate && sd < earliestStr) {
       alert(`无法保存：${sdLabel} ${fmtDt(sd)} 早于 ${fmtDt(earliestStr)}（仅允许最近 72 小时内）`)
       return
     }
-    if (lastVersionDate && sd <= lastVersionDate) {
+    if (!isTodayStatusDate && lastVersionDate && sd <= lastVersionDate) {
       alert(`无法保存：${sdLabel}必须晚于上一版本 (${fmtDt(lastVersionDate)})`)
       return
     }
@@ -1564,6 +1566,7 @@ export default function GanttToolbar({
                 const sd = toDateTimeStr(currentProject?.status_date ?? null)
                 const nowStr = toDateTimeStr(new Date())!
                 const isFuture = !!sd && sd > nowStr
+                const isTodayStatusDate = !!sd && sd.slice(0, 10) === nowStr.slice(0, 10)
                 const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
                 const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
                 const sdLabel = isMinute ? '状态时间' : '状态日期'
@@ -1579,7 +1582,7 @@ export default function GanttToolbar({
                       if (sd > nowStr) {
                         alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
                       }
-                      if (lastVersionDate && sd < lastVersionDate) {
+                      if (!isTodayStatusDate && lastVersionDate && sd < lastVersionDate) {
                         alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
                       }
                       openReview()

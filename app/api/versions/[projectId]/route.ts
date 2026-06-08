@@ -3,7 +3,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
-import { getTodayYmd, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
+import { getStatusDateYmd, getTodayYmd, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -90,6 +90,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
     const lastVersion = lastRes.rows[0] ?? null
     if (statusDate && lastVersion?.status_date) {
+      const today = getTodayYmd()
+      const isTodayStatusDate = getStatusDateYmd(statusDate) === today
       // 分钟级：完整 datetime 比较，避免同日不同时间被误判
       const toIso = (v: unknown): string => {
         if (v instanceof Date) {
@@ -101,7 +103,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
       const lastSD = toIso(lastVersion.status_date)
       const curSD = toIso(statusDate)
-      if (curSD < lastSD) {
+      if (!isTodayStatusDate && curSD < lastSD) {
         await client.query('ROLLBACK')
         return NextResponse.json(failure(`状态日期不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
       }

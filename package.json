@@ -12,6 +12,7 @@
     "test:unit": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js",
     "start": "next start",
     "db:init": "node scripts/init-db.js",
+    "db:health": "node scripts/data-health-check.js",
     "source-pdf": "node scripts/generate-source-pdf.js",
     "doc-pdf": "node scripts/generate-doc-pdf.js",
     "deploy:vps": "bash scripts/deploy-vps.sh",
