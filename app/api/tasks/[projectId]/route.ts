@@ -181,7 +181,8 @@ export async function GET(req: NextRequest, { params }: Params) {
       const to = byId.get(d.to_task_id)
       if (!from?.start || !from?.end || !to?.start || !to?.end || !to.auto) continue
       const depType = d.type ?? 2
-      const lag = projIsMinute ? (d.lag ?? 0) : (d.lag ?? 0) * 1440
+      // dependencies.lag is stored in minutes for both day-level and minute-level projects.
+      const lag = d.lag ?? 0
       let rs: string | null = null
       if (depType === 2)      rs = addDaysStr(from.end, lag)
       else if (depType === 0) rs = addDaysStr(from.start, lag)

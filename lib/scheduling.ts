@@ -100,13 +100,8 @@ export async function cascadeDependencies(
 ): Promise<string[]> {
   const cascadedIds: string[] = []
 
-  const projectRes = await client.query(
-    'SELECT time_granularity FROM projects WHERE id = $1',
-    [projectId],
-  )
-  const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
-  const toScheduleLag = (lag: number | null | undefined): number =>
-    isMinuteProject ? (lag ?? 0) : (lag ?? 0) * 1440
+  // dependencies.lag is stored in minutes for both day-level and minute-level projects.
+  const toScheduleLag = (lag: number | null | undefined): number => lag ?? 0
 
   const depsRes = await client.query(
     `SELECT d.id as dep_id, d.from_task_id, d.to_task_id, d.type, d.lag, COALESCE(d.active, true) AS active FROM dependencies d
