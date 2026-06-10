@@ -4,11 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slices/tasksSlice'
+import { setTasks, clearTasks, clearViewSnapshot, clearDirty, markDirty } from '@/store/slices/tasksSlice'
 import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
 import { toDateTimeStr } from '@/lib/clientTime'
 import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
+import { setVersions } from '@/store/slices/versionsSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
 import AIChatPanel from '@/components/GanttChart/AIChatPanel'
@@ -108,19 +109,41 @@ export default function ProjectPage() {
     try { localStorage.setItem(`gantt-indicators-${projectId}`, JSON.stringify(next)) } catch { /* ignore */ }
   }, [projectId])
 
-  const handleRestoreViewedSnapshot = useCallback(() => {
+  const handleRestoreViewedSnapshot = useCallback(async () => {
     if (!viewSnapshot) return
     const ok = confirm(
-      `将历史版本「${viewSnapshot.versionName}」恢复为当前工作状态？\n\n` +
-      '这不会立刻写入数据库。恢复后请点击「确认变更」保存，并生成新的状态日期版本。',
+      `将历史版本「${viewSnapshot.versionName}」恢复为当前版本？\n\n` +
+      '恢复会立即写入数据库，并删除该版本之后的所有版本。',
     )
     if (!ok) return
-    const restoredTasks: Task[] = viewSnapshot.tasks.map(t => ({ ...t, is_deleted: false }))
-    const restoredDeps = viewSnapshot.dependencies.map(d => ({ ...d }))
-    dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
-    dispatch(markDirty(restoredTasks.map(t => t.id)))
-    dispatch(clearViewSnapshot())
-  }, [dispatch, viewSnapshot])
+    try {
+      const restoreRes = await authFetch(`/api/versions/${projectId}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: viewSnapshot.versionId }),
+      })
+      const restoreData = await restoreRes.json()
+      if (!restoreRes.ok || !restoreData.ok) {
+        throw new Error(restoreData.error ?? `恢复失败 (${restoreRes.status})`)
+      }
+
+      const snapshot = restoreData.value?.snapshot
+      if (Array.isArray(snapshot?.tasks) && Array.isArray(snapshot?.dependencies)) {
+        dispatch(setTasks({ tasks: snapshot.tasks, dependencies: snapshot.dependencies }))
+      }
+      dispatch(clearDirty())
+      dispatch(clearViewSnapshot())
+
+      const [projectData, versionsData] = await Promise.all([
+        authFetch(`/api/projects/${projectId}`).then(r => r.json()).catch(() => null),
+        authFetch(`/api/versions/${projectId}?list=1`).then(r => r.json()).catch(() => null),
+      ])
+      if (projectData?.ok) dispatch(setCurrentProject(projectData.value))
+      if (versionsData?.ok && Array.isArray(versionsData.value)) dispatch(setVersions(versionsData.value))
+    } catch (err) {
+      alert(`恢复失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }, [dispatch, projectId, viewSnapshot])
 
   useEffect(() => {
     if (!user) { router.push('/login'); return }
