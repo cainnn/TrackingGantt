@@ -20,13 +20,17 @@ export interface DiffItem {
   reason?: string
 }
 
+export interface DiffOptions {
+  isMinute?: boolean
+}
+
 const FIELD_LABELS: Record<string, string> = {
   name: '任务名称', start_date: '开始日期', end_date: '结束日期',
   duration: '工期', assignee: '责任人',
   is_milestone: '里程碑', parent_id: '父任务', order_index: '顺序',
 }
 
-function normalize(val: unknown): string {
+function normalizeDateTime(val: unknown): string {
   if (val === null || val === undefined) return ''
   const s = String(val)
   // 分钟级：归一化为 'YYYY-MM-DD HH:mm'（避免同日不同时间被误判为无变更）
@@ -44,7 +48,36 @@ function normalize(val: unknown): string {
   return s
 }
 
-export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]): DiffItem[] {
+function normalizeDayDate(val: unknown): string {
+  const normalized = normalizeDateTime(val)
+  return normalized ? normalized.slice(0, 10) : ''
+}
+
+function normalizeDayDuration(val: unknown): string {
+  if (val === null || val === undefined || val === '') return ''
+  const n = Number(val)
+  if (!Number.isFinite(n)) return String(val)
+  const days = Math.abs(n) >= 1440 ? Math.round(n / 1440) : Math.round(n)
+  return String(days)
+}
+
+function normalizeField(field: string, val: unknown, opts: DiffOptions): { compare: string; display: string } {
+  if (!opts.isMinute) {
+    if (field === 'start_date' || field === 'end_date') {
+      const day = normalizeDayDate(val)
+      return { compare: day, display: day }
+    }
+    if (field === 'duration') {
+      const days = normalizeDayDuration(val)
+      return { compare: days, display: days ? `${days}天` : '' }
+    }
+  }
+
+  const normalized = normalizeDateTime(val)
+  return { compare: normalized, display: normalized }
+}
+
+export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[], opts: DiffOptions = {}): DiffItem[] {
   const oldMap = new Map(oldTasks.map(t => [t.task_code, t]))
   const newMap = new Map(newTasks.map(t => [t.task_code, t]))
   const result: DiffItem[] = []
@@ -68,13 +101,13 @@ export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]
 
     const changes: { field: string; old: string; new: string }[] = []
     for (const f of compareFields) {
-      const ov = normalize((oldT as unknown as Record<string, unknown>)[f])
-      const nv = normalize((newT as unknown as Record<string, unknown>)[f])
-      if (ov !== nv) {
+      const ov = normalizeField(f, (oldT as unknown as Record<string, unknown>)[f], opts)
+      const nv = normalizeField(f, (newT as unknown as Record<string, unknown>)[f], opts)
+      if (ov.compare !== nv.compare) {
         changes.push({
           field: FIELD_LABELS[f] ?? f,
-          old: ov || '(空)',
-          new: nv || '(空)',
+          old: ov.display || '(空)',
+          new: nv.display || '(空)',
         })
       }
     }

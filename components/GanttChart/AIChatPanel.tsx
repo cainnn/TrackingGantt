@@ -13,6 +13,13 @@ import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
 import type { Task, Dependency } from '@/types'
 
+function fmtStatusDate(value?: string | null): string {
+  if (!value) return '未设置'
+  const s = String(value)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+  return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : s
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 interface ToolCall {
   id: string
@@ -298,7 +305,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               }
               const lines: string[] = []
               for (const v of versions) {
-                lines.push(`\n版本 #${v.version_number} "${v.name}" (${v.status_date || v.created_at.split('T')[0]}):`)
+                lines.push(`\n版本 #${v.version_number} "${v.name}" (${v.status_date ? fmtStatusDate(v.status_date) : v.created_at.split('T')[0]}):`)
                 if (!v.changes) {
                   lines.push('  (首个版本，无变更记录)')
                   continue
@@ -446,7 +453,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     const progress = computeProjectProgressPercent(tasks, currentProject?.status_date)
     lines.push(`\n【项目状态】`)
     lines.push(`项目名称: ${currentProject?.name ?? '未知'}`)
-    lines.push(`状态日期: ${currentProject?.status_date?.split('T')[0] ?? '未设置'}`)
+    lines.push(`${isMinute ? '状态时间' : '状态日期'}: ${fmtStatusDate(currentProject?.status_date)}`)
     lines.push(`整体进度参考值: ${progress}%（由状态日期自动计算，仅供参考，不作为工期变动分析依据）`)
 
     return lines.join('\n')

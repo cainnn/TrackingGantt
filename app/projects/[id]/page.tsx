@@ -27,9 +27,9 @@ const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ),
 })
 
-// colW = 像素 / 天。天级项目止于 56；分钟级延伸到 2880（每分钟 2px）。
+// colW = 像素 / 天。分钟级最小保持 1px/分钟，避免缩小后退化成小时/天视图。
 const ZOOM_LEVELS_DAY    = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
-const ZOOM_LEVELS_MINUTE = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56, 84, 120, 240, 480, 720, 1440, 2880]
+const ZOOM_LEVELS_MINUTE = [1440, 2880]
 
 export default function ProjectPage() {
   const params    = useParams()
@@ -55,13 +55,13 @@ export default function ProjectPage() {
   const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
-  // 分钟级项目首次加载时把默认列宽提到 480（Mode 1 小时可见），
-  // 用户继续放大到 1440 自动切 Mode 2 (小时+15min)。
+  // 分钟级项目首次加载时把默认列宽提到 1440（1px/分钟），
+  // 用户继续放大到 2880（2px/分钟）。
   const colWInitRef = useRef(false)
   useEffect(() => {
     if (colWInitRef.current) return
     if (currentProject?.time_granularity === 'minute' && colW === 28) {
-      setColW(480)
+      setColW(1440)
     }
     if (currentProject) colWInitRef.current = true
   }, [currentProject, colW])

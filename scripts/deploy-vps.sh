@@ -23,9 +23,11 @@ set -euo pipefail
 #   APP_DIR       VPS 上安装目录    默认 /opt/gantt-app
 #   NODE_ENV      构建环境          默认 production
 #   APP_TIME_ZONE 应用时区          默认 Asia/Shanghai
+#   APP_PORT      应用 HTTP 端口     默认 3000
 #   SKIP_BACKUP   设为 1 跳过备份
 #   SKIP_MIGRATE  设为 1 跳过数据库迁移
 #   LOCAL_BUILD   设为 1 本地构建后上传（适合 VPS 内存不足）
+#   CHECK_ONLY    设为 1 只检查 SSH/HTTP 连通性，不部署
 # ──────────────────────────────────────────────────────────────────────
 
 # --help 参数
@@ -41,14 +43,17 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "  VPS_HOST=IP             VPS 地址（默认 159.75.40.209）"
   echo "  VPS_PASS=密码           使用密码登录（默认用 SSH 公钥）"
   echo "  APP_TIME_ZONE=时区      应用日期时区（默认 Asia/Shanghai）"
+  echo "  APP_PORT=3000           应用 HTTP 端口"
   echo "  SKIP_BACKUP=1           跳过数据库备份"
   echo "  SKIP_MIGRATE=1          跳过数据库迁移"
   echo "  LOCAL_BUILD=1           本地构建后上传"
+  echo "  CHECK_ONLY=1            只检查 SSH/HTTP 连通性，不部署"
   echo ""
   echo "示例："
   echo "  npm run deploy:vps"
   echo "  SKIP_BACKUP=1 npm run deploy:vps"
   echo "  VPS_HOST=1.2.3.4 npm run deploy:vps"
+  echo "  CHECK_ONLY=1 npm run deploy:vps"
   echo ""
   echo "安全开关："
   echo "  ALLOW_NON_MAIN=1        允许非 main 分支部署（默认禁止）"
@@ -78,11 +83,14 @@ VPS_PORT="${VPS_PORT:-22}"
 APP_NAME="gantt-app"
 APP_DIR="${APP_DIR:-/opt/gantt-app}"
 APP_TIME_ZONE="${APP_TIME_ZONE:-Asia/Shanghai}"
+APP_PORT="${APP_PORT:-3000}"
 BACKUP_DIR="/var/backups/gantt-app"
 KEEP_DAYS=7
 LOCAL_BUILD="${LOCAL_BUILD:-0}"
 SKIP_BACKUP="${SKIP_BACKUP:-0}"
 SKIP_MIGRATE="${SKIP_MIGRATE:-0}"
+CHECK_ONLY="${CHECK_ONLY:-0}"
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-10}"
 REMOTE_TARGET="${VPS_USER}@${VPS_HOST}"
 ARCHIVE="/tmp/${APP_NAME}-deploy.tar.gz"
 
@@ -98,6 +106,74 @@ SSH_COMMON_OPTS=(
 
 SSH_KEY_OPTS=( "${SSH_COMMON_OPTS[@]}" -p "$VPS_PORT" )
 SCP_KEY_OPTS=( "${SSH_COMMON_OPTS[@]}" -P "$VPS_PORT" )
+
+check_tcp() {
+  local host="$1"
+  local port="$2"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w "$CONNECT_TIMEOUT" "$host" "$port" >/dev/null 2>&1
+  else
+    bash -c "cat < /dev/null > /dev/tcp/${host}/${port}" >/dev/null 2>&1
+  fi
+}
+
+check_http() {
+  local url="http://${VPS_HOST}:${APP_PORT}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSIL --max-time "$CONNECT_TIMEOUT" "$url" >/dev/null 2>&1
+  else
+    return 2
+  fi
+}
+
+print_connectivity_diagnosis() {
+  local ssh_ok="$1"
+  local http_ok="$2"
+  echo "====================================================="
+  echo " VPS 连通性诊断"
+  echo " SSH:  ${REMOTE_TARGET}:${VPS_PORT}  $ssh_ok"
+  echo " HTTP: http://${VPS_HOST}:${APP_PORT}  $http_ok"
+  echo ""
+  if [[ "$ssh_ok" != "OK" && "$http_ok" == "OK" ]]; then
+    echo " 网页可访问，但 SSH 端口不可达，所以不能部署。"
+    echo " 部署需要通过 SSH/SCP 上传代码并远程重启服务。"
+  elif [[ "$ssh_ok" != "OK" && "$http_ok" != "OK" ]]; then
+    echo " 当前机器到 VPS 的 SSH 和 HTTP 都不可达。"
+    echo " 如果浏览器能访问，说明浏览器所在网络和当前终端网络不同。"
+  elif [[ "$ssh_ok" == "OK" && "$http_ok" != "OK" ]]; then
+    echo " SSH 可达，可以部署；HTTP 不通可能是应用未启动或安全组未开放 ${APP_PORT}。"
+  else
+    echo " SSH 和 HTTP 都可达，可以部署。"
+  fi
+  echo ""
+  echo " 排查建议："
+  echo "  1. 云厂商安全组放通 TCP ${VPS_PORT}（SSH）和 ${APP_PORT}（网页）。"
+  echo "  2. VPS 防火墙允许 ${VPS_PORT}/${APP_PORT}：ufw 或 firewalld。"
+  echo "  3. sshd 正在运行：systemctl status sshd 或 ssh。"
+  echo "  4. 如限制 SSH 来源 IP，把当前部署机器公网 IP 加入白名单。"
+  echo "====================================================="
+}
+
+run_connectivity_check() {
+  local ssh_status="FAIL"
+  local http_status="SKIP"
+  if check_tcp "$VPS_HOST" "$VPS_PORT"; then ssh_status="OK"; fi
+  if check_http; then http_status="OK"; else http_status="FAIL"; fi
+  print_connectivity_diagnosis "$ssh_status" "$http_status"
+  [[ "$ssh_status" == "OK" ]]
+}
+
+if [[ "$CHECK_ONLY" -eq 1 ]]; then
+  run_connectivity_check
+  exit $?
+fi
+
+if ! check_tcp "$VPS_HOST" "$VPS_PORT"; then
+  run_connectivity_check || true
+  echo ""
+  echo "无法连接 SSH 端口 ${VPS_HOST}:${VPS_PORT}，部署中止。"
+  exit 1
+fi
 
 use_password=0
 if [[ -n "$VPS_PASS" ]]; then
@@ -166,6 +242,7 @@ echo ""
 echo "============================================="
 echo " 甘特图 VPS 部署"
 echo " 目标: ${REMOTE_TARGET}:${VPS_PORT} → ${APP_DIR}"
+echo " 网页: http://${VPS_HOST}:${APP_PORT}"
 echo " 时区: ${APP_TIME_ZONE}"
 echo " 模式: $(
   [[ "$LOCAL_BUILD" -eq 1 ]] && echo "本地构建" || echo "远程构建"

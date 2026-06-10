@@ -27,6 +27,14 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
   const { versions } = useAppSelector(s => s.versions)
   const { tasks, dependencies, comparison, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
+  const isMinute = currentProject?.time_granularity === 'minute'
+  const formatStatusDate = useCallback((value?: string | null) => {
+    if (!value) return ''
+    const s = String(value)
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+    if (!m) return s
+    return isMinute && m[2] ? `${m[1]} ${m[2]}` : m[1]
+  }, [isMinute])
 
   const panelRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
@@ -154,7 +162,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         return
       }
       const snap = data.value.snapshot
-      const versionName = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+      const versionName = v.name || formatStatusDate(v.status_date) || `快照 #${v.version_number}`
       dispatch(setViewSnapshot({
         tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
@@ -234,7 +242,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
           percent_done: t.percent_done, is_milestone: t.is_milestone,
           parent_id: t.parent_id,
         }))
-        const diffs = diffSnapshots(oldTasks, newTasks)
+        const diffs = diffSnapshots(oldTasks, newTasks, { isMinute })
         const changedCodes = diffs.map(d => d.task_code)
         // 1. 筛选变更任务
         dispatch(setDiffFilter({ versionName, taskCodes: changedCodes }))
@@ -242,7 +250,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         dispatch(setComparison({ tasks: snapshotTasks, versionName }))
       }
     } catch { /* ignore */ }
-  }, [projectId, dispatch, tasks, diffFilter])
+  }, [projectId, dispatch, tasks, diffFilter, isMinute])
 
   // 加载变更记录
   const fetchChangelog = useCallback(async () => {
@@ -426,7 +434,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                       <div className="text-[11px] text-gray-400">
                         {v.created_at ? new Date(v.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                         {v.task_count != null && <span className="ml-2">{v.task_count} 个任务</span>}
-                        {v.status_date && <span className="ml-2">状态日期: {typeof v.status_date === 'string' ? v.status_date.split('T')[0] : v.status_date}</span>}
+                        {v.status_date && <span className="ml-2">{isMinute ? '状态时间' : '状态日期'}: {formatStatusDate(v.status_date)}</span>}
                         {v.changes?.stats && (
                           <span className="ml-2">
                             {v.changes.stats.added > 0 && <span className="text-green-600">+{v.changes.stats.added}</span>}

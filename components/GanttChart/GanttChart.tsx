@@ -31,6 +31,7 @@ const HDR_H2   = 22
 const HDR_H    = HDR_H1 + HDR_H2
 const BAR_H    = 20
 const BAR_TOP  = (ROW_H - BAR_H) / 2
+const MINUTE_TIMELINE_DAYS = 7
 
 // ─── Left-panel columns ────────────────────────────────────────────────────
 const COL_NUM    =  52
@@ -796,7 +797,7 @@ export default function GanttChart({
   const { origin, totalDays } = useMemo(() => {
     if (!tasks.length) {
       const o=sod(new Date()); o.setDate(o.getDate()-o.getDay())
-      return { origin:o, totalDays:60 }
+      return { origin:o, totalDays:isMinute ? MINUTE_TIMELINE_DAYS : 60 }
     }
     let mn=new Date(9999,0,1), mx=new Date(2000,0,1)
     tasks.forEach(t=>{
@@ -805,13 +806,32 @@ export default function GanttChart({
     })
     if (currentProject?.start_date) { const d=new Date(currentProject.start_date); if(d<mn)mn=d }
     if (currentProject?.end_date)   { const d=new Date(currentProject.end_date);   if(d>mx)mx=d }
+    if (isMinute) {
+      return { origin: sod(mn), totalDays: MINUTE_TIMELINE_DAYS }
+    }
     const o=sod(mn); o.setDate(o.getDate()-o.getDay()-60)
     return { origin:o, totalDays:diffDays(o, addDays(sod(mx),21)) }
-  }, [tasks, currentProject?.start_date, currentProject?.end_date])
+  }, [tasks, currentProject?.start_date, currentProject?.end_date, isMinute])
 
   // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
   const pxPerMin = colW / 1440
   const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
+  const taskRangeCenterX = useCallback((): number | null => {
+    let minTs = Infinity
+    let maxTs = -Infinity
+    tasks.forEach(t => {
+      if (t.start_date) {
+        const ts = new Date(t.start_date).getTime()
+        if (Number.isFinite(ts) && ts < minTs) minTs = ts
+      }
+      if (t.end_date) {
+        const ts = new Date(t.end_date).getTime()
+        if (Number.isFinite(ts) && ts > maxTs) maxTs = ts
+      }
+    })
+    if (minTs === Infinity || maxTs === -Infinity) return null
+    return dateToX(new Date(Math.round((minTs + maxTs) / 2)))
+  }, [tasks, dateToX])
   const depLagToDays = useCallback((lag: number | null | undefined) => (
     isMinute ? (lag ?? 0) / 1440 : (lag ?? 0)
   ), [isMinute])
@@ -833,11 +853,11 @@ export default function GanttChart({
     const el = rightRef.current
     if (!el) return
     const viewW = el.clientWidth
-    // 缩放时保持状态日期（或今天）居中
+    // 缩放时保持分钟级任务条范围居中；天级继续以状态日期（或今天）为锚点。
     const target = statusDate ? new Date(statusDate) : sod(new Date())
-    const targetX = diffDays(origin, target) * colW
+    const targetX = isMinute ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
     syncTimelineScrollLeft(Math.max(0, targetX - viewW / 2))
-  }, [colW, syncTimelineScrollLeft, statusDate, origin])
+  }, [colW, syncTimelineScrollLeft, statusDate, isMinute, taskRangeCenterX, dateToX])
 
   // ── Initial scroll: center on status date or today ─────────────────────
   const scrolledForProject = useRef<string>('')
@@ -847,12 +867,12 @@ export default function GanttChart({
     if (statusDate === undefined) return
     scrolledForProject.current = projectId
     const target = statusDate ? new Date(statusDate) : sod(new Date())
-    const x = dateToX(target)
+    const x = isMinute ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
     requestAnimationFrame(() => {
       const vw = rightRef.current?.clientWidth ?? 600
-      syncTimelineScrollLeft(Math.max(0, x - vw / 3))
+      syncTimelineScrollLeft(Math.max(0, x - (isMinute ? vw / 2 : vw / 3)))
     })
-  }, [tasks.length, statusDate, dateToX, syncTimelineScrollLeft, projectId])
+  }, [tasks.length, statusDate, dateToX, taskRangeCenterX, syncTimelineScrollLeft, projectId, isMinute])
 
   // ── Display rows: apply previewMap + search filter ──────────────────────
   const displayRows = useMemo((): FlatRow[] => {
@@ -1184,8 +1204,10 @@ export default function GanttChart({
       leftRef.current.scrollTop = Math.max(0, rowI * ROW_H - 80)
     const task = tasks.find(t => t.id === taskId)
     if (task?.start_date && rightRef.current) {
-      const x = dateToX(new Date(task.start_date))
-      syncTimelineScrollLeft(Math.max(0, x - 200))
+      const startX = dateToX(new Date(task.start_date))
+      const endX = task.end_date ? dateToX(new Date(task.end_date)) : startX
+      const x = (startX + endX) / 2
+      syncTimelineScrollLeft(Math.max(0, x - rightRef.current.clientWidth / 2))
     }
   }, [focusSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 

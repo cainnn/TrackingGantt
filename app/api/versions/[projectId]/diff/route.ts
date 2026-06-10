@@ -15,10 +15,11 @@ export async function GET(req: NextRequest, { params }: Params) {
   const { projectId } = await params
 
   const proj = auth.value.role === 'view'
-    ? await pool.query('SELECT id FROM projects WHERE id = $1', [projectId])
-    : await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
+    ? await pool.query('SELECT id, time_granularity FROM projects WHERE id = $1', [projectId])
+    : await pool.query('SELECT id, time_granularity FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
   if (!proj.rows.length)
     return NextResponse.json(failure('Not found', 404), { status: 404 })
+  const isMinuteProject = proj.rows[0]?.time_granularity === 'minute'
 
   const v1Id = req.nextUrl.searchParams.get('v1')
   const v2Id = req.nextUrl.searchParams.get('v2')
@@ -64,7 +65,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     v2Date = v2.created_at
   }
 
-  const diffs = diffSnapshots(oldTasks, newTasks)
+  const diffs = diffSnapshots(oldTasks, newTasks, { isMinute: isMinuteProject })
 
   return NextResponse.json(success({
     base: {

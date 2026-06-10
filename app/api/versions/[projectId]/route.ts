@@ -3,7 +3,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
-import { getStatusDateYmd, getTodayYmd, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
+import { getNowYmdHm, getStatusDateYmd, getTodayYmd, isStatusDateAfterNow, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -72,13 +72,24 @@ export async function POST(req: NextRequest, { params }: Params) {
     const isAutosave: boolean = body.is_autosave === true
     const statusDate: string | null = isAutosave ? null : (body.status_date ?? null)
     const description: string | null = body.description ?? null
+    const projectRes = await client.query(
+      'SELECT time_granularity FROM projects WHERE id = $1',
+      [projectId],
+    )
+    const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
 
-    // 禁止保存"未来"日期的版本：状态日期不得超过服务器当前日期
+    // 禁止保存未来状态：分钟级按当前分钟校验，天级按当前日期校验。
     if (statusDate) {
-      const today = getTodayYmd()
-      if (isStatusDateAfterToday(statusDate, today)) {
+      const nowYmdHm = getNowYmdHm()
+      const today = nowYmdHm.slice(0, 10)
+      const isFuture = isMinuteProject
+        ? isStatusDateAfterNow(statusDate, nowYmdHm)
+        : isStatusDateAfterToday(statusDate, today)
+      if (isFuture) {
         await client.query('ROLLBACK')
-        return NextResponse.json(failure(`状态日期不能晚于今天 (${today})`, 400), { status: 400 })
+        const label = isMinuteProject ? '状态时间' : '状态日期'
+        const limit = isMinuteProject ? nowYmdHm.replace('T', ' ') : today
+        return NextResponse.json(failure(`${label}不能晚于当前${isMinuteProject ? '时间' : '日期'} (${limit})`, 400), { status: 400 })
       }
     }
 
@@ -103,15 +114,22 @@ export async function POST(req: NextRequest, { params }: Params) {
       }
       const lastSD = toIso(lastVersion.status_date)
       const curSD = toIso(statusDate)
-      if (!isTodayStatusDate && curSD < lastSD) {
+      if ((isMinuteProject || !isTodayStatusDate) && curSD < lastSD) {
         await client.query('ROLLBACK')
-        return NextResponse.json(failure(`状态日期不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
+        const label = isMinuteProject ? '状态时间' : '状态日期'
+        return NextResponse.json(failure(`${label}不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
       }
     }
 
-    // 快照数据：优先使用请求体，否则从数据库读取
+    // 确认变更流程必须使用服务端最终落库状态。
+    // 前端提交任务后，服务端可能会触发依赖级联、摘要任务重算和天级归整；
+    // 如果继续用前端传入的旧 tasks/dependencies，版本快照会和数据库当前任务不一致。
+    const useDatabaseSnapshot = body.use_database_snapshot === true
+    const includeSnapshot = body.include_snapshot === true
+
+    // 快照数据：确认变更用数据库最终状态；兼容旧调用在未指定时仍可使用请求体。
     let snapshotTasks, snapshotDeps
-    if (Array.isArray(body.tasks) && Array.isArray(body.dependencies)) {
+    if (!useDatabaseSnapshot && Array.isArray(body.tasks) && Array.isArray(body.dependencies)) {
       snapshotTasks = body.tasks.filter((t: Record<string, unknown>) => !t.is_deleted)
       snapshotDeps = body.dependencies
     } else {
@@ -135,7 +153,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       body.reasons && typeof body.reasons === 'object' ? body.reasons : {}
     if (lastVersion) {
       const prevTasks: SnapshotTask[] = lastVersion.snapshot?.tasks ?? []
-      const diffs = diffSnapshots(prevTasks, snapshotTasks).map(d => {
+      const diffs = diffSnapshots(prevTasks, snapshotTasks, { isMinute: isMinuteProject }).map(d => {
         const r = reasonMap[d.task_code]
         return r ? { ...d, reason: r } : d
       })
@@ -208,6 +226,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       ...row,
       task_count: snapshotTasks.length,
       changes,
+      ...(includeSnapshot ? { snapshot } : {}),
     }), { status: 201 })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})

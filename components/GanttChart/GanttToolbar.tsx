@@ -175,6 +175,35 @@ export default function GanttToolbar({
   const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, editDescriptions, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
+  const formatStatusDate = useCallback((value?: string | Date | null) => {
+    const dt = toDateTimeStr(value ?? null)
+    if (!dt) return ''
+    return isMinute ? dt.slice(0, 16).replace('T', ' ') : dt.slice(0, 10)
+  }, [isMinute])
+  const versionLabel = useCallback((v: { name?: string | null; status_date?: string | null; version_number: number }) => (
+    v.name || formatStatusDate(v.status_date) || `快照 #${v.version_number}`
+  ), [formatStatusDate])
+  const snapshotEndForBaseline = useCallback((value?: string | null) => {
+    const dt = toDateTimeStr(value ?? null)
+    if (!dt) return null
+    return isMinute ? dt : dt.slice(0, 10)
+  }, [isMinute])
+  const statusTimeMin = isMinute
+    ? (toDateTimeStr(currentProject?.start_date ?? null)?.slice(0, 16) ?? undefined)
+    : (currentProject?.start_date?.split('T')[0] ?? undefined)
+  const statusTimeMax = isMinute
+    ? (toDateTimeStr(currentProject?.end_date ?? null)?.slice(0, 16) ?? undefined)
+    : (currentProject?.end_date?.split('T')[0] ?? undefined)
+  const clampStatusDate = useCallback((value: string | null) => {
+    if (!value) return null
+    const normalized = isMinute
+      ? toDateTimeStr(value)?.slice(0, 16)
+      : value.slice(0, 10)
+    if (!normalized) return null
+    if (statusTimeMin && normalized < statusTimeMin) return statusTimeMin
+    if (statusTimeMax && normalized > statusTimeMax) return statusTimeMax
+    return normalized
+  }, [isMinute, statusTimeMin, statusTimeMax])
 
   // 上一版本带状态日期的快照（保存时校验：新版本状态日期必须严格大于旧版本）
   // 分钟级：保留完整 datetime，不再裁到日。
@@ -214,6 +243,8 @@ export default function GanttToolbar({
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [retroLogOpen, setRetroLogOpen] = useState(false)
   const [viewVersionOpen, setViewVersionOpen] = useState(false)
+  const zoomMin = isMinute ? 1440 : 3
+  const zoomMax = isMinute ? 2880 : 56
   const viewVersionRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!viewVersionOpen) return
@@ -236,12 +267,12 @@ export default function GanttToolbar({
           tasks: Array.isArray(d.value.snapshot.tasks) ? d.value.snapshot.tasks : [],
           dependencies: Array.isArray(d.value.snapshot.dependencies) ? d.value.snapshot.dependencies : [],
           versionId: v.id,
-          versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
+          versionName: versionLabel(v),
         }))
       }
     } catch { /* ignore */ }
     setViewVersionOpen(false)
-  }, [versions, projectId, dispatch])
+  }, [versions, projectId, dispatch, versionLabel])
 
   // ── 变更检测（纯本地，不依赖 API）──────────────────────────────────
   // 基线：首次加载任务时捕获快照，作为"上次入库状态"。所有编辑只改 Redux，
@@ -289,8 +320,8 @@ export default function GanttToolbar({
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
       parent_id: t.parent_id,
     }))
-    return diffSnapshots(baseline, currentSnap)
-  }, [baseline, tasks])
+    return diffSnapshots(baseline, currentSnap, { isMinute })
+  }, [baseline, tasks, isMinute])
 
   // 依赖变更检测：添加/删除/修改 lag/type/active（任务字段 diff 不包含依赖）
   const DEP_TYPE_LABEL = ['SS', 'SF', 'FS', 'FF']
@@ -389,12 +420,12 @@ export default function GanttToolbar({
       if (d.ok && d.value?.snapshot?.tasks) {
         dispatch(setComparison({
           tasks: d.value.snapshot.tasks,
-          versionName: baseline.name || baseline.status_date?.split('T')[0] || `快照 #${baseline.version_number}`,
+          versionName: versionLabel(baseline),
         }))
       }
       onShowComparison?.()
     } catch { /* ignore */ }
-  }, [comparison, versions, projectId, dispatch, onShowComparison])
+  }, [comparison, versions, projectId, dispatch, onShowComparison, versionLabel])
   // 区分主动/被动变更：
   // - 添加/删除 → 主动
   // - 添加/删除 → 主动
@@ -604,22 +635,24 @@ export default function GanttToolbar({
           const ends = new Map<string, string>()
           for (const t of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
             ids.add(t.id)
-            if (t.end_date) ends.set(t.id, String(t.end_date).split('T')[0])
+            const end = snapshotEndForBaseline(t.end_date)
+            if (end) ends.set(t.id, end)
           }
           setPrevSnapshotMap({ ids, ends })
         }
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [projectId, versions])
+  }, [projectId, versions, snapshotEndForBaseline])
 
   const handleExportExcel = useCallback(() => {
     exportToExcel(tasks, dependencies, currentProject?.name ?? '甘特图', currentProject?.status_date, projectLines, {
       prevTaskIds: prevSnapshotMap.ids,
       prevEndMap: prevSnapshotMap.ends,
+      isMinute,
     })
     setExportDropdown(false)
-  }, [tasks, dependencies, currentProject, projectLines, prevSnapshotMap])
+  }, [tasks, dependencies, currentProject, projectLines, prevSnapshotMap, isMinute])
 
   const handleExportJpeg = useCallback(async () => {
     setExportDropdown(false)
@@ -642,7 +675,9 @@ export default function GanttToolbar({
         name: currentProject?.name ?? 'project',
         start_date: currentProject?.start_date?.split('T')[0] ?? null,
         end_date: currentProject?.end_date?.split('T')[0] ?? null,
-        status_date: currentProject?.status_date?.split('T')[0] ?? null,
+        status_date: isMinute
+          ? toDateTimeStr(currentProject?.status_date ?? null)
+          : currentProject?.status_date?.split('T')[0] ?? null,
         tasks: tasks
           .filter(t => !t.is_deleted)
           .map(t => ({
@@ -692,7 +727,7 @@ export default function GanttToolbar({
     } catch (err) {
       alert(`导出 MS Project 失败：${err instanceof Error ? err.message : '未知错误'}`)
     }
-  }, [tasks, dependencies, currentProject])
+  }, [tasks, dependencies, currentProject, isMinute])
 
   // ── Import (Excel + MPP 共用流程) ─────────────────────────────────────
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -898,12 +933,14 @@ export default function GanttToolbar({
   // ── Create task（本地，保存版本时入库）────────────────────────────────
   const handleAddTask = useCallback(() => {
     const fmtD = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-    const statusDateStr = currentProject?.status_date?.split('T')[0] ?? null
-    const startD = statusDateStr ? new Date(statusDateStr + 'T00:00:00') : new Date()
-    startD.setHours(0, 0, 0, 0)
-    const startStr = fmtD(startD)
-    const endD = new Date(startD); endD.setDate(endD.getDate() + 1)
-    const endStr = fmtD(endD)
+    const statusDateStr = toDateTimeStr(currentProject?.status_date ?? null)
+    const startD = statusDateStr ? new Date(statusDateStr) : new Date()
+    if (!isMinute) startD.setHours(0, 0, 0, 0)
+    const endD = new Date(startD)
+    if (isMinute) endD.setMinutes(endD.getMinutes() + 60)
+    else endD.setDate(endD.getDate() + 1)
+    const startStr = isMinute ? toDateTimeStr(startD)! : fmtD(startD)
+    const endStr = isMinute ? toDateTimeStr(endD)! : fmtD(endD)
 
     const rootTasks = tasks.filter(t => t.parent_id === null)
     const nextIndex = rootTasks.length > 0 ? Math.max(...rootTasks.map(t => t.order_index)) + 1 : 0
@@ -919,7 +956,7 @@ export default function GanttToolbar({
       parent_id: null,
       assignee: null,
       start_date: startStr, end_date: endStr,
-      duration: 1, duration_unit: 'day',
+      duration: isMinute ? 60 : 1, duration_unit: isMinute ? 'minute' : 'day',
       percent_done: 0, is_milestone: false, note: null,
       order_index: nextIndex,
       auto_schedule: true,
@@ -941,7 +978,7 @@ export default function GanttToolbar({
     dispatch(addTasks([newTask]))
     dispatch(markDirty([newTask.id]))
     dispatch(setSelectedIds([newTask.id]))
-  }, [dispatch, projectId, tasks, currentProject])
+  }, [dispatch, projectId, tasks, currentProject, isMinute])
 
   // ── Delete（本地）────────────────────────────────────────────────────────
   const handleDeleteTasks = useCallback(() => {
@@ -1245,9 +1282,9 @@ export default function GanttToolbar({
   // 允许任意历史日期以便预览进展；用户点"确认变更"才一并保存（带合规校验和版本快照），
   // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
   const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value || null
+    const val = clampStatusDate(e.target.value || null)
     dispatch(setStatusDate({ projectId, statusDate: val }))
-  }, [dispatch, projectId])
+  }, [dispatch, projectId, clampStatusDate])
 
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
@@ -1286,7 +1323,7 @@ export default function GanttToolbar({
         const d = await r.json()
         if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
           for (const pt of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
-            prevEndByTaskId.set(pt.id, pt.end_date ? String(pt.end_date).split('T')[0] : null)
+            prevEndByTaskId.set(pt.id, snapshotEndForBaseline(pt.end_date))
           }
         }
       } catch { /* ignore, 退化为当前 end */ }
@@ -1295,7 +1332,7 @@ export default function GanttToolbar({
       .filter(t => t.start_date && t.end_date)
       .map(t => {
         const prevEnd = prevEndByTaskId.get(t.id) ?? null
-        const baselineEnd = prevEnd ?? ((t.end_date ?? '').split('T')[0] || null)
+        const baselineEnd = prevEnd ?? snapshotEndForBaseline(t.end_date)
         return {
           ...t,
           percent_done: calcPercent(t, sdDate),
@@ -1412,7 +1449,8 @@ export default function GanttToolbar({
       method: 'POST',
       headers: authFetchHeaders(true),
       body: JSON.stringify({
-        tasks: finalTasks, dependencies,
+        use_database_snapshot: true,
+        include_snapshot: true,
         status_date: sd,
         reasons: reasonMap,
       }),
@@ -1423,8 +1461,15 @@ export default function GanttToolbar({
 
     if (snapshotData.ok) {
       dispatch(clearDirty())
+      const savedTasks: Task[] = Array.isArray(snapshotData.value?.snapshot?.tasks)
+        ? snapshotData.value.snapshot.tasks
+        : finalTasks
+      const savedDeps: Dependency[] = Array.isArray(snapshotData.value?.snapshot?.dependencies)
+        ? snapshotData.value.snapshot.dependencies
+        : dependencies
+      dispatch(setTasks({ tasks: savedTasks, dependencies: savedDeps }))
       // 重置基线为已落库的当前状态
-      const livingTasks = finalTasks.filter(t => !t.is_deleted)
+      const livingTasks = savedTasks.filter(t => !t.is_deleted)
       setBaseline(livingTasks.map(t => ({
         id: t.id, task_code: t.task_code, name: t.name,
         start_date: t.start_date, end_date: t.end_date,
@@ -1433,7 +1478,7 @@ export default function GanttToolbar({
         parent_id: t.parent_id,
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
-      setBaselineDeps(dependencies.map(d => ({ ...d })))
+      setBaselineDeps(savedDeps.map(d => ({ ...d })))
       setBaselineStatusDate(sd)
 
       authFetch(`/api/versions/${projectId}?list=1`)
@@ -1445,7 +1490,8 @@ export default function GanttToolbar({
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
-      baselineTasks, baselineDeps, lastVersionDate, statusDateChanged])
+      baselineTasks, baselineDeps, lastVersionDate, statusDateChanged,
+      isMinute, snapshotEndForBaseline])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -1508,8 +1554,8 @@ export default function GanttToolbar({
         {sep}
 
         {/* Group 4: Zoom + Focus + Indent/Outdent */}
-        <Ic title={`放大 (当前: ${colW}px)`} disabled={colW >= 56} onClick={onZoomIn}><IcoZoomIn /></Ic>
-        <Ic title={`缩小 (当前: ${colW}px)`} disabled={colW <= 3} onClick={onZoomOut}><IcoZoomOut /></Ic>
+        <Ic title={`放大 (当前: ${colW}px)`} disabled={colW >= zoomMax} onClick={onZoomIn}><IcoZoomIn /></Ic>
+        <Ic title={`缩小 (当前: ${colW}px)`} disabled={colW <= zoomMin} onClick={onZoomOut}><IcoZoomOut /></Ic>
         <Ic title="聚焦到选中任务" disabled={!hasSelection} onClick={onFocusTask}><IcoFocus /></Ic>
         {!readOnly && <Ic title="升级 (Outdent)" disabled={!hasSelection} onClick={handlePromote}><IcoPrev /></Ic>}
         {!readOnly && <Ic title="降级 (Indent)"  disabled={!hasSelection} onClick={handleDemote}><IcoNext /></Ic>}
@@ -1561,7 +1607,13 @@ export default function GanttToolbar({
               {(() => {
                 const v = currentProject?.status_date ?? ''
                 return (
-                  <YmdDateInput value={v} onChange={handleStatusDatePick} includeTime={isMinute} />
+                  <YmdDateInput
+                    value={v}
+                    onChange={handleStatusDatePick}
+                    includeTime={isMinute}
+                    min={statusTimeMin}
+                    max={statusTimeMax}
+                  />
                 )
               })()}
               {(() => {
@@ -1584,7 +1636,7 @@ export default function GanttToolbar({
                       if (sd > nowStr) {
                         alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
                       }
-                      if (!isTodayStatusDate && lastVersionDate && sd < lastVersionDate) {
+                      if ((isMinute || !isTodayStatusDate) && lastVersionDate && sd < lastVersionDate) {
                         alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
                       }
                       openReview()
@@ -1652,8 +1704,8 @@ export default function GanttToolbar({
                       <div className="px-3 py-3 text-[12px] text-gray-400 text-center">暂无历史版本</div>
                     )}
                     {versions.filter(v => !v.is_autosave).map(v => {
-                      const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
-                      const sd = v.status_date ? String(v.status_date).split('T')[0] : null
+                      const label = versionLabel(v)
+                      const sd = formatStatusDate(v.status_date)
                       return (
                         <button
                           key={v.id}
@@ -1704,6 +1756,8 @@ export default function GanttToolbar({
               value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
               includeTime={isMinute}
+              min={statusTimeMin}
+              max={statusTimeMax}
             />
           </>
         )}
@@ -1719,7 +1773,7 @@ export default function GanttToolbar({
               <span className="text-orange-400">vs</span>
               <span className="text-[11px] text-orange-500">基准</span>
               <select
-                value={versions.find(v => (v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`) === comparison.versionName)?.id ?? ''}
+                value={versions.find(v => versionLabel(v) === comparison.versionName)?.id ?? ''}
                 onChange={async e => {
                   const vid = e.target.value
                   const v = versions.find(x => x.id === vid)
@@ -1728,10 +1782,10 @@ export default function GanttToolbar({
                     const r = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
                     const d = await r.json()
                     if (d.ok && d.value?.snapshot?.tasks) {
-                      dispatch(setComparison({
-                        tasks: d.value.snapshot.tasks,
-                        versionName: v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`,
-                      }))
+                        dispatch(setComparison({
+                          tasks: d.value.snapshot.tasks,
+                          versionName: versionLabel(v),
+                        }))
                     }
                   } catch { /* ignore */ }
                 }}
@@ -1739,7 +1793,7 @@ export default function GanttToolbar({
                 title="基准版本（以基线条显示）"
               >
                 {versions.map(v => {
-                  const label = v.name || v.status_date?.split('T')[0] || `快照 #${v.version_number}`
+                  const label = versionLabel(v)
                   return <option key={v.id} value={v.id}>{label}</option>
                 })}
               </select>
@@ -2005,7 +2059,7 @@ export default function GanttToolbar({
               <h3 className="text-[15px] font-semibold text-gray-900">
                 变更审核
                 <span className="ml-2 text-xs font-normal text-gray-500">
-                  状态日期: {currentProject?.status_date?.split('T')[0]}
+                  {isMinute ? '状态时间' : '状态日期'}: {formatStatusDate(currentProject?.status_date)}
                 </span>
               </h3>
               <button onClick={() => setReviewOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none cursor-pointer">×</button>
@@ -2040,11 +2094,11 @@ export default function GanttToolbar({
                   <div className="text-center text-gray-600 py-6 text-sm">
                     仅状态日期变化：
                     <span className="font-medium text-gray-800">
-                      {baselineStatusDate?.split('T')[0] ?? '(空)'}
+                      {formatStatusDate(baselineStatusDate) || '(空)'}
                     </span>
                     {' → '}
                     <span className="font-medium text-blue-700">
-                      {currentProject?.status_date?.split('T')[0] ?? '(空)'}
+                      {formatStatusDate(currentProject?.status_date) || '(空)'}
                     </span>
                     <div className="text-xs text-gray-400 mt-1">将以当前任务状态创建一个新版本快照</div>
                   </div>

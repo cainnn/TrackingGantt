@@ -463,10 +463,13 @@ export async function PUT(req: NextRequest, { params }: Params) {
       'SELECT status_date, time_granularity FROM projects WHERE id = $1',
       [projectId],
     )
+    const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
     const projStatusDate: string | null = projRes.rows[0]?.status_date
       ? toDateStr(projRes.rows[0].status_date as string)
       : null
-    const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
+    const auditStatusDate = projIsMinute
+      ? projStatusDate
+      : (projStatusDate ? projStatusDate.slice(0, 10) : null)
 
     // ── Batch fetch all old tasks in one query ────────────────────────────
     const inputIds = taskInputs.map((t: Record<string, unknown>) => t.id as string).filter(Boolean)
@@ -609,15 +612,20 @@ export async function PUT(req: NextRequest, { params }: Params) {
       updated.push(cur)
 
       // ── 审计：判定是否为"历史任务"回溯修改 ─────────────────────────────
-      const oldEndStr = toDateStr(old.end_date as string)
-      const isHistorical = projStatusDate && oldEndStr && oldEndStr <= projStatusDate
+      const oldEndRaw = toDateStr(old.end_date as string)
+      const oldEndStr = projIsMinute ? oldEndRaw : (oldEndRaw ? oldEndRaw.slice(0, 10) : null)
+      const statusCutoff = projIsMinute ? projStatusDate : auditStatusDate
+      const isHistorical = statusCutoff && oldEndStr && oldEndStr <= statusCutoff
       if (isHistorical) {
         const reason = (t._reason as string | undefined) ?? null
         for (const f of AUDIT_FIELDS) {
           if (!(f in task)) continue
           const norm = (v: unknown) => {
             if (v == null) return null
-            if (f === 'start_date' || f === 'end_date') return toDateStr(v as string)
+            if (f === 'start_date' || f === 'end_date') {
+              const dt = toDateStr(v as string)
+              return projIsMinute ? dt : (dt ? dt.slice(0, 10) : null)
+            }
             return String(v)
           }
           const oldV = norm(old[f])
@@ -828,7 +836,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       auditEntries.forEach((e, i) => {
         const b = i * 8
         rows.push(`($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7},$${b+8})`)
-        vals.push(projectId, e.taskId, projStatusDate, e.field, e.oldValue, e.newValue, e.reason, auth.value.userId)
+        vals.push(projectId, e.taskId, auditStatusDate, e.field, e.oldValue, e.newValue, e.reason, auth.value.userId)
       })
       await client.query(
         `INSERT INTO task_change_log

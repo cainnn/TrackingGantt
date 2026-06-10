@@ -23,7 +23,12 @@ const F_TITLE = 13
 function sod(d: Date): Date { const r = new Date(d); r.setHours(0,0,0,0); return r }
 function addDays(d: Date, n: number): Date { const r = new Date(d); r.setDate(r.getDate()+n); return r }
 function diffDays(a: Date, b: Date): number { return Math.round((sod(b).getTime()-sod(a).getTime())/86400000) }
+function diffDaysExact(a: Date, b: Date): number { return (b.getTime() - a.getTime()) / 86400000 }
 function escXml(s: string): string { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') }
+function fmtYmdHm(s: string): string {
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+  return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : s
+}
 
 interface FlatRow { task: Task; level: number }
 
@@ -393,10 +398,11 @@ function renderVerticalLines(cd: ChartData, topY: number, bottomY: number): stri
     parts.push(`<text x="${px - 2}" y="${topY + 8}" text-anchor="end" font-size="7" fill="#dc2626" font-weight="600">完工 ${escXml(peStr)}</text>`)
   }
   if (cd.statusDate) {
-    const sdStr = String(cd.statusDate).split('T')[0]
-    const sx = dateToX(sod(new Date(sdStr)))
+    const sdStr = String(cd.statusDate)
+    const sx = diffDaysExact(cd.origin, new Date(sdStr)) * cd.colW
+    const sdLabel = fmtYmdHm(sdStr)
     parts.push(`<line x1="${sx}" y1="${topY}" x2="${sx}" y2="${bottomY}" stroke="#ef4444" stroke-width="1" stroke-dasharray="3,2"/>`)
-    parts.push(`<text x="${sx + 2}" y="${topY + 8}" font-size="7" fill="#ef4444" font-weight="600">状态 ${escXml(sdStr)}</text>`)
+    parts.push(`<text x="${sx + 2}" y="${topY + 8}" font-size="7" fill="#ef4444" font-weight="600">状态 ${escXml(sdLabel)}</text>`)
   }
   if (cd.projectLines) {
     for (const pl of cd.projectLines) {

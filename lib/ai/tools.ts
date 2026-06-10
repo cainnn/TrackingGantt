@@ -154,6 +154,13 @@ export interface VersionChangesSummary {
   diffs: { task_code: string; task_name: string; type: string; changes?: { field: string; old: string; new: string }[] }[]
 }
 
+function fmtStatusDateForPrompt(statusDate?: string | null): string {
+  if (!statusDate) return 'not set'
+  const s = String(statusDate)
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/)
+  return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : s
+}
+
 // ── System prompt builder ──────────────────────────────────────────────────
 export function buildSystemPrompt(
   projectName: string,
@@ -273,7 +280,7 @@ You help users manage tasks: create, modify, delete, reassign, and answer questi
 
 Project: "${projectName}"
 Today: ${today}
-${statusDate ? `Status date: ${typeof statusDate === 'string' && statusDate.includes('T') ? statusDate.split('T')[0] : statusDate}` : 'Status date: not set'}
+Status date: ${fmtStatusDateForPrompt(statusDate)}
 ${progress != null ? `Overall progress: ${progress}%` : ''}
 
 Project granularity: ${isMinute ? '分钟级（minute）—— 时长用分钟/小时/天混合输出' : '天级（day）—— 所有时长统一按整天输出，不要出现分钟、小时'}

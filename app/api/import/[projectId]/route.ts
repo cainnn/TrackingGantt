@@ -444,9 +444,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
 
     // Fetch updated project for status_date
-    const updatedProj = await pool.query('SELECT status_date FROM projects WHERE id = $1', [projectId])
+    const updatedProj = await pool.query('SELECT status_date, time_granularity FROM projects WHERE id = $1', [projectId])
     const updatedStatusDate = updatedProj.rows[0]?.status_date
       ? toDateStr(updatedProj.rows[0].status_date) : null
+    const isMinuteProject = updatedProj.rows[0]?.time_granularity === 'minute'
 
     // Fetch project lines
     const plRes = await pool.query(
@@ -473,7 +474,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       let changes = null
       if (lastVersion) {
         const prevTasks: SnapshotTask[] = lastVersion.snapshot?.tasks ?? []
-        const diffs = diffSnapshots(prevTasks, snapshotTasks)
+        const diffs = diffSnapshots(prevTasks, snapshotTasks, { isMinute: isMinuteProject })
         changes = {
           diffs,
           stats: {

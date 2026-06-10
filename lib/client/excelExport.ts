@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine } from '@/types'
 import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
-import { formatMinDuration } from '@/lib/clientTime'
+import { formatMinDuration, toDateTimeStr } from '@/lib/clientTime'
 
 function diffMinsRaw(a: string, b: string): number {
   return Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60_000)
@@ -285,6 +285,7 @@ export async function exportToExcel(
   options?: {
     prevTaskIds?: Set<string>       // 上期状态日期快照存在的任务 ID；缺失则视为"新任务"
     prevEndMap?: Map<string, string> // 上期快照的 end_date 映射；覆盖 baseline 用
+    isMinute?: boolean
   },
 ) {
   const activeTasks = tasks.filter(t => !t.is_deleted)
@@ -335,7 +336,11 @@ export async function exportToExcel(
   wb.creator = projectName
   wb.created = new Date()
 
-  const sdDate = statusDate ? new Date(statusDate.split('T')[0] + 'T00:00:00') : null
+  const normalizedStatusDate = toDateTimeStr(statusDate ?? null)
+  const sdDate = normalizedStatusDate ? new Date(normalizedStatusDate) : null
+  const statusDateLabel = normalizedStatusDate
+    ? (options?.isMinute ? normalizedStatusDate.slice(0, 16).replace('T', ' ') : normalizedStatusDate.slice(0, 10))
+    : ''
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
@@ -369,7 +374,13 @@ export async function exportToExcel(
     styleHeaderRow(ws2)
 
     if (hasStatusDate) {
-      ws2.addRow({ type: '状态日期', name: '状态日期', date: statusDate!.split('T')[0], color: '', visible: '' })
+      ws2.addRow({
+        type: options?.isMinute ? '状态时间' : '状态日期',
+        name: options?.isMinute ? '状态时间' : '状态日期',
+        date: statusDateLabel,
+        color: '',
+        visible: '',
+      })
     }
     if (hasProjectLines) {
       for (const pl of projectLines!) {

@@ -28,6 +28,8 @@ export default function YmdDateInput({
   const datePart = iso.slice(0, 10)
   const hourPart = iso.slice(11, 13) || '00'
   const minPart  = iso.slice(14, 16) || '00'
+  const minDt = min ? min.slice(0, 16) : ''
+  const maxDt = max ? max.slice(0, 16) : ''
 
   // 分钟精度：只显示 'YYYY-MM-DD HH:mm'，不带秒
   const ctlVal = (value || '').slice(0, includeTime ? 16 : 10)
@@ -41,8 +43,16 @@ export default function YmdDateInput({
     ? 'pl-1.5 pr-6 h-6 text-[11px]'
     : 'pl-2 pr-7 h-8 text-[13px]'
 
+  const clampValue = (newVal: string) => {
+    if (!includeTime || !newVal) return newVal
+    const v = newVal.slice(0, 16)
+    if (minDt && v < minDt) return minDt
+    if (maxDt && v > maxDt) return maxDt
+    return v
+  }
+
   const emit = (newVal: string) => {
-    onChange({ target: { value: newVal } } as React.ChangeEvent<HTMLInputElement>)
+    onChange({ target: { value: clampValue(newVal) } } as React.ChangeEvent<HTMLInputElement>)
   }
 
   // 点击外部关闭弹层
@@ -96,6 +106,25 @@ export default function YmdDateInput({
 
   const HOURS = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'))
   const MINUTES = ['00', '15', '30', '45']
+  const visibleHours = includeTime
+    ? HOURS.filter(h => {
+        const start = `${datePart}T${h}:59`
+        const end = `${datePart}T${h}:00`
+        if (!datePart) return true
+        if (minDt && start < minDt) return false
+        if (maxDt && end > maxDt) return false
+        return true
+      })
+    : HOURS
+  const visibleMinutes = includeTime
+    ? MINUTES.filter(m => {
+        if (!datePart) return true
+        const v = `${datePart}T${hourPart}:${m}`
+        if (minDt && v < minDt) return false
+        if (maxDt && v > maxDt) return false
+        return true
+      })
+    : MINUTES
 
   return (
     <div ref={wrapRef} className="relative inline-flex items-center">
@@ -149,14 +178,14 @@ export default function YmdDateInput({
             <span className="text-[10px] text-gray-500">时</span>
             <select value={hourPart} onChange={e => onHourChange(e.target.value)}
                     className="border border-gray-300 rounded px-2 py-1 text-[12px] bg-white focus:outline-none focus:border-blue-400">
-              {HOURS.map(h => <option key={h} value={h}>{h}</option>)}
+              {(visibleHours.length ? visibleHours : HOURS).map(h => <option key={h} value={h}>{h}</option>)}
             </select>
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-[10px] text-gray-500">分</span>
             <select value={minPart} onChange={e => onMinChange(e.target.value)}
                     className="border border-gray-300 rounded px-2 py-1 text-[12px] bg-white focus:outline-none focus:border-blue-400">
-              {MINUTES.map(m => <option key={m} value={m}>{m}</option>)}
+              {(visibleMinutes.length ? visibleMinutes : MINUTES).map(m => <option key={m} value={m}>{m}</option>)}
             </select>
           </div>
           <button
