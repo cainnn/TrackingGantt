@@ -16,6 +16,7 @@
     "lib/statusDatePolicy.ts",
     "lib/projectProgress.ts",
     "lib/scheduling.ts",
+    "lib/client/excelImport.ts",
     "types/**/*.ts"
   ],
   "exclude": ["node_modules", ".next"]

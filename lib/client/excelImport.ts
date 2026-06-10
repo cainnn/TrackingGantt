@@ -304,6 +304,7 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
     if (!taskCode) continue
 
     const rawParentCode = String(row['父任务编码'] ?? '').trim()
+    const rawDuration = row['工期(分钟)'] ?? row['工期']
     const task: ImportTask = {
       task_code: taskCode,
       level: Number(row['层级']) || 1,
@@ -313,7 +314,7 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
       assignee: String(row['责任人'] ?? '').trim() || null,
       start_date: parseDateCell(row['开始日期']),
       end_date: parseDateCell(row['结束日期']),
-      duration: row['工期'] != null ? Number(row['工期']) || 0 : null,
+      duration: rawDuration != null ? Number(rawDuration) || 0 : null,
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,
@@ -357,7 +358,7 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
     const settingsRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(settingsSheet)
     for (const row of settingsRows) {
       const type = String(row['类型'] ?? '').trim()
-      if (type === '状态日期') {
+      if (type === '状态日期' || type === '状态时间') {
         statusDate = parseDateCell(row['日期'])
       } else if (type === '项目线') {
         const name = String(row['名称'] ?? '').trim()

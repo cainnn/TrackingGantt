@@ -766,7 +766,7 @@ export default function GanttToolbar({
       }
 
       setImporting(true)
-      const safeDateRe = /^\d{4}-\d{2}-\d{2}$/
+      const safeDateRe = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$/
       const safeTasks = parsed.tasks.map((t: ImportTask) => ({
         ...t,
         start_date: typeof t.start_date === 'string' && safeDateRe.test(t.start_date) ? t.start_date : null,
@@ -798,7 +798,7 @@ export default function GanttToolbar({
           parent_id: parent,
           assignee: it.assignee,
           start_date: it.start_date, end_date: it.end_date,
-          duration: it.duration ?? 0, duration_unit: 'day',
+          duration: it.duration ?? 0, duration_unit: 'minute',
           percent_done: it.percent_done ?? 0,
           is_milestone: it.is_milestone,
           note: it.note,
