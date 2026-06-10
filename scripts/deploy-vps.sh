@@ -274,7 +274,6 @@ EXCLUDES=(
   --exclude='source-pdf-output'
   --exclude='aspose-tasks-cli/bin'
   --exclude='aspose-tasks-cli/obj'
-  --exclude='aspose-tasks-cli/publish'
   --exclude='aspose-tasks-cli/publish-linux-x64'
 )
 
@@ -282,7 +281,7 @@ if [[ "$LOCAL_BUILD" -eq 1 ]]; then
   # 本地构建模式：包含 .next 和 node_modules
   EXCLUDES=( --exclude='.git' --exclude='.env' --exclude='.env.*' --exclude='.cursor' --exclude='*.log' --exclude='.DS_Store'
              --exclude='aspose-tasks-cli/bin' --exclude='aspose-tasks-cli/obj'
-             --exclude='aspose-tasks-cli/publish' --exclude='aspose-tasks-cli/publish-linux-x64' )
+             --exclude='aspose-tasks-cli/publish-linux-x64' )
 fi
 
 export COPYFILE_DISABLE=1
@@ -403,15 +402,20 @@ fi
 # Aspose Tasks CLI 独立于 Next 构建；无论是否使用 LOCAL_BUILD，都要刷新 MPP 工具二进制。
 if [[ -f "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" ]]; then
   echo ">> 构建 Aspose Tasks CLI..."
-  if ! command -v dotnet >/dev/null 2>&1; then
-    echo "   ✗ dotnet 未安装，无法构建 aspose-tasks-cli" >&2
-    exit 1
+  if [[ -x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" ]]; then
+    chmod +x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" 2>/dev/null || true
+    echo "   使用随包发布的 Aspose Tasks CLI"
+  else
+    if ! command -v dotnet >/dev/null 2>&1; then
+      echo "   ✗ dotnet 未安装，且部署包中缺少 aspose-tasks-cli/publish/aspose-tasks-cli" >&2
+      exit 1
+    fi
+    dotnet publish "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" -c Release -o "$APP_DIR/aspose-tasks-cli/publish" >/tmp/aspose-publish.log 2>&1 || {
+      cat /tmp/aspose-publish.log >&2
+      exit 1
+    }
+    echo "   Aspose Tasks CLI 构建完成"
   fi
-  dotnet publish "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" -c Release -o "$APP_DIR/aspose-tasks-cli/publish" >/tmp/aspose-publish.log 2>&1 || {
-    cat /tmp/aspose-publish.log >&2
-    exit 1
-  }
-  echo "   Aspose Tasks CLI 构建完成"
 fi
 
 # 安装依赖 + 构建
