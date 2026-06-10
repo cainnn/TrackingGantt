@@ -15,6 +15,39 @@ interface DiffItem {
   changes?: { field: string; old: string; new: string }[]
 }
 
+interface DependencyDiffItem {
+  type: 'added' | 'removed' | 'changed'
+  from_task_code: string
+  from_task_name: string
+  to_task_code: string
+  to_task_name: string
+  changes?: { field: string; old: string; new: string }[]
+}
+
+interface WeeklyDiffResult {
+  base: { name: string; status_date: string; version_number: number }
+  current: { name: string; status_date: string; version_number: number }
+  summary: {
+    task_added: number
+    task_removed: number
+    task_changed: number
+    task_delayed: number
+    task_shortened: number
+    dependency_added: number
+    dependency_removed: number
+    dependency_changed: number
+  }
+  tasks: {
+    diffs: DiffItem[]
+    delayed: DiffItem[]
+    shortened: DiffItem[]
+  }
+  dependencies: {
+    diffs: DependencyDiffItem[]
+  }
+  ai_payload: unknown
+}
+
 interface Props {
   projectId: string
   open: boolean
@@ -64,6 +97,9 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
   const [diffCompareId, setDiffCompareId] = useState<string>('current')
   const [diffResult, setDiffResult] = useState<{ base: { name: string }; compare: { name: string }; diffs: DiffItem[]; stats: { added: number; removed: number; changed: number } } | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
+  const [weeklyCurrentId, setWeeklyCurrentId] = useState<string>('')
+  const [weeklyResult, setWeeklyResult] = useState<WeeklyDiffResult | null>(null)
+  const [weeklyLoading, setWeeklyLoading] = useState(false)
 
   // 加载版本列表
   const fetchVersions = useCallback(async () => {
@@ -267,23 +303,70 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
     if (activeTab === 'changelog') fetchChangelog()
   }, [activeTab, fetchChangelog])
 
-  // 版本对比
-  const fetchDiff = useCallback(async () => {
-    if (!diffBaseId) return
+  const fetchDiffFor = useCallback(async (baseId: string, compareId: string) => {
+    if (!baseId) return
     setDiffLoading(true)
+    setWeeklyResult(null)
     try {
-      const url = `/api/versions/${projectId}/diff?v1=${diffBaseId}` +
-        (diffCompareId !== 'current' ? `&v2=${diffCompareId}` : '')
+      const url = `/api/versions/${projectId}/diff?v1=${baseId}` +
+        (compareId !== 'current' ? `&v2=${compareId}` : '')
       const res = await authFetch(url)
       const data = await res.json()
       if (data.ok) setDiffResult(data.value)
     } catch { /* ignore */ }
     setDiffLoading(false)
-  }, [projectId, diffBaseId, diffCompareId])
+  }, [projectId])
+
+  // 版本对比
+  const fetchDiff = useCallback(async () => {
+    if (!diffBaseId) return
+    await fetchDiffFor(diffBaseId, diffCompareId)
+  }, [diffBaseId, diffCompareId, fetchDiffFor])
 
   useEffect(() => {
     if (activeTab === 'diff' && diffBaseId) fetchDiff()
   }, [activeTab, diffBaseId, diffCompareId, fetchDiff])
+
+  const fetchWeeklyDiff = useCallback(async () => {
+    if (!weeklyCurrentId) return
+    setWeeklyLoading(true)
+    try {
+      const res = await authFetch(`/api/versions/${projectId}/weekly-diff?current=${weeklyCurrentId}`)
+      const data = await res.json()
+      if (data.ok) {
+        setWeeklyResult(data.value)
+      } else {
+        setWeeklyResult(null)
+        alert(data.error ?? '没有可对比的前一次状态日期版本')
+      }
+    } catch {
+      setWeeklyResult(null)
+      alert('网络错误')
+    }
+    setWeeklyLoading(false)
+  }, [projectId, weeklyCurrentId])
+
+  const statusVersions = versions.filter(v => !v.is_autosave && !!v.status_date)
+  const comparableVersions = versions
+    .filter(v => !v.is_autosave)
+    .slice()
+    .sort((a, b) => b.version_number - a.version_number)
+  const adjacentPairs = comparableVersions.slice(0, -1).map((newer, i) => ({
+    newer,
+    older: comparableVersions[i + 1],
+  }))
+  const versionOptionLabel = (v: ProjectVersion) => (
+    `${formatStatusDate(v.status_date) || v.name || `快照 #${v.version_number}`} #${v.version_number}`
+  )
+
+  const selectCurrentVsLatest = useCallback(() => {
+    const latest = comparableVersions[0]
+    if (!latest) return
+    setWeeklyResult(null)
+    setDiffBaseId(latest.id)
+    setDiffCompareId('current')
+    void fetchDiffFor(latest.id, 'current')
+  }, [comparableVersions, fetchDiffFor])
 
   if (!open) return null
 
@@ -572,9 +655,70 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         <div className="flex flex-col" style={{ maxHeight: 430 }}>
           {/* Version selectors */}
           <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50/50 space-y-2">
+            <div className="rounded border border-blue-100 bg-blue-50/70 px-2.5 py-2 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-blue-700 font-medium w-16 shrink-0">状态对比:</span>
+                <select
+                  value={weeklyCurrentId}
+                  onChange={e => { setWeeklyCurrentId(e.target.value); setWeeklyResult(null) }}
+                  className="flex-1 border border-blue-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-blue-400 bg-white"
+                >
+                  <option value="">选择当前状态日期...</option>
+                  {statusVersions.map(v => (
+                    <option key={v.id} value={v.id}>
+                      {formatStatusDate(v.status_date)} #{v.version_number} {v.name ? ` ${v.name}` : ''}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={fetchWeeklyDiff}
+                  disabled={!weeklyCurrentId || weeklyLoading}
+                  className="px-2.5 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+                >
+                  {weeklyLoading ? '分析中...' : '前一次状态对比'}
+                </button>
+              </div>
+              <div className="text-[10px] text-blue-700/70">
+                自动选择当前状态日期之前最近的正式状态版本作为基准；当天多次确认只看当天最终快照。
+              </div>
+            </div>
+            <div className="rounded border border-gray-200 bg-white px-2.5 py-2 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-gray-700 font-medium w-16 shrink-0">版本对比:</span>
+                <button
+                  onClick={selectCurrentVsLatest}
+                  disabled={comparableVersions.length === 0}
+                  className="px-2.5 py-1 text-[11px] bg-gray-800 text-white rounded hover:bg-gray-900 disabled:opacity-50 cursor-pointer"
+                >
+                  当前 vs 最近版本
+                </button>
+                <select
+                  value=""
+                  onChange={e => {
+                    const [olderId, newerId] = e.target.value.split('|')
+                    if (!olderId || !newerId) return
+                    setWeeklyResult(null)
+                    setDiffBaseId(olderId)
+                    setDiffCompareId(newerId)
+                    void fetchDiffFor(olderId, newerId)
+                  }}
+                  className="flex-1 border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-blue-400"
+                >
+                  <option value="">选择相邻版本...</option>
+                  {adjacentPairs.map(({ older, newer }) => (
+                    <option key={`${older.id}-${newer.id}`} value={`${older.id}|${newer.id}`}>
+                      {versionOptionLabel(older)} → {versionOptionLabel(newer)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="text-[10px] text-gray-500">
+                可快速比对当前工作状态与最近版本，或比对任意两个相邻正式版本。
+              </div>
+            </div>
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-gray-500 w-10 shrink-0">基准:</span>
-              <select value={diffBaseId ?? ''} onChange={e => setDiffBaseId(e.target.value || null)}
+              <select value={diffBaseId ?? ''} onChange={e => { setDiffBaseId(e.target.value || null); setWeeklyResult(null) }}
                       className="flex-1 border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-blue-400">
                 <option value="">选择基准版本...</option>
                 {versions.map(v => (
@@ -587,7 +731,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-gray-500 w-10 shrink-0">对比:</span>
-              <select value={diffCompareId} onChange={e => setDiffCompareId(e.target.value)}
+              <select value={diffCompareId} onChange={e => { setDiffCompareId(e.target.value); setWeeklyResult(null) }}
                       className="flex-1 border border-gray-300 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-blue-400">
                 <option value="current">当前工作版本</option>
                 {versions.map(v => (
@@ -602,13 +746,101 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
 
           {/* Diff results */}
           <div className="overflow-y-auto flex-1">
-            {diffLoading && (
+            {weeklyLoading && (
+              <div className="py-8 text-center text-[12px] text-gray-400">状态对比中...</div>
+            )}
+            {!weeklyLoading && weeklyResult && (
+              <>
+                <div className="px-4 py-2 bg-blue-50 border-b border-blue-100">
+                  <div className="text-[11px] text-blue-700 font-medium">
+                    {formatStatusDate(weeklyResult.base.status_date)} &rarr; {formatStatusDate(weeklyResult.current.status_date)}
+                    <span className="ml-2 text-blue-500">
+                      #{weeklyResult.base.version_number} 到 #{weeklyResult.current.version_number}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px]">
+                    <span className="text-green-700">任务新增 {weeklyResult.summary.task_added}</span>
+                    <span className="text-red-600">任务删除 {weeklyResult.summary.task_removed}</span>
+                    <span className="text-blue-700">任务修改 {weeklyResult.summary.task_changed}</span>
+                    <span className="text-orange-700">延期 {weeklyResult.summary.task_delayed}</span>
+                    <span className="text-emerald-700">缩短 {weeklyResult.summary.task_shortened}</span>
+                    <span className="text-purple-700">依赖 +{weeklyResult.summary.dependency_added} / -{weeklyResult.summary.dependency_removed} / ~{weeklyResult.summary.dependency_changed}</span>
+                  </div>
+                </div>
+
+                {weeklyResult.tasks.diffs.length === 0 && weeklyResult.dependencies.diffs.length === 0 && (
+                  <div className="py-8 text-center text-[12px] text-gray-400">两个状态日期之间无任务或依赖变化</div>
+                )}
+
+                {weeklyResult.tasks.diffs.map((d, i) => (
+                  <div key={`task-${i}`} className="px-4 py-2 border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        d.type === 'added' ? 'bg-green-100 text-green-700' :
+                        d.type === 'removed' ? 'bg-red-100 text-red-600' :
+                        weeklyResult.tasks.delayed.some(x => x.task_code === d.task_code) ? 'bg-orange-100 text-orange-700' :
+                        weeklyResult.tasks.shortened.some(x => x.task_code === d.task_code) ? 'bg-emerald-100 text-emerald-700' :
+                        'bg-blue-100 text-blue-600'
+                      }`}>
+                        {d.type === 'added' ? '新增任务' : d.type === 'removed' ? '删除任务' :
+                         weeklyResult.tasks.delayed.some(x => x.task_code === d.task_code) ? '延期' :
+                         weeklyResult.tasks.shortened.some(x => x.task_code === d.task_code) ? '缩短' : '修改任务'}
+                      </span>
+                      <span className="text-[11px] font-medium text-gray-700">#{d.task_code}</span>
+                      <span className="text-[11px] text-gray-500">{d.task_name}</span>
+                    </div>
+                    {d.changes && d.changes.length > 0 && (
+                      <div className="mt-1 space-y-0.5 ml-4">
+                        {d.changes.map((c, j) => (
+                          <div key={j} className="text-[10px] flex items-center gap-1.5">
+                            <span className="text-gray-500 w-12 shrink-0">{c.field}:</span>
+                            <span className="text-red-500 line-through">{c.old}</span>
+                            <span className="text-gray-400">&rarr;</span>
+                            <span className="text-green-600 font-medium">{c.new}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                {weeklyResult.dependencies.diffs.map((d, i) => (
+                  <div key={`dep-${i}`} className="px-4 py-2 border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        d.type === 'added' ? 'bg-green-100 text-green-700' :
+                        d.type === 'removed' ? 'bg-red-100 text-red-600' :
+                        'bg-purple-100 text-purple-700'
+                      }`}>
+                        {d.type === 'added' ? '新增依赖' : d.type === 'removed' ? '删除依赖' : '修改依赖'}
+                      </span>
+                      <span className="text-[11px] text-gray-600">
+                        #{d.from_task_code} {d.from_task_name} &rarr; #{d.to_task_code} {d.to_task_name}
+                      </span>
+                    </div>
+                    {d.changes && d.changes.length > 0 && (
+                      <div className="mt-1 space-y-0.5 ml-4">
+                        {d.changes.map((c, j) => (
+                          <div key={j} className="text-[10px] flex items-center gap-1.5">
+                            <span className="text-gray-500 w-14 shrink-0">{c.field}:</span>
+                            <span className="text-red-500 line-through">{c.old}</span>
+                            <span className="text-gray-400">&rarr;</span>
+                            <span className="text-green-600 font-medium">{c.new}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </>
+            )}
+            {!weeklyLoading && !weeklyResult && diffLoading && (
               <div className="py-8 text-center text-[12px] text-gray-400">对比中...</div>
             )}
-            {!diffLoading && !diffBaseId && (
+            {!weeklyLoading && !weeklyResult && !diffLoading && !diffBaseId && (
               <div className="py-8 text-center text-[12px] text-gray-400">请选择基准版本</div>
             )}
-            {!diffLoading && diffResult && (
+            {!weeklyLoading && !weeklyResult && !diffLoading && diffResult && (
               <>
                 {/* Stats bar */}
                 <div className="flex items-center gap-3 px-4 py-2 bg-gray-50 border-b border-gray-100">

@@ -263,6 +263,12 @@ const addMins  = (d: Date, n: number) => { const r=new Date(d); r.setMinutes(r.g
 const diffMins = (a: Date, b: Date) => Math.round((b.getTime()-a.getTime())/60_000)
 const addDays  = (d: Date, n: number) => addMins(d, Math.round(n * 1440))
 const diffDays = (a: Date, b: Date) => diffMins(a, b) / 1440
+const formatCompareDelta = (minutes: number, isMinute: boolean) => {
+  if (minutes === 0) return ''
+  const shown = isMinute ? Math.round(minutes) : Math.round(minutes / 1440)
+  if (shown === 0) return ''
+  return `${shown > 0 ? '+' : ''}${shown}${isMinute ? 'm' : 'd'}`
+}
 const fmtDate  = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
@@ -3734,9 +3740,13 @@ export default function GanttChart({
             // 偏差：当前结束 vs 对比版本结束
             const endDelta = diffDays(new Date(ct.end_date), new Date(t.end_date))
             const startDelta = diffDays(new Date(ct.start_date), new Date(t.start_date))
+            const endDeltaMins = diffMins(new Date(ct.end_date), new Date(t.end_date))
+            const startDeltaMins = diffMins(new Date(ct.start_date), new Date(t.start_date))
             // 颜色：延后=红，提前=绿，准时=灰
             const barColor = endDelta > 0 ? '#ef4444' : endDelta < 0 ? '#22c55e' : '#9ca3af'
             const barOpacity = endDelta === 0 ? 0.4 : 0.6
+            const startDeltaLabel = formatCompareDelta(startDeltaMins, isMinute)
+            const endDeltaLabel = formatCompareDelta(endDeltaMins, isMinute)
 
             if (t.is_milestone) {
               const r = 5, mx = cx, my = cy + ch / 2
@@ -3746,9 +3756,9 @@ export default function GanttChart({
                     points={`${mx},${my-r} ${mx+r},${my} ${mx},${my+r} ${mx-r},${my}`}
                     fill={barColor} opacity={barOpacity} stroke={barColor} strokeWidth={1}
                   />
-                  {endDelta !== 0 && (
+                  {endDeltaLabel && (
                     <text x={mx + r + 6} y={my + 3} fontSize={9} fill={barColor} fontWeight="600" style={{ pointerEvents: 'none' }}>
-                      {endDelta > 0 ? '+' : ''}{endDelta}d
+                      {endDeltaLabel}
                     </text>
                   )}
                 </g>
@@ -3762,7 +3772,7 @@ export default function GanttChart({
                 <rect x={cx} y={cy} width={cw} height={ch} fill={barColor} opacity={barOpacity} rx={2}
                   stroke={diffFilter ? barColor : 'none'} strokeWidth={diffFilter ? 0.8 : 0}
                   strokeDasharray={diffFilter ? '3,2' : 'none'} />
-                {(startDelta !== 0 || endDelta !== 0) && (
+                {(startDeltaLabel || endDeltaLabel) && (
                   <text
                     x={rightEdge}
                     y={cy + ch / 2 + 3}
@@ -3771,9 +3781,9 @@ export default function GanttChart({
                     fontWeight="600"
                     style={{ pointerEvents: 'none' }}
                   >
-                    {startDelta !== 0 && `开始${startDelta > 0 ? '+' : ''}${startDelta}d`}
-                    {startDelta !== 0 && endDelta !== 0 && '  '}
-                    {endDelta !== 0 && `结束${endDelta > 0 ? '+' : ''}${endDelta}d`}
+                    {startDeltaLabel && `开始${startDeltaLabel}`}
+                    {startDeltaLabel && endDeltaLabel && '  '}
+                    {endDeltaLabel && `结束${endDeltaLabel}`}
                   </text>
                 )}
               </g>

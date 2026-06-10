@@ -108,6 +108,20 @@ export default function ProjectPage() {
     try { localStorage.setItem(`gantt-indicators-${projectId}`, JSON.stringify(next)) } catch { /* ignore */ }
   }, [projectId])
 
+  const handleRestoreViewedSnapshot = useCallback(() => {
+    if (!viewSnapshot) return
+    const ok = confirm(
+      `将历史版本「${viewSnapshot.versionName}」恢复为当前工作状态？\n\n` +
+      '这不会立刻写入数据库。恢复后请点击「确认变更」保存，并生成新的状态日期版本。',
+    )
+    if (!ok) return
+    const restoredTasks: Task[] = viewSnapshot.tasks.map(t => ({ ...t, is_deleted: false }))
+    const restoredDeps = viewSnapshot.dependencies.map(d => ({ ...d }))
+    dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
+    dispatch(markDirty(restoredTasks.map(t => t.id)))
+    dispatch(clearViewSnapshot())
+  }, [dispatch, viewSnapshot])
+
   useEffect(() => {
     if (!user) { router.push('/login'); return }
 
@@ -220,12 +234,22 @@ export default function ProjectPage() {
             </svg>
             正在查看历史版本「<span className="font-semibold">{viewSnapshot.versionName}</span>」（只读，不影响当前工作状态）
           </span>
-          <button
-            onClick={() => dispatch(clearViewSnapshot())}
-            className="px-3 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-100 cursor-pointer"
-          >
-            退出查看
-          </button>
+          <div className="flex items-center gap-2">
+            {user?.role !== 'view' && (
+              <button
+                onClick={handleRestoreViewedSnapshot}
+                className="px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 cursor-pointer"
+              >
+                恢复为当前
+              </button>
+            )}
+            <button
+              onClick={() => dispatch(clearViewSnapshot())}
+              className="px-3 py-1 rounded border border-amber-400 text-amber-700 hover:bg-amber-100 cursor-pointer"
+            >
+              退出查看
+            </button>
+          </div>
         </div>
       )}
 
