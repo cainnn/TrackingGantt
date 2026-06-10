@@ -671,31 +671,34 @@ export default function GanttToolbar({
     try {
       const idMap = new Map(tasks.map(t => [t.id, t]))
       const codeOf = (id: string | null) => id ? idMap.get(id)?.task_code ?? null : null
+      const exportDate = (value: string | null | undefined) => {
+        const normalized = toDateTimeStr(value ?? null)
+        if (!normalized) return null
+        return isMinute ? normalized : normalized.slice(0, 10)
+      }
       const payload = {
         name: currentProject?.name ?? 'project',
-        start_date: currentProject?.start_date?.split('T')[0] ?? null,
-        end_date: currentProject?.end_date?.split('T')[0] ?? null,
-        status_date: isMinute
-          ? toDateTimeStr(currentProject?.status_date ?? null)
-          : currentProject?.status_date?.split('T')[0] ?? null,
+        start_date: exportDate(currentProject?.start_date),
+        end_date: exportDate(currentProject?.end_date),
+        status_date: exportDate(currentProject?.status_date),
         tasks: tasks
           .filter(t => !t.is_deleted)
           .map(t => ({
             task_code: t.task_code,
             parent_task_code: codeOf(t.parent_id),
             name: t.name,
-            start_date: t.start_date ? t.start_date.split('T')[0] : null,
-            end_date: t.end_date ? t.end_date.split('T')[0] : null,
+            start_date: exportDate(t.start_date),
+            end_date: exportDate(t.end_date),
             duration: t.duration ?? null,
             percent_done: t.percent_done ?? 0,
             is_milestone: !!t.is_milestone,
             auto_schedule: t.auto_schedule !== false,
             note: t.note ?? null,
             constraint_type: t.constraint_type ?? null,
-            constraint_date: t.constraint_date ? t.constraint_date.split('T')[0] : null,
+            constraint_date: exportDate(t.constraint_date),
             rollup: !!t.rollup,
             inactive: !!t.inactive,
-            deadline: t.deadline ? t.deadline.split('T')[0] : null,
+            deadline: exportDate(t.deadline),
             order_index: t.order_index,
           })),
         dependencies: dependencies.map(d => ({

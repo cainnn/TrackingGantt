@@ -105,20 +105,20 @@ internal static class Program
                 ParentTaskCode = parentCode,
                 Name = t.Get(Tsk.Name) ?? "",
                 Assignee = JoinAssignees(t),
-                StartDate = ToYmd(startDate),
-                EndDate = ToYmd(finishDate),
-                Duration = DurationToDays(t),
+                StartDate = ToDateTimeString(startDate),
+                EndDate = ToDateTimeString(finishDate),
+                Duration = DurationToMinutes(t),
                 IsMilestone = t.Get(Tsk.IsMilestone),
                 AutoSchedule = !t.Get(Tsk.IsManual),
                 Note = NullIfEmpty(t.Get(Tsk.NotesText)),
                 PercentDone = t.Get(Tsk.PercentComplete),
                 ConstraintType = MapConstraintType(t.Get(Tsk.ConstraintType)),
-                ConstraintDate = ToYmd(t.Get(Tsk.ConstraintDate)),
+                ConstraintDate = ToDateTimeString(t.Get(Tsk.ConstraintDate)),
                 Rollup = t.Get(Tsk.IsRollup),
                 Inactive = !t.Get(Tsk.IsActive),
                 ProjectBoundary = "ask",
                 Status = MapStatus(t),
-                Deadline = ToYmd(t.Get(Tsk.Deadline)),
+                Deadline = ToDateTimeString(t.Get(Tsk.Deadline)),
                 BaselineEndDate = null,
             });
         }
@@ -141,8 +141,7 @@ internal static class Program
             int lag = 0;
             try
             {
-                // LinkLagTimeSpan is a TimeSpan (depends on LagFormat)
-                lag = (int)Math.Round(link.LinkLagTimeSpan.TotalDays);
+                lag = (int)Math.Round(link.LinkLagTimeSpan.TotalMinutes);
             }
             catch { /* keep 0 */ }
 
@@ -156,8 +155,8 @@ internal static class Program
             });
         }
 
-        var statusDate = ToYmd(project.Get(Prj.StatusDate));
-        if (statusDate == "1984-01-01") statusDate = null;
+        var statusDate = ToDateTimeString(project.Get(Prj.StatusDate));
+        if (statusDate != null && statusDate.StartsWith("1984-01-01", StringComparison.Ordinal)) statusDate = null;
 
         var result = new ImportResult
         {
@@ -238,16 +237,14 @@ internal static class Program
         catch { return null; }
     }
 
-    private static int? DurationToDays(Aspose.Tasks.Task t)
+    private static int? DurationToMinutes(Aspose.Tasks.Task t)
     {
         try
         {
             var d = t.Get(Tsk.Duration);
-            if (d == null) return null;
-            // Aspose Duration → TimeSpan days, rounded
-            var days = d.TimeSpan.TotalDays;
-            if (double.IsNaN(days) || double.IsInfinity(days)) return null;
-            return (int)Math.Round(days);
+            var minutes = d.TimeSpan.TotalMinutes;
+            if (double.IsNaN(minutes) || double.IsInfinity(minutes)) return null;
+            return (int)Math.Round(minutes);
         }
         catch { return null; }
     }
@@ -289,8 +286,8 @@ internal static class Program
 
         var project = new Project();
         project.Set(Prj.Name, payload.Name ?? "Project");
-        if (!string.IsNullOrEmpty(payload.StartDate)) project.Set(Prj.StartDate, ParseYmd(payload.StartDate)!.Value);
-        if (!string.IsNullOrEmpty(payload.StatusDate)) project.Set(Prj.StatusDate, ParseYmd(payload.StatusDate)!.Value);
+        if (!string.IsNullOrEmpty(payload.StartDate)) project.Set(Prj.StartDate, ParseDateTime(payload.StartDate)!.Value);
+        if (!string.IsNullOrEmpty(payload.StatusDate)) project.Set(Prj.StatusDate, ParseDateTime(payload.StatusDate)!.Value);
 
         // 排序：保持父任务在子任务之前
         var byCode = new Dictionary<string, Aspose.Tasks.Task>();
@@ -316,7 +313,7 @@ internal static class Program
             var link = project.TaskLinks.Add(from, to, linkType);
             if (dep.Lag != 0)
             {
-                link.LinkLagTimeSpan = TimeSpan.FromDays(dep.Lag);
+                link.LinkLagTimeSpan = TimeSpan.FromMinutes(dep.Lag);
             }
         }
 
@@ -338,14 +335,14 @@ internal static class Program
         if (t.Inactive) node.Set(Tsk.IsActive, false);
         if (t.Rollup) node.Set(Tsk.IsRollup, true);
 
-        var start = ParseYmd(t.StartDate);
-        var end = ParseYmd(t.EndDate);
+        var start = ParseDateTime(t.StartDate);
+        var end = ParseDateTime(t.EndDate);
         if (start.HasValue) node.Set(Tsk.Start, start.Value);
         if (end.HasValue) node.Set(Tsk.Finish, end.Value);
 
         if (t.Duration.HasValue)
         {
-            var dur = node.ParentProject.GetDuration(t.Duration.Value, TimeUnitType.Day);
+            var dur = node.ParentProject.GetDuration(t.Duration.Value, TimeUnitType.Minute);
             node.Set(Tsk.Duration, dur);
         }
 
@@ -357,10 +354,10 @@ internal static class Program
 
         var ct = MapConstraintTypeOut(t.ConstraintType);
         if (ct.HasValue) node.Set(Tsk.ConstraintType, ct.Value);
-        var cd = ParseYmd(t.ConstraintDate);
+        var cd = ParseDateTime(t.ConstraintDate);
         if (cd.HasValue) node.Set(Tsk.ConstraintDate, cd.Value);
 
-        var deadline = ParseYmd(t.Deadline);
+        var deadline = ParseDateTime(t.Deadline);
         if (deadline.HasValue) node.Set(Tsk.Deadline, deadline.Value);
 
         var children = all
@@ -384,21 +381,28 @@ internal static class Program
     };
 
     // ───────────────────────────── Helpers ─────────────────────────────
-    private static DateTime? ParseYmd(string? s)
+    private static DateTime? ParseDateTime(string? s)
     {
         if (string.IsNullOrWhiteSpace(s)) return null;
-        var trimmed = s.Length >= 10 ? s[..10] : s;
-        if (DateTime.TryParseExact(trimmed, "yyyy-MM-dd",
+        var trimmed = s.Trim().Replace('T', ' ');
+        string[] formats = {
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd HH:mm",
+            "yyyy-MM-dd",
+        };
+        if (DateTime.TryParseExact(trimmed, formats,
                 CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
             return d;
         return null;
     }
 
-    private static string? ToYmd(DateTime d)
+    private static string? ToDateTimeString(DateTime d)
     {
         if (d == DateTime.MinValue) return null;
         if (d.Year < 1900 || d.Year > 3000) return null;
-        return d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        if (d.Hour == 0 && d.Minute == 0 && d.Second == 0)
+            return d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        return d.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture);
     }
 
     private static string? NullIfEmpty(string? s) =>

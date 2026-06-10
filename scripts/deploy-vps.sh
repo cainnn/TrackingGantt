@@ -400,6 +400,20 @@ if [[ "$SKIP_MIGRATE" -ne 1 ]] && [[ -f "$APP_DIR/scripts/init-db.sql" ]]; then
   echo "   迁移完成（增量 $mig_count 个，schema 校验通过）"
 fi
 
+# Aspose Tasks CLI 独立于 Next 构建；无论是否使用 LOCAL_BUILD，都要刷新 MPP 工具二进制。
+if [[ -f "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" ]]; then
+  echo ">> 构建 Aspose Tasks CLI..."
+  if ! command -v dotnet >/dev/null 2>&1; then
+    echo "   ✗ dotnet 未安装，无法构建 aspose-tasks-cli" >&2
+    exit 1
+  fi
+  dotnet publish "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" -c Release -o "$APP_DIR/aspose-tasks-cli/publish" >/tmp/aspose-publish.log 2>&1 || {
+    cat /tmp/aspose-publish.log >&2
+    exit 1
+  }
+  echo "   Aspose Tasks CLI 构建完成"
+fi
+
 # 安装依赖 + 构建
 if [[ "$LOCAL_BUILD" -eq 1 ]]; then
   echo ">> 跳过构建（使用本地构建产物）"
