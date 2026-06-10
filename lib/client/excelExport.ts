@@ -82,22 +82,36 @@ function flattenTasks(tasks: Task[]): FlatTask[] {
   return result
 }
 
-function formatPredecessors(taskId: string, deps: Dependency[], codeMap: Map<string, string>): string {
+function formatLag(lag: number, isMinute: boolean): string {
+  if (lag === 0) return ''
+  const sign = lag > 0 ? '+' : '-'
+  const abs = Math.abs(lag)
+  if (!isMinute) return `${sign}${Math.round(abs / 1440)}d`
+  if (abs % 1440 === 0) return `${sign}${abs / 1440}d`
+  if (abs % 60 === 0) return `${sign}${abs / 60}h`
+  return `${sign}${abs}m`
+}
+
+function formatLagCell(lag: number, isMinute: boolean): number {
+  return isMinute ? lag : Math.round(lag / 1440)
+}
+
+function formatPredecessors(taskId: string, deps: Dependency[], codeMap: Map<string, string>, isMinute: boolean): string {
   const incoming = deps.filter(d => d.to_task_id === taskId)
   if (incoming.length === 0) return ''
   return incoming.map(d => {
     const code = codeMap.get(d.from_task_id) ?? d.from_task_id.slice(0, 8)
     const typeLabel = DEP_TYPE_LABELS[d.type] ?? 'FS'
-    const lagStr = d.lag > 0 ? `+${d.lag}d` : d.lag < 0 ? `${d.lag}d` : ''
+    const lagStr = formatLag(d.lag ?? 0, isMinute)
     const disabledPrefix = d.active === false ? '!' : ''
     return `${disabledPrefix}${code}${typeLabel}${lagStr}`
   }).join(',')
 }
 
-function getPredecessorLag(taskId: string, deps: Dependency[]): number | string {
+function getPredecessorLag(taskId: string, deps: Dependency[], isMinute: boolean): number | string {
   const incoming = deps.filter(d => d.to_task_id === taskId)
   if (incoming.length === 0) return ''
-  const lags = incoming.map(d => d.lag ?? 0)
+  const lags = incoming.map(d => formatLagCell(d.lag ?? 0, isMinute))
   if (lags.every(l => l === lags[0])) return lags[0]
   return lags.join(',')
 }
@@ -160,6 +174,7 @@ function buildRowData(
   statusDate: Date | null,
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
+  isMinute: boolean = true,
 ) {
   const t = ft.task
   return {
@@ -173,8 +188,8 @@ function buildRowData(
     duration: t.duration ?? 0,
     milestone: t.is_milestone ? '是' : '否',
     auto_schedule: t.auto_schedule !== false ? '是' : '否',
-    predecessors: formatPredecessors(t.id, deps, codeMap),
-    lag: getPredecessorLag(t.id, deps),
+    predecessors: formatPredecessors(t.id, deps, codeMap, isMinute),
+    lag: getPredecessorLag(t.id, deps, isMinute),
     percent_done: t.percent_done ?? 0,
     constraint_type: t.constraint_type ? (CTYPE_LABELS[t.constraint_type] ?? t.constraint_type) : '',
     constraint_date: fmtCellDt(t.constraint_date),
@@ -237,12 +252,13 @@ function populateSheet(
   statusDate: Date | null,
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
+  isMinute: boolean = true,
 ) {
   ws.columns = COLUMNS as ExcelJS.Column[]
   styleHeaderRow(ws)
 
   for (const ft of flatTasks) {
-    const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap)
+    const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap, isMinute)
     const row = ws.addRow(data)
     styleDataRow(ws, row.number, summaryIds.has(ft.task.id), ft.level)
   }
@@ -344,7 +360,7 @@ export async function exportToExcel(
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
@@ -356,7 +372,7 @@ export async function exportToExcel(
     // Sheet name max 31 chars, no special chars
     const sheetName = assignee.slice(0, 31).replace(/[\\/*?:\[\]]/g, '_')
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false)
   }
 
   // ── Project settings sheet ─────────────────────────────────────────

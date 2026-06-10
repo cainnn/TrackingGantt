@@ -178,7 +178,7 @@ test('snaps day-level cascade updates back to midnight', () => {
   assert.equal(updates[0].duration, 14 * 1440)
 })
 
-test('interprets dependency lag by project granularity', () => {
+test('interprets dependency lag as stored minutes for every project granularity', () => {
   const tasks = [
     task({
       id: 'predecessor',
@@ -198,7 +198,7 @@ test('interprets dependency lag by project granularity', () => {
 
   const dayUpdates = runFullCascade(
     tasks,
-    [dep({ from_task_id: 'predecessor', to_task_id: 'successor', type: 2, lag: 1 })],
+    [dep({ from_task_id: 'predecessor', to_task_id: 'successor', type: 2, lag: 1440 })],
     { isMinute: false },
   )
   assert.equal(dayUpdates.find(t => t.id === 'successor')?.start_date, '2026-06-04T00:00:00')

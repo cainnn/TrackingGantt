@@ -47,6 +47,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const isMinute = currentProject?.time_granularity === 'minute'
   const dtSlice = isMinute ? 16 : 10      // input value 取前 N 位
   const durMul = isMinute ? 1 : 1440      // 用户输入 → 存储分钟数的乘数
+  const lagMul = isMinute ? 1 : 1440      // 用户输入 → 存储分钟数的乘数
+  const lagLabel = isMinute ? '分钟' : '天'
   const durLabel = isMinute ? '工期（分钟）' : '工期（天）'
   const durStep = isMinute ? 15 : 1
   const durHint = isMinute ? '1 小时 = 60，1 天 = 1440' : ''
@@ -144,7 +146,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     const lags: Record<string, number> = {}
     const acts: Record<string, boolean> = {}
     for (const d of deps.filter(dd => dd.to_task_id === taskId || dd.from_task_id === taskId)) {
-      lags[d.id] = d.lag ?? 0
+      lags[d.id] = isMinute ? (d.lag ?? 0) : Math.round((d.lag ?? 0) / 1440)
       acts[d.id] = d.active ?? true
     }
     setLagEdits(lags)
@@ -386,7 +388,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     let depsChanged = false
     let nextDeps = deps
     for (const dep of allEditableDeps) {
-      const newLag = lagEdits[dep.id] ?? dep.lag ?? 0
+      const currentLagInput = isMinute ? (dep.lag ?? 0) : Math.round((dep.lag ?? 0) / 1440)
+      const newLag = Math.round((lagEdits[dep.id] ?? currentLagInput) * lagMul)
       const newActive = activeEdits[dep.id] ?? dep.active ?? true
       const lagChanged = newLag !== (dep.lag ?? 0)
       const actChanged = newActive !== (dep.active ?? true)
@@ -539,10 +542,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                       </div>
                       <div className="px-2 py-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
                         <input type="number"
-                          value={lagEdits[dep.id] ?? dep.lag ?? 0}
+                          value={lagEdits[dep.id] ?? (isMinute ? (dep.lag ?? 0) : Math.round((dep.lag ?? 0) / 1440))}
                           onChange={e => setLagEdits(prev => ({ ...prev, [dep.id]: Number(e.target.value) || 0 }))}
                           className="w-12 border border-gray-300 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-blue-400" />
-                        <span className="text-[11px] text-gray-400">天</span>
+                        <span className="text-[11px] text-gray-400">{lagLabel}</span>
                       </div>
                       <div className="px-2 py-1 flex justify-center" onClick={e => e.stopPropagation()}>
                         <input type="checkbox"
@@ -643,10 +646,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                       </div>
                       <div className="px-2 py-1 flex items-center gap-1" onClick={e => e.stopPropagation()}>
                         <input type="number"
-                          value={lagEdits[dep.id] ?? dep.lag ?? 0}
+                          value={lagEdits[dep.id] ?? (isMinute ? (dep.lag ?? 0) : Math.round((dep.lag ?? 0) / 1440))}
                           onChange={e => setLagEdits(prev => ({ ...prev, [dep.id]: Number(e.target.value) || 0 }))}
                           className="w-12 border border-gray-300 rounded px-1 py-0.5 text-xs text-center focus:outline-none focus:border-blue-400" />
-                        <span className="text-[11px] text-gray-400">天</span>
+                        <span className="text-[11px] text-gray-400">{lagLabel}</span>
                       </div>
                       <div className="px-2 py-1 flex justify-center" onClick={e => e.stopPropagation()}>
                         <input type="checkbox"

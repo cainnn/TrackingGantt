@@ -341,6 +341,9 @@ export default function GanttToolbar({
     for (const t of baselineTasks) taskInfoMap.set(t.id, { code: t.task_code, name: t.name })
     for (const t of tasks) taskInfoMap.set(t.id, { code: t.task_code, name: t.name })
     const lookup = (id: string) => taskInfoMap.get(id) ?? { code: '?', name: '(未知任务)' }
+    const fmtLag = (lag: number | null | undefined) => (
+      isMinute ? `${lag ?? 0}m` : `${Math.round((lag ?? 0) / 1440)}d`
+    )
 
     const items: DepChangeItem[] = []
     for (const [id, cur] of curMap) {
@@ -360,7 +363,7 @@ export default function GanttToolbar({
       if ((old.type ?? null) !== (cur.type ?? null))
         changes.push({ field: '类型', old: DEP_TYPE_LABEL[old.type ?? 2] ?? 'FS', new: tLabel })
       if ((old.lag ?? 0) !== (cur.lag ?? 0))
-        changes.push({ field: '延迟', old: `${old.lag ?? 0}d`, new: `${cur.lag ?? 0}d` })
+        changes.push({ field: '延迟', old: fmtLag(old.lag), new: fmtLag(cur.lag) })
       if ((old.active ?? true) !== (cur.active ?? true))
         changes.push({ field: '状态', old: (old.active ?? true) ? '启用' : '禁用', new: (cur.active ?? true) ? '启用' : '禁用' })
       if (old.from_task_id !== cur.from_task_id || old.to_task_id !== cur.to_task_id) {
@@ -391,7 +394,7 @@ export default function GanttToolbar({
     const updated = items.filter(i => i.type === 'updated').length
     const removed = items.filter(i => i.type === 'removed').length
     return { items, added, updated, removed, total: items.length }
-  }, [baselineDeps, dependencies, baselineTasks, tasks])
+  }, [baselineDeps, dependencies, baselineTasks, tasks, isMinute])
 
   const statusDateChanged = toDateTimeStr(currentProject?.status_date ?? null) !== baselineStatusDate
   const hasChanges = changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged
@@ -878,7 +881,7 @@ export default function GanttToolbar({
     e.target.value = ''
     setImporting(true)
     try {
-      const parsed = await parseExcelFile(file)
+      const parsed = await parseExcelFile(file, { isMinute })
       await applyParsedImport(parsed, 'Excel')
     } catch (err) {
       alert(`解析 Excel 文件失败：${err instanceof Error ? err.message : '未知错误'}`)
@@ -959,7 +962,7 @@ export default function GanttToolbar({
       parent_id: null,
       assignee: null,
       start_date: startStr, end_date: endStr,
-      duration: isMinute ? 60 : 1, duration_unit: isMinute ? 'minute' : 'day',
+      duration: isMinute ? 60 : 1440, duration_unit: isMinute ? 'minute' : 'day',
       percent_done: 0, is_milestone: false, note: null,
       order_index: nextIndex,
       auto_schedule: true,

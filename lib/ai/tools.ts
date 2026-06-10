@@ -71,7 +71,7 @@ export const AI_TOOLS = [
           from_task_code: { type: 'string', description: 'Predecessor task code' },
           to_task_code:   { type: 'string', description: 'Successor task code' },
           type:           { type: 'number', enum: [0, 1, 2, 3], description: '0=SS, 1=SF, 2=FS(default), 3=FF' },
-          lag:            { type: 'number', description: 'Lag in days (default 0)' },
+          lag:            { type: 'number', description: 'Lag in the current project unit: minutes for minute-level projects, days for day-level projects (default 0)' },
         },
         required: ['from_task_code', 'to_task_code'],
       },

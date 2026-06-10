@@ -267,9 +267,8 @@ export function runFullCascade(
   opts: { isMinute?: boolean } = {},
 ): Task[] {
   if (allTasks.length === 0) return []
-  const isMinuteProject = opts.isMinute !== false
-  const toScheduleLag = (lag: number | null | undefined): number =>
-    isMinuteProject ? (lag ?? 0) : (lag ?? 0) * 1440
+  // dependencies.lag is stored in minutes for both day-level and minute-level projects.
+  const toScheduleLag = (lag: number | null | undefined): number => lag ?? 0
 
   // ── 构建 task state map ───────────────────────────────────────────────
   const taskMap = new Map<string, TaskState>()

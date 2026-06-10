@@ -84,9 +84,24 @@ function parseDateCell(v: unknown): string | null {
 
 // Parse predecessor strings like "3FS+2d,5SS-1d" or "!T-003FS+2d,T-005SS-1d"
 // Leading "!" marks the dependency as disabled (active=false)
-const PRED_RE = /(!?)([A-Za-z]*-?\d+)(SS|SF|FS|FF)?([+-]\d+d)?/g
+const PRED_RE = /(!?)([A-Za-z]*-?\d+)(SS|SF|FS|FF)?([+-]\d+(?:m|h|d)?)?/g
 
-function parsePredecessors(s: string, toTaskCode: string): ImportDep[] {
+function parseLagValue(v: unknown, isMinute: boolean): number {
+  const s = String(v ?? '').trim()
+  if (!s) return 0
+  const m = s.match(/^([+-]?\d+)(m|h|d)?$/i)
+  if (!m) {
+    const n = Number(s)
+    return Number.isFinite(n) ? Math.round(n * (isMinute ? 1 : 1440)) : 0
+  }
+  const n = Number(m[1])
+  const unit = (m[2] ?? (isMinute ? 'm' : 'd')).toLowerCase()
+  if (unit === 'd') return n * 1440
+  if (unit === 'h') return n * 60
+  return n
+}
+
+function parsePredecessors(s: string, toTaskCode: string, isMinute: boolean): ImportDep[] {
   if (!s || !s.trim()) return []
   const deps: ImportDep[] = []
   let m: RegExpExecArray | null
@@ -95,7 +110,7 @@ function parsePredecessors(s: string, toTaskCode: string): ImportDep[] {
     const active = m[1] !== '!'
     const fromCode = m[2]
     const type = m[3] ? DEP_TYPE_MAP[m[3]] ?? 2 : 2
-    const lag = m[4] ? parseInt(m[4].replace('d', '')) : 0
+    const lag = m[4] ? parseLagValue(m[4], isMinute) : 0
     deps.push({ from_task_code: fromCode, to_task_code: toTaskCode, type, lag, active })
   }
   return deps
@@ -287,7 +302,8 @@ export function validateImportData(
   return errors
 }
 
-export async function parseExcelFile(file: File): Promise<ParseResult> {
+export async function parseExcelFile(file: File, options: { isMinute?: boolean } = {}): Promise<ParseResult> {
+  const isMinute = options.isMinute !== false
   const buf = await file.arrayBuffer()
   const wb = XLSX.read(buf, { cellDates: true })
   const ws = wb.Sheets[wb.SheetNames[0]]
@@ -337,13 +353,13 @@ export async function parseExcelFile(file: File): Promise<ParseResult> {
 
     const predStr = String(row['前置依赖'] ?? '').trim()
     if (predStr) {
-      const parsed = parsePredecessors(predStr, taskCode)
+      const parsed = parsePredecessors(predStr, taskCode, isMinute)
       // If a separate "延迟" column exists, use it to override lag for all deps
       const lagOverride = row['延迟']
       if (lagOverride != null && String(lagOverride).trim() !== '') {
         const lagVal = Number(lagOverride)
         if (!isNaN(lagVal)) {
-          parsed.forEach(d => { d.lag = lagVal })
+          parsed.forEach(d => { d.lag = Math.round(lagVal * (isMinute ? 1 : 1440)) })
         }
       }
       dependencies.push(...parsed)

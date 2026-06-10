@@ -223,7 +223,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               from_task_id: fromId,
               to_task_id: toId,
               type: args.type ?? 2,
-              lag: args.lag ?? 0,
+              lag: Math.round((args.lag ?? 0) * (isMinute ? 1 : 1440)),
               active: true,
             }
             dispatch(addDependency(newDep))

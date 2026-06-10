@@ -54,3 +54,22 @@ test('imports exported Excel headers with datetime dates and minute duration', a
   ])
   assert.deepEqual(validateImportData(parsed.tasks, parsed.dependencies), [])
 })
+
+test('imports predecessor lag using project granularity at Excel boundary', async () => {
+  const wb = XLSX.utils.book_new()
+  const taskSheet = XLSX.utils.json_to_sheet([
+    { '任务编码': '1', '层级': 1, '任务名称': '准备', '开始日期': '2026-06-01', '结束日期': '2026-06-02', '工期(分钟)': 1440 },
+    { '任务编码': '2', '层级': 1, '任务名称': '上线', '开始日期': '2026-06-03', '结束日期': '2026-06-04', '工期(分钟)': 1440, '前置依赖': '1FS+2d' },
+  ])
+  XLSX.utils.book_append_sheet(wb, taskSheet, '任务')
+  const data = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+  const file = new File([data], 'import.xlsx', {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+
+  const dayParsed = await parseExcelFile(file, { isMinute: false })
+  const minuteParsed = await parseExcelFile(file, { isMinute: true })
+
+  assert.equal(dayParsed.dependencies[0].lag, 2880)
+  assert.equal(minuteParsed.dependencies[0].lag, 2880)
+})

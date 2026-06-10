@@ -555,8 +555,8 @@ export default function GanttChart({
   interface DepDragState {
     depId: string
     startX: number       // mousedown 时的 SVG X 坐标
-    startLag: number     // 起始 lag
-    deltaDays: number    // 当前拖拽产生的天数差
+    startLag: number     // 起始 lag（分钟）
+    deltaLag: number     // 当前拖拽产生的 lag 差（分钟）
     labelX: number       // 提示标签 X
     labelY: number       // 提示标签 Y
     dragging: boolean    // 是否进入真正拖拽（移动超过阈值）
@@ -839,7 +839,13 @@ export default function GanttChart({
     return dateToX(new Date(Math.round((minTs + maxTs) / 2)))
   }, [tasks, dateToX])
   const depLagToDays = useCallback((lag: number | null | undefined) => (
-    isMinute ? (lag ?? 0) / 1440 : (lag ?? 0)
+    (lag ?? 0) / 1440
+  ), [])
+  const depLagToInput = useCallback((lag: number | null | undefined) => (
+    isMinute ? (lag ?? 0) : Math.round((lag ?? 0) / 1440)
+  ), [isMinute])
+  const depLagFromInput = useCallback((lag: number) => (
+    isMinute ? lag : lag * 1440
   ), [isMinute])
 
   // ── 更新任务日期范围缓存 + 缩放居中 ────────────────────────────────────
@@ -1622,17 +1628,20 @@ export default function GanttChart({
 
       if (depDrag) {
         const dx = svgX - depDrag.startX
-        const deltaDays = Math.round(dx / colW)
+        const rawMinutes = dx * 1440 / colW
+        const deltaLag = isMinute
+          ? Math.round(rawMinutes / SNAP_MIN) * SNAP_MIN
+          : Math.round(dx / colW) * 1440
         if (!depDrag.dragging && Math.abs(dx) > 3) {
-          setDepDrag(prev => prev ? { ...prev, dragging: true, deltaDays } : null)
-        } else if (depDrag.dragging && deltaDays !== depDrag.deltaDays) {
-          setDepDrag(prev => prev ? { ...prev, deltaDays } : null)
+          setDepDrag(prev => prev ? { ...prev, dragging: true, deltaLag } : null)
+        } else if (depDrag.dragging && deltaLag !== depDrag.deltaLag) {
+          setDepDrag(prev => prev ? { ...prev, deltaLag } : null)
         }
       }
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1888,11 +1897,11 @@ export default function GanttChart({
       if (nameDrag) setNameDrag(null)
 
       if (depDrag) {
-        const { depId, startLag, deltaDays, dragging } = depDrag
+        const { depId, startLag, deltaLag, dragging } = depDrag
         setDepDrag(null)
         if (dragging) depDragJustEndedRef.current = true
-        if (dragging && deltaDays !== 0) {
-          const newLag = startLag + deltaDays
+        if (dragging && deltaLag !== 0) {
+          const newLag = startLag + deltaLag
           await handleDepLagChangeRef.current?.(depId, newLag)
         }
       }
@@ -2064,7 +2073,7 @@ export default function GanttChart({
       depId: dep.id,
       startX: getSvgX(e.clientX),
       startLag: dep.lag ?? 0,
-      deltaDays: 0,
+      deltaLag: 0,
       labelX: midX,
       labelY: midY,
       dragging: false,
@@ -3144,10 +3153,10 @@ export default function GanttChart({
                     ) : activeEditor?.taskId === t.id && activeEditor?.col === 'lag' ? (
                       <input autoFocus type="number"
                         className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
-                        defaultValue={incomingDeps[0].lag ?? 0}
+                        defaultValue={depLagToInput(incomingDeps[0].lag)}
                         onClick={e => e.stopPropagation()}
                         onBlur={e => {
-                          const v = parseInt(e.target.value, 10) || 0
+                          const v = depLagFromInput(parseInt(e.target.value, 10) || 0)
                           if (v !== (incomingDeps[0].lag ?? 0)) handleDepLagChange(incomingDeps[0].id, v)
                           setActiveEditor(null)
                         }}
@@ -3156,7 +3165,7 @@ export default function GanttChart({
                           if (e.key === 'Escape') setActiveEditor(null)
                         }} />
                     ) : (
-                      <span className="text-[11px] text-gray-600 w-full text-right">{incomingDeps[0].lag ?? 0}</span>
+                      <span className="text-[11px] text-gray-600 w-full text-right">{depLagToInput(incomingDeps[0].lag)}</span>
                     )}
                   </div>
                   )}
@@ -4113,7 +4122,7 @@ export default function GanttChart({
 
           {/* 依赖线拖拽中的 lag 提示 */}
           {depDrag && depDrag.dragging && (() => {
-            const newLag = depDrag.startLag + depDrag.deltaDays
+            const newLag = depDrag.startLag + depDrag.deltaLag
             const label = `延迟 ${fmtMinDur(newLag, { signed: true, dayOnly: !isMinute })}`
             const badgeW = Math.max(72, label.length * 9)
             const bx = depDrag.labelX - badgeW/2
