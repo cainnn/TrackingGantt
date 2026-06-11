@@ -207,7 +207,7 @@ export default function GanttToolbar({
     return normalized
   }, [isMinute, statusTimeMin, statusTimeMax])
 
-  // 上一版本带状态日期的快照（保存时校验：新版本状态日期必须严格大于旧版本）
+  // 上一版本带状态日期的快照。非当天状态时间必须晚于它；当天允许反复确认。
   // 分钟级：保留完整 datetime，不再裁到日。
   const lastVersionDate = React.useMemo(() => {
     const latest = versions.find(v => !v.is_autosave && v.status_date)
@@ -1657,7 +1657,7 @@ export default function GanttToolbar({
                 const sdLabel = isMinute ? '状态时间' : '状态日期'
                 const isBeforeLastVersion = !!(
                   sd
-                  && (isMinute || !isTodayStatusDate)
+                  && !isTodayStatusDate
                   && lastVersionDate
                   && sd < lastVersionDate
                 )
@@ -1675,7 +1675,7 @@ export default function GanttToolbar({
                       if (sd > nowStr) {
                         alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
                       }
-                      if ((isMinute || !isTodayStatusDate) && lastVersionDate && sd < lastVersionDate) {
+                      if (!isTodayStatusDate && lastVersionDate && sd < lastVersionDate) {
                         alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
                       }
                       openReview()
