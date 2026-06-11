@@ -1627,12 +1627,19 @@ export default function GanttToolbar({
                 const nowStr = toDateTimeStr(new Date())!
                 const isFuture = !!sd && sd > nowStr
                 const isTodayStatusDate = !!sd && sd.slice(0, 10) === nowStr.slice(0, 10)
-                const canSubmit = !!sd && !statusDateSaving && !isFuture && hasChanges
                 const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
                 const sdLabel = isMinute ? '状态时间' : '状态日期'
+                const isBeforeLastVersion = !!(
+                  sd
+                  && (isMinute || !isTodayStatusDate)
+                  && lastVersionDate
+                  && sd < lastVersionDate
+                )
+                const canSubmit = !!sd && !statusDateSaving && !isFuture && !isBeforeLastVersion && hasChanges
                 const tip = !sd
                   ? `请先设置${sdLabel}`
                   : isFuture ? `${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`
+                  : isBeforeLastVersion ? `${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate!)})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : '没有变更，无需保存'
                 return (

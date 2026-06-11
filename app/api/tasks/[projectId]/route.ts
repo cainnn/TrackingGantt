@@ -48,6 +48,41 @@ async function taskCodeExists(client: PoolClient, projectId: string, taskCode: s
   return res.rows.length > 0
 }
 
+function sortTaskInputsForInsert(taskInputs: unknown[]): Record<string, unknown>[] {
+  const tasks = taskInputs.filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
+  const byId = new Map<string, Record<string, unknown>>()
+  for (const task of tasks) {
+    if (typeof task.id === 'string' && task.id) byId.set(task.id, task)
+  }
+
+  const sorted: Record<string, unknown>[] = []
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+
+  const visit = (task: Record<string, unknown>) => {
+    const id = typeof task.id === 'string' ? task.id : null
+    if (id && visited.has(id)) return
+    if (id && visiting.has(id)) {
+      sorted.push(task)
+      visited.add(id)
+      return
+    }
+
+    if (id) visiting.add(id)
+    const parentId = typeof task.parent_id === 'string' ? task.parent_id : null
+    const parent = parentId ? byId.get(parentId) : null
+    if (parent && parent !== task) visit(parent)
+    if (id) {
+      visiting.delete(id)
+      visited.add(id)
+    }
+    if (!sorted.includes(task)) sorted.push(task)
+  }
+
+  for (const task of tasks) visit(task)
+  return sorted
+}
+
 // Insert a lifecycle event
 async function addLifecycle(
   client: PoolClient,
@@ -280,7 +315,25 @@ export async function POST(req: NextRequest, { params }: Params) {
   try {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
-    for (const task of taskInputs) {
+    const sortedTaskInputs = sortTaskInputsForInsert(taskInputs)
+    const insertedIds = new Set<string>()
+    const existingParentIds = new Map<string, boolean>()
+    const resolveParentId = async (rawParentId: unknown, clientId: string | null): Promise<string | null> => {
+      if (typeof rawParentId !== 'string' || !rawParentId.trim()) return null
+      const parentId = rawParentId.trim()
+      if (clientId && parentId === clientId) return null
+      if (insertedIds.has(parentId)) return parentId
+      if (!existingParentIds.has(parentId)) {
+        const parentRes = await client.query(
+          'SELECT 1 FROM tasks WHERE project_id = $1 AND id = $2 AND is_deleted = false LIMIT 1',
+          [projectId, parentId],
+        )
+        existingParentIds.set(parentId, parentRes.rows.length > 0)
+      }
+      return existingParentIds.get(parentId) ? parentId : null
+    }
+
+    for (const task of sortedTaskInputs) {
       const { id, task_code, name, parent_id, assignee, start_date, end_date, duration, duration_unit,
               percent_done, is_milestone, note, order_index, auto_schedule,
               constraint_type, constraint_date, deadline, status, rollup, inactive,
@@ -341,7 +394,7 @@ export async function POST(req: NextRequest, { params }: Params) {
             constraint_type, constraint_date, deadline, status, rollup, inactive,
             project_boundary, baseline_end_date)
          VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
-        [clientId, projectId, parent_id ?? null, code, name,
+        [clientId, projectId, await resolveParentId(parent_id, clientId), code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          duration ?? null, duration_unit ?? 'day',
          percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
@@ -351,6 +404,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
+      insertedIds.add(newTask.id)
 
       await addLifecycle(client, {
         taskId: newTask.id, taskCode: code, projectId,
