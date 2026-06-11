@@ -8,6 +8,7 @@ import {
   addDependency, removeDependency, updateDependency,
   copyTasks,
 } from '@/store/slices/tasksSlice'
+import { setStatusDate } from '@/store/slices/projectSlice'
 import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
@@ -273,6 +274,12 @@ const fmtDate  = (d: Date) => `${d.getFullYear()}-${String(d.getMonth()+1).padSt
 const fmtDt    = (d: Date) => `${fmtDate(d)}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`
 const fmtWeek  = (d: Date) => d.toLocaleDateString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit' })
 const SNAP_MIN = 15
+const fmtStatusLineLabel = (value: string | null, isMinute: boolean) => {
+  if (!value) return ''
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return value
+  return isMinute ? `${fmtDate(d)} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` : fmtDate(d)
+}
 
 /** 把分钟数格式化为人类可读：
  *   - 分钟级项目：'1天3小时' / '5小时15分钟' / '45分钟' / '0分钟'
@@ -373,6 +380,7 @@ interface Props {
   indicators?: IndicatorsConfig
   readOnly?: boolean
   showComparison?: boolean
+  onStatusDatePreviewChange?: (statusDate: string | null) => void
 }
 
 export default function GanttChart({
@@ -390,6 +398,7 @@ export default function GanttChart({
   indicators = DEFAULT_INDICATORS,
   readOnly = false,
   showComparison = true,
+  onStatusDatePreviewChange,
 }: Props) {
   const dispatch    = useAppDispatch()
   const realTasks   = useAppSelector(s => s.tasks.tasks)
@@ -425,12 +434,19 @@ export default function GanttChart({
 
   // 点击状态列时显示填报原因的 popover
   const [reasonPopup, setReasonPopup] = useState<{ x: number; y: number; reason: string; taskName: string } | null>(null)
+  const [statusDateDrag, setStatusDateDrag] = useState<{ startX: number; dragging: boolean } | null>(null)
+  const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
+  const effectiveChartStatusDate = previewStatusDate ?? statusDate ?? null
   useEffect(() => {
     if (!reasonPopup) return
     const close = () => setReasonPopup(null)
     window.addEventListener('mousedown', close)
     return () => window.removeEventListener('mousedown', close)
   }, [reasonPopup])
+  useEffect(() => {
+    setPreviewStatusDate(null)
+    onStatusDatePreviewChange?.(null)
+  }, [statusDate, onStatusDatePreviewChange])
 
   // ── 上一次状态日期快照的 end_date（用于状态列比对） ─────────────────────
   // 取 versions 中"最近的前一次"状态日期快照：若有 >=2 个 status_date 快照，
@@ -822,6 +838,13 @@ export default function GanttChart({
   // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
   const pxPerMin = colW / 1440
   const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
+  const xToStatusDate = useCallback((x: number) => {
+    const rawMins = x / pxPerMin
+    const snap = isMinute ? SNAP_MIN : 1440
+    const mins = Math.round(rawMins / snap) * snap
+    const d = addMins(origin, mins)
+    return isMinute ? fmtDt(d) : fmtDate(d)
+  }, [origin, pxPerMin, isMinute])
   const taskRangeCenterX = useCallback((): number | null => {
     let minTs = Infinity
     let maxTs = -Infinity
@@ -865,9 +888,9 @@ export default function GanttChart({
     const el = rightRef.current
     if (!el) return
     const viewW = el.clientWidth
-    // 缩放时保持分钟级任务条范围居中；天级继续以状态日期（或今天）为锚点。
+    // 分钟级优先以状态时间居中；没有状态时间时回退到任务范围中心。
     const target = statusDate ? new Date(statusDate) : sod(new Date())
-    const targetX = isMinute ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
+    const targetX = isMinute && !statusDate ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
     syncTimelineScrollLeft(Math.max(0, targetX - viewW / 2))
   }, [colW, syncTimelineScrollLeft, statusDate, isMinute, taskRangeCenterX, dateToX])
 
@@ -879,7 +902,7 @@ export default function GanttChart({
     if (statusDate === undefined) return
     scrolledForProject.current = projectId
     const target = statusDate ? new Date(statusDate) : sod(new Date())
-    const x = isMinute ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
+    const x = isMinute && !statusDate ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
     requestAnimationFrame(() => {
       const vw = rightRef.current?.clientWidth ?? 600
       syncTimelineScrollLeft(Math.max(0, x - (isMinute ? vw / 2 : vw / 3)))
@@ -921,7 +944,7 @@ export default function GanttChart({
     // 列筛选（多列并列）
     const activeFilterEntries = Object.entries(colFilters).filter(([, v]) => v && (v as Set<string>).size > 0) as [OptionalCol, Set<string>][]
     if (activeFilterEntries.length > 0) {
-      const sdForStatus = statusDate ? new Date(statusDate) : null
+      const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
       const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
       const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
       const statusValue = (t: Task): string => {
@@ -1017,7 +1040,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, statusDate])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate])
 
   const progressTasks = useMemo(() => {
     if (Object.keys(previewMap).length === 0) return tasks
@@ -1194,10 +1217,10 @@ export default function GanttChart({
   }, [showCriticalPath, tasks, deps, summarySet])
 
   // ── 摘要任务进度（所有后代叶子任务按工期加权的完成度） ──────────────
-  const statusDateObj = useMemo(() => statusDate ? new Date(statusDate) : null, [statusDate])
+  const statusDateObj = useMemo(() => effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null, [effectiveChartStatusDate])
   const summaryProgressMap = useMemo(
-    () => computeSummaryProgressMap(progressTasks, statusDate),
-    [progressTasks, statusDate]
+    () => computeSummaryProgressMap(progressTasks, effectiveChartStatusDate),
+    [progressTasks, effectiveChartStatusDate]
   )
 
 
@@ -1297,19 +1320,24 @@ export default function GanttChart({
   // ── Escape 取消拖拽 ─────────────────────────────────────────────────────
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && (drag || connect)) {
+      if (e.key === 'Escape' && (drag || connect || statusDateDrag)) {
         setDrag(null)
         setPreviewMap({})
         setConnect(null)
+        setStatusDateDrag(null)
+        setPreviewStatusDate(null)
+        onStatusDatePreviewChange?.(null)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [drag, connect])
+  }, [drag, connect, statusDateDrag, onStatusDatePreviewChange])
 
   // ── 节流函数：限制setState频率，trailing 确保最后一帧一定生效 ──────────
   const throttleTimer = useRef<NodeJS.Timeout | null>(null)
   const pendingPreview = useRef<Record<string, Task> | null>(null)
+  const statusPreviewRaf = useRef<number | null>(null)
+  const pendingStatusPreview = useRef<string | null>(null)
   const throttledSetPreview = useCallback((map: Record<string, Task>) => {
     pendingPreview.current = map
     if (throttleTimer.current) return
@@ -1323,11 +1351,38 @@ export default function GanttChart({
       }
     }, 16) // 60fps
   }, [])
+  const throttledSetStatusPreview = useCallback((nextStatusDate: string) => {
+    pendingStatusPreview.current = nextStatusDate
+    if (statusPreviewRaf.current != null) return
+    statusPreviewRaf.current = window.requestAnimationFrame(() => {
+      statusPreviewRaf.current = null
+      const next = pendingStatusPreview.current
+      pendingStatusPreview.current = null
+      if (!next) return
+      setPreviewStatusDate(next)
+      onStatusDatePreviewChange?.(next)
+    })
+  }, [onStatusDatePreviewChange])
+  useEffect(() => {
+    return () => {
+      if (statusPreviewRaf.current != null) window.cancelAnimationFrame(statusPreviewRaf.current)
+    }
+  }, [])
 
   // ── Global mousemove ────────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const svgX = getSvgX(e.clientX)
+
+      if (statusDateDrag) {
+        const dx = svgX - statusDateDrag.startX
+        if (!statusDateDrag.dragging && Math.abs(dx) > 2) {
+          setStatusDateDrag(prev => prev ? { ...prev, dragging: true } : null)
+        }
+        if (statusDateDrag.dragging || Math.abs(dx) > 2) {
+          throttledSetStatusPreview(xToStatusDate(svgX))
+        }
+      }
 
       if (drag) {
         const dx = svgX - drag.startMouseX
@@ -1641,11 +1696,31 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
     const onUp = async (e: MouseEvent) => {
+      if (statusDateDrag) {
+        const latest = pendingStatusPreview.current ?? previewStatusDate
+        if (statusPreviewRaf.current != null) {
+          window.cancelAnimationFrame(statusPreviewRaf.current)
+          statusPreviewRaf.current = null
+        }
+        pendingStatusPreview.current = null
+        setStatusDateDrag(null)
+        if (statusDateDrag.dragging && latest) {
+          setPreviewStatusDate(latest)
+          onStatusDatePreviewChange?.(latest)
+          if (!readOnly && !viewSnapshot) {
+            dispatch(setStatusDate({ projectId, statusDate: latest }))
+          }
+        } else {
+          setPreviewStatusDate(null)
+          onStatusDatePreviewChange?.(null)
+        }
+      }
+
       if (drag) {
         const latestPreview = pendingPreview.current ?? previewMap
         // 清理节流定时器
@@ -1908,7 +1983,7 @@ export default function GanttChart({
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag])
+  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -2575,7 +2650,7 @@ export default function GanttChart({
     const fmt = (s: string | null | undefined) => (s ?? '').split('T')[0]
     const pred = (t: Task) => deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
     const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
-    const sdForStatus = statusDate ? new Date(statusDate) : null
+    const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
     const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
     const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
     const statusValue = (t: Task): string => {
@@ -2609,7 +2684,7 @@ export default function GanttChart({
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps, statusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds])
+  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
@@ -2948,7 +3023,7 @@ export default function GanttChart({
                     // seqMap 让归因文案里的编号与左列"编号"一致
                     const { status: st, reason: statusReason } = computeTaskStatus(
                       taskForStatus,
-                      statusDate ? new Date(statusDate) : null,
+                      effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null,
                       { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap, isMinute },
                     )
                     const meta = STATUS_META[st]
@@ -3490,14 +3565,14 @@ export default function GanttChart({
                   return nodes
                 })()}
                 {(() => {
-                  // 二级：15min 槽（每小时 4 格），标签 0/15/30/45
+                  // 二级：15min 槽（每小时 4 格），标签居中显示 00/15/30/45。
                   const slotW = colW / 96
                   const totalSlots = totalDays * 96
                   const showLabel = slotW >= 12
                   const nodes: React.ReactNode[] = []
                   for (let s = 0; s < totalSlots; s++) {
                     const slotInHour = s % 4
-                    const mm = slotInHour * 15
+                    const mm = String(slotInHour * 15).padStart(2, '0')
                     const x = s * slotW
                     const isHourBoundary = slotInHour === 0
                     nodes.push(
@@ -3621,8 +3696,8 @@ export default function GanttChart({
                         fill="#dc2626" fontWeight={600}>{isMinute ? '开始时间' : '开始日期'}</text>
                 )
               }
-              if (statusDate) {
-                const x = dateToX(new Date(statusDate))
+              if (effectiveChartStatusDate) {
+                const x = dateToX(new Date(effectiveChartStatusDate))
                 nodes.push(
                   <text key="lbl-sd" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
                         fill="#ef4444" fontWeight={600}>{isMinute ? '状态时间' : '状态日期'}</text>
@@ -3653,7 +3728,7 @@ export default function GanttChart({
           ref={rightRef}
           onScroll={onRightBodyScroll}
           className="flex-1 overflow-auto min-h-0"
-          style={{ cursor: drag ? 'ew-resize' : connect ? 'crosshair' : 'default' }}
+          style={{ cursor: statusDateDrag ? 'col-resize' : drag ? 'ew-resize' : connect ? 'crosshair' : 'default' }}
         >
           <svg ref={svgRef}
                width={Math.max(totalW,800)} height={totalH+8}
@@ -4140,12 +4215,36 @@ export default function GanttChart({
           })()}
 
           {/* Status date */}
-          {statusDate && (() => {
-            const sx = dateToX(new Date(statusDate))
+          {effectiveChartStatusDate && (() => {
+            const sx = dateToX(new Date(effectiveChartStatusDate))
+            const label = fmtStatusLineLabel(effectiveChartStatusDate, isMinute)
+            const badgeW = Math.max(92, label.length * 7 + 16)
             return (
               <g>
+                <line
+                  x1={sx} y1={0} x2={sx} y2={totalH}
+                  stroke="transparent" strokeWidth={14}
+                  style={{ cursor: viewSnapshot ? 'ew-resize' : 'col-resize' }}
+                  onMouseDown={e => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    setSelectedDep(null)
+                    setStatusDateDrag({ startX: getSvgX(e.clientX), dragging: false })
+                    setPreviewStatusDate(effectiveChartStatusDate)
+                    onStatusDatePreviewChange?.(effectiveChartStatusDate)
+                  }}
+                />
                 <line x1={sx} y1={0} x2={sx} y2={totalH}
-                      stroke="#ef4444" strokeWidth={2} strokeDasharray="5 3" />
+                      stroke="#ef4444" strokeWidth={statusDateDrag ? 3 : 2} strokeDasharray="5 3"
+                      pointerEvents="none" />
+                {statusDateDrag && (
+                  <g pointerEvents="none">
+                    <rect x={sx - badgeW / 2} y={8} width={badgeW} height={24} rx={4}
+                          fill="#ef4444" opacity={0.94} />
+                    <text x={sx} y={24} textAnchor="middle" fontSize={12}
+                          fill="white" fontWeight={700}>{label}</text>
+                  </g>
+                )}
               </g>
             )
           })()}

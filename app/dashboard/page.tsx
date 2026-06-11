@@ -8,6 +8,7 @@ import ProjectCard from '@/components/ProjectCard'
 import { logout } from '@/store/slices/authSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import UserManagement from '@/components/UserManagement'
+import AppLogo from '@/components/AppLogo'
 
 export default function DashboardPage() {
   const dispatch = useAppDispatch()
@@ -139,7 +140,7 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-gray-900">跟踪甘特图</h1>
+        <AppLogo />
         <div className="flex items-center gap-4">
           <span className="text-sm text-gray-600">你好，{user.username}</span>
           <button onClick={handleLogout} className="text-sm text-gray-500 hover:text-gray-700">

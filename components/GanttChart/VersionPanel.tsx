@@ -663,7 +663,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                   onChange={e => { setWeeklyCurrentId(e.target.value); setWeeklyResult(null) }}
                   className="flex-1 border border-blue-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:border-blue-400 bg-white"
                 >
-                  <option value="">选择当前状态日期...</option>
+                  <option value="">选择当前{isMinute ? '状态时间' : '状态日期'}...</option>
                   {statusVersions.map(v => (
                     <option key={v.id} value={v.id}>
                       {formatStatusDate(v.status_date)} #{v.version_number} {v.name ? ` ${v.name}` : ''}
@@ -679,7 +679,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                 </button>
               </div>
               <div className="text-[10px] text-blue-700/70">
-                自动选择当前状态日期之前最近的正式状态版本作为基准；当天多次确认只看当天最终快照。
+                自动选择当前{isMinute ? '状态时间' : '状态日期'}之前最近的正式状态版本作为基准；当天多次确认只看当天最终快照。
               </div>
             </div>
             <div className="rounded border border-gray-200 bg-white px-2.5 py-2 space-y-2">

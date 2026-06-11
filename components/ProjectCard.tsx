@@ -168,7 +168,7 @@ export default function ProjectCard({ project, readOnly, selected, onToggleSelec
             )}
             {project.status_date && (
               <p className="text-blue-600">
-                状态日期：{project.time_granularity === 'minute'
+                {project.time_granularity === 'minute' ? '状态时间' : '状态日期'}：{project.time_granularity === 'minute'
                   ? project.status_date.slice(0, 16).replace('T', ' ')
                   : new Date(project.status_date).toLocaleDateString('zh-CN')}
               </p>

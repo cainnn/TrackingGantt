@@ -20,6 +20,45 @@ function fmtStatusDate(value?: string | null): string {
   return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : s
 }
 
+function fmtLocalDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+function addMonthsClamped(date: Date, deltaMonths: number): Date {
+  const result = new Date(date)
+  const day = result.getDate()
+  result.setDate(1)
+  result.setMonth(result.getMonth() + deltaMonths)
+  const lastDay = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate()
+  result.setDate(Math.min(day, lastDay))
+  return result
+}
+
+function compareDateValue(a: string, b: string): number {
+  return a.localeCompare(b)
+}
+
+function getProjectFinishDate(tasks: Task[], baselineEnds?: Map<string, string>): string | null {
+  let finish: string | null = null
+  for (const task of tasks) {
+    if (task.is_deleted) continue
+    const raw = baselineEnds?.get(task.id) ?? task.end_date
+    if (!raw) continue
+    const date = fmtStatusDate(raw)
+    if (!finish || compareDateValue(date, finish) > 0) finish = date
+  }
+  return finish
+}
+
+function buildFinishDateConclusion(previousFinish: string | null, currentFinish: string | null): string {
+  if (!previousFinish || !currentFinish) return '完工日期缺少可对比数据'
+  const cmp = compareDateValue(currentFinish, previousFinish)
+  if (cmp === 0) return '完工日期不变'
+  if (cmp > 0) return `完工日期推迟到${currentFinish}`
+  return `完工日期提前到${currentFinish}`
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 interface ToolCall {
   id: string
@@ -370,15 +409,14 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   // ── 根据用户消息推断查询日期范围 ──────────────────────────────────────────
   const inferDateRange = (text: string): { from: string; to: string; label: string } => {
     const today = new Date()
-    const fmt = (d: Date) => d.toISOString().split('T')[0]
     if (/本月|月报|this month/i.test(text)) {
-      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
-      return { from: fmt(monthStart), to: fmt(today), label: '本月' }
+      const previousMonth = addMonthsClamped(today, -1)
+      return { from: fmtLocalDate(previousMonth), to: fmtLocalDate(today), label: '近1个月' }
     }
-    // 默认本周
-    const monday = new Date(today)
-    monday.setDate(today.getDate() - ((today.getDay() + 6) % 7))
-    return { from: fmt(monday), to: fmt(today), label: '本周' }
+    // 默认按提交当天往前 7 天取数，避免自然周边界漏掉上周同期变动。
+    const previousWeek = new Date(today)
+    previousWeek.setDate(today.getDate() - 7)
+    return { from: fmtLocalDate(previousWeek), to: fmtLocalDate(today), label: '近7天' }
   }
 
   // ── 前端主动预取变更数据 ──────────────────────────────────────────────────
@@ -392,6 +430,21 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     ])
 
     const lines: string[] = []
+
+    const previousFinish = getProjectFinishDate(tasks, prevSnapshotEnds)
+    const currentFinish = getProjectFinishDate(tasks)
+    const finishConclusion = buildFinishDateConclusion(previousFinish, currentFinish)
+
+    lines.push(`【提交给 AI 的分析要求】`)
+    lines.push(`统计范围: ${label}（周报/本周为提交当天往前 7 天到当天；月报/本月为提交当天往前 1 个月到当天。本次为 ${from} ~ ${to}）`)
+    lines.push(`回答第一句必须是以下三种之一: "完工日期不变" / "完工日期推迟到YYYY-MM-DD" / "完工日期提前到YYYY-MM-DD"。`)
+    lines.push(`优先分析总工期影响和计划变动影响；任务描述只挑重点，重点包括新增任务、结束日期延期、结束日期提前、工期变化、关键依赖变化。`)
+    lines.push(`不要按流水账列出所有字段变化；责任人、名称、顺序等非工期变化只在确实影响管理判断时简述。`)
+    lines.push(`完成百分比只作为参考信息，不作为延期、提前或完工日期变化的判断依据。`)
+    lines.push(`\n【项目完工日期对比】`)
+    lines.push(`上一状态版本完工日期: ${previousFinish ?? '无可对比数据'}`)
+    lines.push(`当前计划完工日期: ${currentFinish ?? '无可对比数据'}`)
+    lines.push(`结论: ${finishConclusion}`)
 
     // 变更记录
     lines.push(`\n【任务变更记录 ${label} ${from} ~ ${to}】`)
@@ -457,7 +510,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     lines.push(`整体进度参考值: ${progress}%（由状态日期自动计算，仅供参考，不作为工期变动分析依据）`)
 
     return lines.join('\n')
-  }, [projectId, tasks, currentProject])
+  }, [projectId, tasks, currentProject, prevSnapshotEnds, isMinute])
 
   // ── Send message ────────────────────────────────────────────────────────
   const sendMessage = useCallback(async (directText?: string) => {

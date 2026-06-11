@@ -1,11 +1,15 @@
 import Link from 'next/link'
+import AppLogo from '@/components/AppLogo'
 import LoginForm from '@/components/auth/LoginForm'
 
 export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="bg-white rounded-lg shadow p-8 w-full max-w-md">
-        <h1 className="text-2xl font-bold text-gray-900 mb-6">登录</h1>
+        <div className="mb-6">
+          <AppLogo size="md" />
+        </div>
+        <h1 className="text-xl font-semibold text-gray-900 mb-6">登录</h1>
         <LoginForm />
         <p className="mt-4 text-center text-sm text-gray-600">
           没有账号？{' '}

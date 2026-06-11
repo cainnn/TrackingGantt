@@ -49,7 +49,9 @@ export default function ProjectPage() {
     const v = versions.find(x => x.id === viewSnapshot.versionId)
     return v?.status_date ?? currentProject?.status_date ?? null
   }, [viewSnapshot, versions, currentProject?.status_date])
-  const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, effectiveStatusDate), [tasks, effectiveStatusDate])
+  const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
+  const progressStatusDate = previewStatusDate ?? effectiveStatusDate
+  const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, progressStatusDate), [tasks, progressStatusDate])
   // 项目精度（创建时固定）
   const isMinute = currentProject?.time_granularity === 'minute'
   const zoomLevels = isMinute ? ZOOM_LEVELS_MINUTE : ZOOM_LEVELS_DAY
@@ -329,6 +331,7 @@ export default function ProjectPage() {
             indicators={indicators}
             readOnly={isViewOnly}
             showComparison={showComparison}
+            onStatusDatePreviewChange={setPreviewStatusDate}
           />
         </div>
         {showAI && (

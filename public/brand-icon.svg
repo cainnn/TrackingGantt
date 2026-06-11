@@ -1,0 +1,15 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">跟踪甘特图图标</title>
+  <desc id="desc">带有时间轴、任务条和进度节点的项目排期图标</desc>
+  <rect width="64" height="64" rx="14" fill="#0F172A"/>
+  <path d="M16 16V48" stroke="#94A3B8" stroke-width="3" stroke-linecap="round"/>
+  <path d="M16 48H50" stroke="#94A3B8" stroke-width="3" stroke-linecap="round"/>
+  <rect x="22" y="18" width="22" height="8" rx="4" fill="#38BDF8"/>
+  <rect x="30" y="29" width="22" height="8" rx="4" fill="#34D399"/>
+  <rect x="22" y="40" width="17" height="8" rx="4" fill="#F59E0B"/>
+  <circle cx="22" cy="22" r="4" fill="#E0F2FE" stroke="#0F172A" stroke-width="2"/>
+  <circle cx="30" cy="33" r="4" fill="#D1FAE5" stroke="#0F172A" stroke-width="2"/>
+  <circle cx="39" cy="44" r="4" fill="#FEF3C7" stroke="#0F172A" stroke-width="2"/>
+  <path d="M24.5 24.5L28 30" stroke="#CBD5E1" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M32.5 35.5L36.5 41" stroke="#CBD5E1" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

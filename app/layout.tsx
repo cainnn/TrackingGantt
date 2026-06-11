@@ -5,6 +5,9 @@ import { StoreProvider } from '@/store/provider'
 export const metadata: Metadata = {
   title: '跟踪甘特图',
   description: '项目进度甘特图管理工具',
+  icons: {
+    icon: '/brand-icon.svg',
+  },
 }
 
 export default function RootLayout({
