@@ -324,7 +324,7 @@ function getDownstreamIds(taskId: string, deps: Dependency[]): string[] {
   const result: string[] = []
   const visited = new Set<string>()
   function walk(id: string) {
-    deps.filter(d => d.from_task_id === id).forEach(d => {
+    deps.filter(d => d.active !== false && d.from_task_id === id).forEach(d => {
       if (!visited.has(d.to_task_id)) {
         visited.add(d.to_task_id)
         result.push(d.to_task_id)
@@ -381,6 +381,7 @@ interface Props {
   readOnly?: boolean
   showComparison?: boolean
   onStatusDatePreviewChange?: (statusDate: string | null) => void
+  discardSignal?: number
 }
 
 export default function GanttChart({
@@ -399,6 +400,7 @@ export default function GanttChart({
   readOnly = false,
   showComparison = true,
   onStatusDatePreviewChange,
+  discardSignal = 0,
 }: Props) {
   const dispatch    = useAppDispatch()
   const realTasks   = useAppSelector(s => s.tasks.tasks)
@@ -447,6 +449,28 @@ export default function GanttChart({
     setPreviewStatusDate(null)
     onStatusDatePreviewChange?.(null)
   }, [statusDate, onStatusDatePreviewChange])
+  useEffect(() => {
+    if (discardSignal === 0) return
+    setPreviewStatusDate(null)
+    pendingStatusPreview.current = null
+    if (statusPreviewRaf.current != null) {
+      window.cancelAnimationFrame(statusPreviewRaf.current)
+      statusPreviewRaf.current = null
+    }
+    setPreviewMap({})
+    pendingPreview.current = null
+    if (throttleTimer.current) {
+      clearTimeout(throttleTimer.current)
+      throttleTimer.current = null
+    }
+    setColFilters(prev => {
+      if (!prev.status) return prev
+      const next = { ...prev }
+      delete next.status
+      return next
+    })
+    onStatusDatePreviewChange?.(null)
+  }, [discardSignal, onStatusDatePreviewChange])
 
   // ── 上一次状态日期快照的 end_date（用于状态列比对） ─────────────────────
   // 取 versions 中"最近的前一次"状态日期快照：若有 >=2 个 status_date 快照，
@@ -942,17 +966,17 @@ export default function GanttChart({
     }
 
     // 列筛选（多列并列）
+    const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
+    const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
+    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
+    const statusValue = (t: Task): string => {
+      const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
+      const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+      if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
+      return st
+    }
     const activeFilterEntries = Object.entries(colFilters).filter(([, v]) => v && (v as Set<string>).size > 0) as [OptionalCol, Set<string>][]
     if (activeFilterEntries.length > 0) {
-      const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
-      const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
-      const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
-      const statusValue = (t: Task): string => {
-        const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
-        const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
-        if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
-        return st
-      }
       const colVal = (t: Task, k: OptionalCol): string => {
         switch (k) {
           case 'assignee':   return t.assignee ?? ''
@@ -1009,7 +1033,7 @@ export default function GanttChart({
           case 'ctype':      return t.constraint_type ?? ''
           case 'cdate':      return t.constraint_date ?? ''
           case 'ddate':      return t.deadline ?? ''
-          case 'status':     return t.status ?? ''
+          case 'status':     return statusValue(t)
           default:           return 0
         }
       }
@@ -1040,7 +1064,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, isMinute])
 
   const progressTasks = useMemo(() => {
     if (Object.keys(previewMap).length === 0) return tasks
@@ -1447,8 +1471,7 @@ export default function GanttChart({
               for (const toId of extIds) {
                 const t = tasks.find(x => x.id === toId)
                 if (!t || !t.start_date || !t.end_date) continue
-                if (t.auto_schedule === false) continue
-                const incoming = deps.filter(d => d.to_task_id === toId)
+                const incoming = deps.filter(d => d.active !== false && d.to_task_id === toId)
                 let maxRS: Date | null = null
                 for (const dep of incoming) {
                   const pS = localStart.get(dep.from_task_id)
@@ -1557,9 +1580,8 @@ export default function GanttChart({
             for (const toId of downstreamIds) {
               const t = tasks.find(x => x.id === toId)
               if (!t || !t.start_date || !t.end_date) continue
-              if (t.auto_schedule === false) continue
 
-              const incoming = deps.filter(d => d.to_task_id === toId)
+              const incoming = deps.filter(d => d.active !== false && d.to_task_id === toId)
               let maxRequiredStart: Date | null = null
 
               for (const dep of incoming) {
@@ -1748,46 +1770,52 @@ export default function GanttChart({
           // ── 摘要任务拖动提交：只提交非摘要后代 + 外部级联任务（服务端自动重算摘要日期）
           dirtyList = finalPreview.filter(t => !summarySet.has(t.id))
         } else if (finalPreview.length > 0 && !isSummaryDrag) {
-          // ── 普通叶子任务拖动：只标记被拖任务为脏（服务端自动级联下游）
+          // ── 普通叶子任务拖动：保存预览中的整条后续链。
+          // 手动任务不参与服务端自动级联，因此这里必须把被带动的手动后继一起提交。
           const draggedTask = tasks.find(t => t.id === drag.taskId)
           if (draggedTask && draggedTask.auto_schedule !== false) {
             const dragged = finalPreview.find(t => t.id === drag.taskId)
-            const incoming = deps.filter(d => d.to_task_id === drag.taskId)
+            const incoming = deps.filter(d => d.active !== false && d.to_task_id === drag.taskId)
             const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
+            const previewById = new Map(
+              finalPreview
+                .filter(t => !summarySet.has(t.id))
+                .map(t => [t.id, t] as const)
+            )
 
             if (drag.mode === 'move' && dragged) {
-              dirtyList = [{
+              previewById.set(draggedTask.id, {
                 ...draggedTask,
                 start_date: dragged.start_date,
                 end_date: dragged.end_date,
                 duration: dragged.duration ?? draggedTask.duration,
                 auto_schedule: false,
-              }]
+              })
             } else if (depType === 3 || depType === 1) {
               const fixedEnd = draggedTask.end_date!
               const newStart = dragged?.start_date ?? draggedTask.start_date
               const newDur = newStart ? diffMins(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
-              dirtyList = [{
+              previewById.set(draggedTask.id, {
                 ...draggedTask,
                 start_date: newStart,
                 end_date: fixedEnd,
                 duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
-              }]
+              })
             } else {
               const hasIncoming = incoming.length > 0
               const fixedStart = hasIncoming ? draggedTask.start_date! : (dragged?.start_date ?? draggedTask.start_date!)
               const newEnd = dragged?.end_date ?? draggedTask.end_date
               const newDur = newEnd ? diffMins(new Date(fixedStart), new Date(newEnd)) : (draggedTask.duration ?? 0)
-              dirtyList = [{
+              previewById.set(draggedTask.id, {
                 ...draggedTask,
                 start_date: fixedStart,
                 end_date: newEnd,
                 duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
-              }]
+              })
             }
+            dirtyList = [...previewById.values()]
           } else if (draggedTask) {
-            const dragged = finalPreview.find(t => t.id === drag.taskId)
-            dirtyList = [dragged ?? draggedTask]
+            dirtyList = finalPreview.filter(t => !summarySet.has(t.id))
           }
         }
 

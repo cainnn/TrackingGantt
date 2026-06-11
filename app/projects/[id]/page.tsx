@@ -50,6 +50,7 @@ export default function ProjectPage() {
     return v?.status_date ?? currentProject?.status_date ?? null
   }, [viewSnapshot, versions, currentProject?.status_date])
   const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
+  const [discardSignal, setDiscardSignal] = useState(0)
   const progressStatusDate = previewStatusDate ?? effectiveStatusDate
   const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, progressStatusDate), [tasks, progressStatusDate])
   // 项目精度（创建时固定）
@@ -308,6 +309,10 @@ export default function ProjectPage() {
         onVisibleColsChange={handleVisibleColsChange}
         indicators={indicators}
         onIndicatorsChange={handleIndicatorsChange}
+        onDiscardChanges={() => {
+          setPreviewStatusDate(null)
+          setDiscardSignal(n => n + 1)
+        }}
       />
 
       {showProjectLines && (
@@ -332,6 +337,7 @@ export default function ProjectPage() {
             readOnly={isViewOnly}
             showComparison={showComparison}
             onStatusDatePreviewChange={setPreviewStatusDate}
+            discardSignal={discardSignal}
           />
         </div>
         {showAI && (

@@ -148,6 +148,7 @@ interface GanttToolbarProps {
   onVisibleColsChange?: (cols: OptionalCol[]) => void
   indicators?: IndicatorsConfig
   onIndicatorsChange?: (next: IndicatorsConfig) => void
+  onDiscardChanges?: () => void
 }
 
 export default function GanttToolbar({
@@ -170,6 +171,7 @@ export default function GanttToolbar({
   onVisibleColsChange,
   indicators,
   onIndicatorsChange,
+  onDiscardChanges,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
   const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, editDescriptions, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
@@ -1509,9 +1511,10 @@ export default function GanttToolbar({
     dispatch(clearDirty())
     dispatch(clearComparison())
     dispatch(clearDiffFilter())
+    onDiscardChanges?.()
     setReviewOpen(false)
     setReasons({})
-  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId])
+  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId, onDiscardChanges])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
