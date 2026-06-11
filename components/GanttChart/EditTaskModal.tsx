@@ -7,8 +7,7 @@ import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
-import { runFullCascade, applyAutoStartAnchor, snapTaskUpdatesToDayLevel } from '@/lib/clientScheduling'
-import { toDateTimeStr } from '@/lib/clientTime'
+import { runFullCascade, snapTaskUpdatesToDayLevel } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 
@@ -187,6 +186,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (!autoSchedule) return updated
     if (depList.some(d => d.active !== false && d.to_task_id === target.id)) return updated
     if (!target.start_date || !target.end_date) return updated
+    const ct = target.constraint_type
+    if (ct && ct !== 'asap' && ct !== 'none') return updated
     const anchor = autoAnchorForTask(target, taskList)
     const dur = target.duration ?? Math.max(0, Math.round((new Date(target.end_date).getTime() - new Date(target.start_date).getTime()) / 60_000))
     const endDt = new Date(anchor)
@@ -203,19 +204,22 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
     let baseTasks = nextTasks ?? allTasks
     const allChanged: Task[] = []
-    // 先做"自动起点锚定"：删了依赖后，没有任何前置的 auto 任务回到 anchor
-    // 天级项目锚到当天 00:00，分钟级精确到当前分钟。
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const nowStr = isMinute
-      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
-      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
-    const projStartRaw = toDateTimeStr(currentProject?.start_date ?? null)
-    const projStart = !isMinute && projStartRaw
-      ? `${projStartRaw.slice(0, 10)}T00:00:00`
-      : projStartRaw
-    const anchor = projStart && projStart > nowStr ? projStart : nowStr
-    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
+    // 删除依赖后，无前置依赖的自动 + 尽早任务回到任务自身锚点：
+    // 父摘要开始 / 状态时间 / 今天当前时间，取较晚者。
+    const anchorCandidates = baseTasks.filter(t => {
+      if (t.is_deleted || t.auto_schedule === false || t.is_milestone) return false
+      const hadIncoming = deps.some(d => d.active !== false && d.to_task_id === t.id)
+      const hasIncoming = nextDeps.some(d => d.active !== false && d.to_task_id === t.id)
+      return hadIncoming && !hasIncoming
+    })
+    const anchored = anchorCandidates
+      .map(t => ({ original: t, updated: buildAutoScheduleTask(t, true, baseTasks, nextDeps) }))
+      .filter(({ original, updated }) =>
+        updated.start_date !== original.start_date
+        || updated.end_date !== original.end_date
+        || updated.duration !== original.duration
+      )
+      .map(({ updated }) => updated)
     if (anchored.length > 0) {
       const byId = new Map(anchored.map(t => [t.id, t]))
       baseTasks = baseTasks.map(t => byId.get(t.id) ?? t)
@@ -243,7 +247,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
         setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
       }
     }
-  }, [dispatch, allTasks, taskId, currentProject?.start_date, dtSlice, durMul])
+  }, [dispatch, allTasks, deps, taskId, dtSlice, durMul, buildAutoScheduleTask])
 
   // ── Add predecessor ──────────────────────────────────────────────────
   const handleAddPredecessor = useCallback((fromTaskId: string) => {

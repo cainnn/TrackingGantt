@@ -15,7 +15,6 @@ import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import {
   runFullCascade,
-  applyAutoStartAnchor,
   collapseDeletedTaskSuccessors,
   rollupSummaryTasks,
   findUpperConstraintViolations,
@@ -2158,6 +2157,8 @@ export default function GanttChart({
     if (!autoSchedule) return updated
     const hasIncoming = nextDeps.some(d => d.active !== false && d.to_task_id === task.id)
     if (hasIncoming || !task.start_date || !task.end_date) return updated
+    const ct = task.constraint_type
+    if (ct && ct !== 'asap' && ct !== 'none') return updated
 
     const anchor = autoAnchorForTask(task, allTasks)
     const dur = task.duration ?? Math.max(0, diffMins(new Date(task.start_date), new Date(task.end_date)))
@@ -2173,21 +2174,18 @@ export default function GanttChart({
   // ── 本地依赖变更后重算：先 anchor（拉无依赖任务回 anchor），再 cascade ──
   const recascade = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
     let baseTasks = nextTasks ?? tasks
-    // 计算 anchor：分钟级精确到分钟，天级对齐到 00:00
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const nowStr = isMinute
-      ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
-      : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
-    const projRaw = currentProject?.start_date ? String(currentProject.start_date) : null
-    const projStart = !isMinute && projRaw
-      ? `${projRaw.slice(0, 10)}T00:00:00`
-      : (projRaw ? projRaw.slice(0, 19).replace(' ', 'T') : null)
-    const anchor = projStart && projStart > nowStr ? projStart : nowStr
-    const anchored = applyAutoStartAnchor(baseTasks, nextDeps, anchor)
     const merged = new Map<string, Task>()
-    if (anchored.length > 0) {
-      for (const t of anchored) merged.set(t.id, t)
+    for (const t of baseTasks) {
+      if (t.is_deleted || t.auto_schedule === false || t.is_milestone) continue
+      const hadIncoming = deps.some(d => d.active !== false && d.to_task_id === t.id)
+      const hasIncoming = nextDeps.some(d => d.active !== false && d.to_task_id === t.id)
+      if (!hadIncoming || hasIncoming) continue
+      const anchored = buildAutoScheduleTask(t, true, nextDeps, baseTasks)
+      if (anchored.start_date !== t.start_date || anchored.end_date !== t.end_date || anchored.duration !== t.duration) {
+        merged.set(t.id, anchored)
+      }
+    }
+    if (merged.size > 0) {
       baseTasks = baseTasks.map(t => merged.get(t.id) ?? t)
     }
     const cascaded = runFullCascade(baseTasks, nextDeps, { isMinute })
@@ -2198,7 +2196,7 @@ export default function GanttChart({
       dispatch(updateTasks(list))
       dispatch(markDirty(list.map(t => t.id)))
     }
-  }, [dispatch, tasks, isMinute, currentProject?.start_date])
+  }, [dispatch, tasks, deps, isMinute, buildAutoScheduleTask])
 
   // ── 自动排程开关 ────────────────────────────────────────────────────────
   const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {

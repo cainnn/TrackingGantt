@@ -304,6 +304,7 @@ export default function GanttToolbar({
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
+      auto_schedule: t.auto_schedule,
       parent_id: t.parent_id,
     })))
     setBaselineTasks(livingTasks.map(t => ({ ...t })))
@@ -320,6 +321,7 @@ export default function GanttToolbar({
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
+      auto_schedule: t.auto_schedule,
       parent_id: t.parent_id,
     }))
     return diffSnapshots(baseline, currentSnap, { isMinute })
@@ -532,22 +534,42 @@ export default function GanttToolbar({
     return { primaryCodes: primary, passiveReasonMap: passive }
   }, [changeDiffs, tasks, dependencies, dirtyIds])
 
+  const manualReasonCodes = React.useMemo(() => {
+    const currentByCode = new Map(tasks.map(t => [t.task_code, t]))
+    const baselineByCode = new Map(baselineTasks.map(t => [t.task_code, t]))
+    const codes = new Set<string>()
+    for (const d of changeDiffs) {
+      const current = currentByCode.get(d.task_code)
+      const old = baselineByCode.get(d.task_code)
+      if (current?.auto_schedule === false || (d.type === 'removed' && old?.auto_schedule === false)) {
+        codes.add(d.task_code)
+      }
+    }
+    return codes
+  }, [changeDiffs, tasks, baselineTasks])
+
+  const requiredReasonCodes = React.useMemo(() => {
+    const codes = new Set(primaryCodes)
+    for (const code of manualReasonCodes) codes.add(code)
+    return codes
+  }, [primaryCodes, manualReasonCodes])
+
   const openReview = useCallback(() => {
     // 用自动描述预填主动变更的原因
     const prefilled: Record<string, string> = {}
     for (const [taskId, desc] of Object.entries(editDescriptions)) {
       const t = tasks.find(t => t.id === taskId)
-      if (t && primaryCodes.has(t.task_code)) {
+      if (t && requiredReasonCodes.has(t.task_code)) {
         prefilled[t.task_code] = desc
       }
     }
     setReasons(prefilled)
     setReviewOpen(true)
-  }, [editDescriptions, tasks, primaryCodes])
+  }, [editDescriptions, tasks, requiredReasonCodes])
   // 有任意变更（任务/依赖/状态日期）即视为可提交；
   // 任务变更里所有主动项需要填理由，纯状态日期变更不需要理由。
   const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged) &&
-    changeDiffs.every(d => !primaryCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
+    changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
 
   // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
   const initVersionRef = useRef(false)
@@ -1446,7 +1468,7 @@ export default function GanttToolbar({
     // 3. 创建版本快照
     const reasonMap: Record<string, string> = {}
     for (const d of changeDiffs) {
-      if (primaryCodes.has(d.task_code)) {
+      if (requiredReasonCodes.has(d.task_code)) {
         const r = (reasons[d.task_code] ?? '').trim()
         if (r) reasonMap[d.task_code] = r
       } else if (passiveReasonMap[d.task_code]) {
@@ -1483,6 +1505,7 @@ export default function GanttToolbar({
         start_date: t.start_date, end_date: t.end_date,
         duration: t.duration, assignee: t.assignee,
         percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
+        auto_schedule: t.auto_schedule,
         parent_id: t.parent_id,
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
@@ -1497,7 +1520,7 @@ export default function GanttToolbar({
       alert(`版本保存失败：${snapshotData.error ?? '未知错误'}`)
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
-      changeDiffs, versions, reasons, primaryCodes, passiveReasonMap,
+      changeDiffs, versions, reasons, primaryCodes, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, lastVersionDate, statusDateChanged,
       isMinute, snapshotEndForBaseline])
 
@@ -2152,11 +2175,11 @@ export default function GanttToolbar({
                     </div>
                   )}
                   <div className="mt-2">
-                    {primaryCodes.has(d.task_code) ? (
+                    {requiredReasonCodes.has(d.task_code) ? (
                       <textarea
                         value={reasons[d.task_code] ?? ''}
                         onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
-                        placeholder="变更原因（必填）"
+                        placeholder={manualReasonCodes.has(d.task_code) ? '手动任务原因（必填）' : '变更原因（必填）'}
                         rows={2}
                         className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
                           (reasons[d.task_code] ?? '').trim().length === 0
@@ -2224,7 +2247,7 @@ export default function GanttToolbar({
               <button
                 onClick={() => { setReviewOpen(false); handleConfirmChanges() }}
                 disabled={statusDateSaving || !allReasonsFilled}
-                title={!allReasonsFilled ? '请为每项变更填写原因' : ''}
+                title={!allReasonsFilled ? '请为主动变更和手动任务填写原因' : ''}
                 className="px-4 py-2 text-sm text-white bg-green-600 rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed cursor-pointer"
               >
                 {statusDateSaving ? '保存中...' : '确认并保存'}

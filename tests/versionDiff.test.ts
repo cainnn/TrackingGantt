@@ -13,6 +13,7 @@ function task(partial: Partial<SnapshotTask> & Pick<SnapshotTask, 'task_code'>):
     assignee: partial.assignee ?? null,
     percent_done: partial.percent_done ?? 0,
     is_milestone: partial.is_milestone ?? false,
+    auto_schedule: partial.auto_schedule ?? true,
     parent_id: partial.parent_id ?? null,
     order_index: partial.order_index ?? 0,
   }
@@ -27,6 +28,19 @@ test('day-level diff ignores sub-day date and duration unit noise', () => {
   ]
 
   assert.deepEqual(diffSnapshots(oldTasks, newTasks, { isMinute: false }), [])
+})
+
+test('reports task type changes between auto and manual', () => {
+  const diffs = diffSnapshots(
+    [task({ task_code: '1', auto_schedule: true })],
+    [task({ task_code: '1', auto_schedule: false })],
+    { isMinute: false },
+  )
+
+  assert.equal(diffs.length, 1)
+  assert.deepEqual(diffs[0].changes, [
+    { field: '任务类型', old: '自动', new: '手动' },
+  ])
 })
 
 test('day-level diff reports whole-day schedule changes', () => {
