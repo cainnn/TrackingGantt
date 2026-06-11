@@ -1703,18 +1703,19 @@ export default function GanttChart({
     const onUp = async (e: MouseEvent) => {
       if (statusDateDrag) {
         const latest = pendingStatusPreview.current ?? previewStatusDate
+        const committedStatusDate = statusDate ?? null
         if (statusPreviewRaf.current != null) {
           window.cancelAnimationFrame(statusPreviewRaf.current)
           statusPreviewRaf.current = null
         }
         pendingStatusPreview.current = null
         setStatusDateDrag(null)
-        if (statusDateDrag.dragging && latest) {
-          setPreviewStatusDate(latest)
-          onStatusDatePreviewChange?.(latest)
+        if (latest && latest !== committedStatusDate) {
           if (!readOnly && !viewSnapshot) {
             dispatch(setStatusDate({ projectId, statusDate: latest }))
           }
+          setPreviewStatusDate(null)
+          onStatusDatePreviewChange?.(null)
         } else {
           setPreviewStatusDate(null)
           onStatusDatePreviewChange?.(null)
