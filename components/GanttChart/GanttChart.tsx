@@ -45,6 +45,7 @@ const COL_START  =  80
 const COL_END    =  80
 const COL_PRED   =  56
 const COL_SUCC   =  56
+const COL_TASK_TYPE = 64
 const COL_CTYPE  = 100
 const COL_CDATE  =  88
 const COL_DDATE  =  88
@@ -54,9 +55,10 @@ const MIN_NAME_W   = 60
 // 限制类型 & 状态候选值
 export { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE, CONSTRAINT_NEEDS_DATE } from './constants'
 import { CONSTRAINT_TYPES, DEFAULT_CONSTRAINT_TYPE } from './constants'
-export type AutoStatus = 'notstarted' | 'started' | 'completed' | 'ahead' | 'late' | 'pushed'
+export type AutoStatus = 'notstarted' | 'normal' | 'started' | 'completed' | 'ahead' | 'late' | 'pushed'
 export const STATUS_META: Record<AutoStatus, { label: string; color: string }> = {
   notstarted: { label: '未开始',   color: '#6b7280' },
+  normal:     { label: '正常',     color: '#16a34a' },
   started:    { label: '进行中',   color: '#2563eb' },
   completed:  { label: '已完成',   color: '#16a34a' },
   ahead:      { label: '提前完成', color: '#059669' },
@@ -80,6 +82,7 @@ export function computeTaskStatus(
     prevTaskIds?: Set<string>  // 上期快照存在的任务 ID 集合，用于识别"新增任务"
     seqMap?: Map<string, number>  // 左列"编号"的 DFS 序号映射，用于归因显示
     isMinute?: boolean  // 项目粒度，影响归因里 duration 文字单位
+    hasPreviousStatusVersion?: boolean
   },
 ): { status: AutoStatus; reason: string } {
   const dayOnly = ctx?.isMinute === false
@@ -87,6 +90,11 @@ export function computeTaskStatus(
   const curEnd   = t.end_date ? String(t.end_date) : null
   const ref      = statusDate ?? new Date()
   const timePct  = timeBasedPercent(t, ref)
+  if (ctx?.hasPreviousStatusVersion === false) {
+    return timePct > 0 || (t.percent_done ?? 0) > 0
+      ? { status: 'normal', reason: '' }
+      : { status: 'notstarted', reason: '' }
+  }
   if (timePct >= 100 || (t.percent_done ?? 0) >= 100) {
     if (baseline && curEnd && curEnd < baseline) return { status: 'ahead', reason: '实际完成早于基线' }
     return { status: 'completed', reason: '' }
@@ -224,7 +232,7 @@ export function computeTaskStatus(
   return { status: 'notstarted', reason: '' }
 }
 // Optional column keys (编号 and 任务名称 are always shown)
-export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive'
+export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'taskType' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive'
 export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
   { key: 'assignee',   label: '责任人',   width: COL_ASSIGN },
   { key: 'status',     label: '状态',     width: COL_STATUS },
@@ -235,12 +243,13 @@ export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number
   { key: 'pred',       label: '前导',     width: COL_PRED },
   { key: 'succ',       label: '后继',     width: COL_SUCC },
   { key: 'lag',        label: '延迟',     width: 60 },
+  { key: 'taskType',   label: '任务类型', width: COL_TASK_TYPE },
   { key: 'ctype',      label: '限制类型', width: COL_CTYPE },
   { key: 'cdate',      label: '限制日期', width: COL_CDATE },
   { key: 'ddate',      label: '截止日期', width: COL_DDATE },
   { key: 'inactive',   label: '无效',     width: 60 },
 ]
-export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'status', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'ctype', 'cdate', 'ddate']
+export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'status', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'taskType', 'ctype', 'cdate', 'ddate']
 
 // 指示器配置：在任务条上绘制附加标记
 export interface IndicatorsConfig {
@@ -473,9 +482,8 @@ export default function GanttChart({
   }, [discardSignal, onStatusDatePreviewChange])
 
   // ── 上一次状态日期快照的 end_date（用于状态列比对） ─────────────────────
-  // 取 versions 中"最近的前一次"状态日期快照：若有 >=2 个 status_date 快照，
-  // 取第二新的（因为第一新的可能就是当前"确认变更"刚创建的、与当前状态一致）；
-  // 若只有一个，用它作为 baseline
+  // 取 versions 中"最近的前一次"状态日期快照：默认取第二新的状态版本。
+  // 如果只有一个状态版本，说明没有"上一次状态日期版本"，状态列不做延期对比。
   const [latestSnapshotEnds, setLatestSnapshotEnds] = useState<Map<string, string>>(new Map())
   // 上期快照存在的任务 ID 集合（用于检测"本期新增"的任务作为延期根源）
   const [prevSnapshotTaskIds, setPrevSnapshotTaskIds] = useState<Set<string>>(new Set())
@@ -497,7 +505,7 @@ export default function GanttChart({
       const idx = snapshots.findIndex(v => v.id === viewSnapshot.versionId)
       baseline = idx >= 0 ? snapshots[idx + 1] : undefined
     } else {
-      baseline = snapshots.length >= 2 ? snapshots[1] : snapshots[0]
+      baseline = snapshots.length >= 2 ? snapshots[1] : undefined
     }
     if (!baseline) {
       setLatestSnapshotEnds(new Map())
@@ -968,10 +976,11 @@ export default function GanttChart({
     // 列筛选（多列并列）
     const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
     const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
-    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
+    const hasPreviousStatusVersion = latestSnapshotEnds.size > 0
+    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute, hasPreviousStatusVersion }
     const statusValue = (t: Task): string => {
       const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
-      const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+      const isNewTask = hasPreviousStatusVersion && !prevSnapshotTaskIds.has(t.id)
       if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
       return st
     }
@@ -987,8 +996,9 @@ export default function GanttChart({
           case 'pred':       return deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
           case 'succ':       return deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
           case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d ? String(d.lag ?? 0) : '' }
-          case 'ctype':      return t.constraint_type ?? 'asap'
-          case 'cdate':      return (t.constraint_date ?? '').split('T')[0]
+          case 'taskType':   return t.auto_schedule === false ? '手动' : '自动'
+          case 'ctype':      return t.auto_schedule === false ? '' : (t.constraint_type ?? 'asap')
+          case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '').split('T')[0]
           case 'ddate':      return (t.deadline ?? '').split('T')[0]
           case 'status':     return statusValue(t)
           case 'inactive':   return t.inactive ? '是' : '否'
@@ -1030,8 +1040,9 @@ export default function GanttChart({
           case 'pred':       return deps.filter(d => d.to_task_id === t.id).length
           case 'succ':       return deps.filter(d => d.from_task_id === t.id).length
           case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d?.lag ?? 0 }
-          case 'ctype':      return t.constraint_type ?? ''
-          case 'cdate':      return t.constraint_date ?? ''
+          case 'taskType':   return t.auto_schedule === false ? '手动' : '自动'
+          case 'ctype':      return t.auto_schedule === false ? '' : (t.constraint_type ?? '')
+          case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '')
           case 'ddate':      return t.deadline ?? ''
           case 'status':     return statusValue(t)
           default:           return 0
@@ -1064,7 +1075,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, isMinute])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute])
 
   const progressTasks = useMemo(() => {
     if (Object.keys(previewMap).length === 0) return tasks
@@ -2116,16 +2127,48 @@ export default function GanttChart({
     dispatch(setEditDescription({ taskId, description: `修改了「${t.name}」的${label}` }))
   }, [tasks, deps, dispatch, isMinute])
 
-  // ── 自动排程开关 ────────────────────────────────────────────────────────
-  const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
-    const t = tasks.find(x => x.id === taskId)
-    if (!t) return
+  const normalizeAnchor = useCallback((value: string | Date | null | undefined): string | null => {
+    if (!value) return null
+    const d = value instanceof Date ? value : new Date(String(value))
+    if (isNaN(d.getTime())) return null
+    return isMinute ? fmtDt(d) : `${fmtDate(sod(d))}T00:00:00`
+  }, [isMinute])
 
-    const updated = { ...t, auto_schedule: autoSchedule }
-    dispatch(updateTasks([updated]))
-    dispatch(markDirty([taskId]))
-    dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
-  }, [tasks, dispatch])
+  const autoAnchorForTask = useCallback((task: Task, allTasks: Task[] = tasks): string => {
+    const candidates: string[] = []
+    const today = normalizeAnchor(new Date())
+    if (today) candidates.push(today)
+    const statusAnchor = normalizeAnchor(effectiveChartStatusDate)
+    if (statusAnchor) candidates.push(statusAnchor)
+    const parentStart = task.parent_id
+      ? normalizeAnchor(allTasks.find(x => x.id === task.parent_id)?.start_date)
+      : null
+    if (parentStart) candidates.push(parentStart)
+    candidates.sort()
+    return candidates[candidates.length - 1] ?? today ?? fmtDt(new Date())
+  }, [tasks, effectiveChartStatusDate, normalizeAnchor])
+
+  const buildAutoScheduleTask = useCallback((
+    task: Task,
+    autoSchedule: boolean,
+    nextDeps: Dependency[] = deps,
+    allTasks: Task[] = tasks,
+  ): Task => {
+    const updated = { ...task, auto_schedule: autoSchedule }
+    if (!autoSchedule) return updated
+    const hasIncoming = nextDeps.some(d => d.active !== false && d.to_task_id === task.id)
+    if (hasIncoming || !task.start_date || !task.end_date) return updated
+
+    const anchor = autoAnchorForTask(task, allTasks)
+    const dur = task.duration ?? Math.max(0, diffMins(new Date(task.start_date), new Date(task.end_date)))
+    const newEndDate = addMins(new Date(anchor), dur)
+    return {
+      ...updated,
+      start_date: anchor,
+      end_date: isMinute ? fmtDt(newEndDate) : `${fmtDate(sod(newEndDate))}T00:00:00`,
+      duration: dur,
+    }
+  }, [deps, tasks, autoAnchorForTask, isMinute])
 
   // ── 本地依赖变更后重算：先 anchor（拉无依赖任务回 anchor），再 cascade ──
   const recascade = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
@@ -2156,6 +2199,20 @@ export default function GanttChart({
       dispatch(markDirty(list.map(t => t.id)))
     }
   }, [dispatch, tasks, isMinute, currentProject?.start_date])
+
+  // ── 自动排程开关 ────────────────────────────────────────────────────────
+  const handleAutoScheduleChange = useCallback(async (taskId: string, autoSchedule: boolean) => {
+    const t = tasks.find(x => x.id === taskId)
+    if (!t) return
+
+    const updated = buildAutoScheduleTask(t, autoSchedule, deps, tasks)
+    dispatch(updateTasks([updated]))
+    dispatch(markDirty([taskId]))
+    dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
+    if (autoSchedule) {
+      recascade(deps, tasks.map(x => x.id === taskId ? updated : x))
+    }
+  }, [tasks, deps, dispatch, buildAutoScheduleTask, recascade])
 
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
@@ -2547,7 +2604,7 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
     const next = t.auto_schedule === false  // 当前手动 → 改自动；当前自动 → 改手动
-    const updated = { ...t, auto_schedule: next }
+    const updated = buildAutoScheduleTask(t, next, deps, tasks)
     dispatch(updateTasks([updated]))
     dispatch(markDirty([taskId]))
     // 从手动切回自动：跑级联 + anchor，让任务回到正确位置
@@ -2555,7 +2612,7 @@ export default function GanttChart({
       const nextTasks = tasks.map(x => x.id === taskId ? updated : x)
       recascade(deps, nextTasks)
     }
-  }, [tasks, deps, dispatch, recascade])
+  }, [tasks, deps, dispatch, recascade, buildAutoScheduleTask])
 
   const toggle = useCallback((id: string) => {
     setExpanded(prev=>({ ...prev, [id]:!(prev[id]??true) }))
@@ -2634,8 +2691,9 @@ export default function GanttChart({
       pred:       headerW('前导'),
       succ:       headerW('后继'),
       lag:        headerW('延迟'),
-      ctype:      Math.max(headerW('限制类型'), contentW(t => t.constraint_type ?? 'asap')),
-      cdate:      Math.max(headerW('限制日期'), contentW(t => (t.constraint_date ?? '').split('T')[0])),
+      taskType:   Math.max(headerW('任务类型'), contentW(t => t.auto_schedule === false ? '手动' : '自动')),
+      ctype:      Math.max(headerW('限制类型'), contentW(t => t.auto_schedule === false ? '' : (t.constraint_type ?? 'asap'))),
+      cdate:      Math.max(headerW('限制日期'), contentW(t => t.auto_schedule === false ? '' : (t.constraint_date ?? '').split('T')[0])),
       ddate:      Math.max(headerW('截止日期'), contentW(t => (t.deadline ?? '').split('T')[0])),
       status:     Math.max(headerW('状态'),     contentW(t => t.status ?? '')),
       inactive:   Math.max(headerW('无效'),     contentW(t => t.inactive ? '是' : '否')),
@@ -2655,7 +2713,7 @@ export default function GanttChart({
   const leftInnerW = Math.max(leftNaturalW, effectivePanelW)
   // Map visible column keys to their computed widths
   const visibleColWidths = useMemo(() => {
-    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, ctype: 0, cdate: 0, ddate: 0, status: 0, inactive: 0 }
+    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, taskType: 0, ctype: 0, cdate: 0, ddate: 0, status: 0, inactive: 0 }
     const visibleKeys = OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => c.key)
     visibleKeys.forEach((k, i) => { map[k] = rightColWidths[i] ?? 0 })
     return map
@@ -2668,6 +2726,7 @@ export default function GanttChart({
   const colPredW   = visibleColWidths.pred
   const colSuccW   = visibleColWidths.succ
   const colLagW    = visibleColWidths.lag
+  const colTaskTypeW = visibleColWidths.taskType
   const colCtypeW  = visibleColWidths.ctype
   const colCdateW  = visibleColWidths.cdate
   const colDDateW  = visibleColWidths.ddate
@@ -2681,10 +2740,11 @@ export default function GanttChart({
     const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
     const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
     const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
-    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute }
+    const hasPreviousStatusVersion = latestSnapshotEnds.size > 0
+    const statusCtx = { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, isMinute, hasPreviousStatusVersion }
     const statusValue = (t: Task): string => {
       const st = computeTaskStatus(byIdForStatus.get(t.id) ?? t, sdForStatus, statusCtx).status
-      const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+      const isNewTask = hasPreviousStatusVersion && !prevSnapshotTaskIds.has(t.id)
       if (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed')) return `new:${st}`
       return st
     }
@@ -2700,8 +2760,9 @@ export default function GanttChart({
         const d = deps.find(x => x.to_task_id === t.id)
         return d ? String(d.lag ?? 0) : ''
       },
-      ctype:      t => t.constraint_type ?? 'asap',
-      cdate:      t => fmt(t.constraint_date),
+      taskType:   t => t.auto_schedule === false ? '手动' : '自动',
+      ctype:      t => t.auto_schedule === false ? '' : (t.constraint_type ?? 'asap'),
+      cdate:      t => t.auto_schedule === false ? '' : fmt(t.constraint_date),
       ddate:      t => fmt(t.deadline),
       status:     statusValue,
       inactive:   t => t.inactive ? '是' : '否',
@@ -2713,7 +2774,7 @@ export default function GanttChart({
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds])
+  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
@@ -2879,6 +2940,7 @@ export default function GanttChart({
           {renderColHeader('pred', '前导', colPredW)}
           {renderColHeader('succ', '后继', colSuccW)}
           {renderColHeader('lag', '延迟', colLagW)}
+          {renderColHeader('taskType', '任务类型', colTaskTypeW)}
           {renderColHeader('ctype', '限制类型', colCtypeW)}
           {renderColHeader('cdate', '限制日期', colCdateW)}
           {renderColHeader('ddate', '截止日期', colDDateW)}
@@ -3050,10 +3112,11 @@ export default function GanttChart({
                     // 所有前置任务也需要覆盖 baseline，否则 isEndExtended 无法识别上游延期
                     // prevTaskIds 用于识别"本期新增任务"作为延期根源
                     // seqMap 让归因文案里的编号与左列"编号"一致
+                    const hasPreviousStatusVersion = latestSnapshotEnds.size > 0
                     const { status: st, reason: statusReason } = computeTaskStatus(
                       taskForStatus,
                       effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null,
-                      { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap, isMinute },
+                      { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap, isMinute, hasPreviousStatusVersion },
                     )
                     const meta = STATUS_META[st]
                     let deltaText = ''
@@ -3065,7 +3128,7 @@ export default function GanttChart({
                       }
                     }
                     // 本期新增（上期快照没有）且当前仍是普通状态 → 前缀"新任务，"
-                    const isNewTask = prevSnapshotTaskIds.size > 0 && !prevSnapshotTaskIds.has(t.id)
+                    const isNewTask = hasPreviousStatusVersion && !prevSnapshotTaskIds.has(t.id)
                     const labelText = (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed'))
                       ? `新任务，${meta.label}`
                       : meta.label
@@ -3274,13 +3337,42 @@ export default function GanttChart({
                   </div>
                   )}
 
+                  {/* ── 任务类型 ─────────────────────────────────── */}
+                  {colTaskTypeW > 0 && (
+                  <div style={{ width: colTaskTypeW, order: colOrderOf('taskType') }}
+                       className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('taskType')}`}
+                       onClick={pickCell('taskType')}
+                       onDoubleClick={e => { e.stopPropagation(); if (!readOnly && !row.hasChildren) setActiveEditor({ taskId: t.id, col: 'taskType' }) }}>
+                    {row.hasChildren ? (
+                      <span className="text-[11px] text-gray-300 w-full text-center">—</span>
+                    ) : activeEditor?.taskId === t.id && activeEditor?.col === 'taskType' ? (
+                      <select autoFocus
+                        className="text-[11px] border border-blue-400 rounded px-0.5 bg-white text-gray-700 focus:outline-none cursor-pointer w-full"
+                        value={t.auto_schedule === false ? 'manual' : 'auto'}
+                        onClick={e => e.stopPropagation()}
+                        onBlur={() => setActiveEditor(null)}
+                        onChange={e => {
+                          handleAutoScheduleChange(t.id, e.target.value === 'auto')
+                          setActiveEditor(null)
+                        }}>
+                        <option value="auto">自动</option>
+                        <option value="manual">手动</option>
+                      </select>
+                    ) : (
+                      <span className={`text-[11px] truncate w-full ${t.auto_schedule === false ? 'text-amber-700' : 'text-gray-600'}`}>
+                        {t.auto_schedule === false ? '手动' : '自动'}
+                      </span>
+                    )}
+                  </div>
+                  )}
+
                   {/* ── 限制类型 ─────────────────────────────────── */}
                   {colCtypeW > 0 && (
                   <div style={{ width: colCtypeW, order: colOrderOf('ctype') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ctype')}`}
                        onClick={pickCell('ctype')}
-                       onDoubleClick={e => { e.stopPropagation(); if (!row.hasChildren) setActiveEditor({ taskId: t.id, col: 'ctype' }) }}>
-                    {row.hasChildren ? (
+                       onDoubleClick={e => { e.stopPropagation(); if (!readOnly && !row.hasChildren && t.auto_schedule !== false) setActiveEditor({ taskId: t.id, col: 'ctype' }) }}>
+                    {row.hasChildren || t.auto_schedule === false ? (
                       <span className="text-[11px] text-gray-300 w-full text-center">—</span>
                     ) : activeEditor?.taskId === t.id && activeEditor?.col === 'ctype' ? (
                       <select autoFocus
@@ -3304,7 +3396,7 @@ export default function GanttChart({
                   {colCdateW > 0 && (() => {
                     const ct = t.constraint_type || DEFAULT_CONSTRAINT_TYPE
                     const meta = CONSTRAINT_TYPES.find(c => c.value === ct)
-                    const needsDate = !!meta?.needsDate && !row.hasChildren
+                    const needsDate = !!meta?.needsDate && !row.hasChildren && t.auto_schedule !== false
                     const dv = (t.constraint_date ?? '').split('T')[0]
                     const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'cdate'
                     return (

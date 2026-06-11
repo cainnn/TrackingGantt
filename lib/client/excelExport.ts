@@ -26,12 +26,13 @@ function buildStatusText(
   deps: Dependency[],
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
+  hasPreviousStatusVersion = !!prevTaskIds && prevTaskIds.size > 0,
 ): string {
   const { status: st, reason } = computeTaskStatus(t, statusDate, {
-    allTasks, deps, prevTaskIds, seqMap,
+    allTasks, deps, prevTaskIds, seqMap, hasPreviousStatusVersion,
   })
   const baseLabel = STATUS_META[st]?.label ?? st
-  const isNewTask = !!prevTaskIds && prevTaskIds.size > 0 && !prevTaskIds.has(t.id)
+  const isNewTask = hasPreviousStatusVersion && !!prevTaskIds && !prevTaskIds.has(t.id)
   const label = (isNewTask && (st === 'notstarted' || st === 'started' || st === 'completed'))
     ? `新任务，${baseLabel}`
     : baseLabel
@@ -175,6 +176,7 @@ function buildRowData(
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
   isMinute: boolean = true,
+  hasPreviousStatusVersion: boolean = !!prevTaskIds && prevTaskIds.size > 0,
 ) {
   const t = ft.task
   return {
@@ -196,7 +198,7 @@ function buildRowData(
     rollup: t.rollup ? '是' : '否',
     inactive: t.inactive ? '是' : '否',
     project_boundary: t.project_boundary ?? '',
-    status: buildStatusText(t, statusDate, allTasks, deps, prevTaskIds, seqMap),
+    status: buildStatusText(t, statusDate, allTasks, deps, prevTaskIds, seqMap, hasPreviousStatusVersion),
     deadline: fmtCellDt(t.deadline),
     baseline_end_date: fmtCellDt(t.baseline_end_date),
     note: t.note ?? '',
@@ -253,12 +255,13 @@ function populateSheet(
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
   isMinute: boolean = true,
+  hasPreviousStatusVersion: boolean = !!prevTaskIds && prevTaskIds.size > 0,
 ) {
   ws.columns = COLUMNS as ExcelJS.Column[]
   styleHeaderRow(ws)
 
   for (const ft of flatTasks) {
-    const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap, isMinute)
+    const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
     const row = ws.addRow(data)
     styleDataRow(ws, row.number, summaryIds.has(ft.task.id), ft.level)
   }
@@ -357,10 +360,11 @@ export async function exportToExcel(
   const statusDateLabel = normalizedStatusDate
     ? (options?.isMinute ? normalizedStatusDate.slice(0, 16).replace('T', ' ') : normalizedStatusDate.slice(0, 10))
     : ''
+  const hasPreviousStatusVersion = !!options?.prevEndMap && options.prevEndMap.size > 0
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false, hasPreviousStatusVersion)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
@@ -372,7 +376,7 @@ export async function exportToExcel(
     // Sheet name max 31 chars, no special chars
     const sheetName = assignee.slice(0, 31).replace(/[\\/*?:\[\]]/g, '_')
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false, hasPreviousStatusVersion)
   }
 
   // ── Project settings sheet ─────────────────────────────────────────

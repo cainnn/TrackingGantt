@@ -155,6 +155,49 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   const fmtDateStr = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+  const normalizeAnchor = useCallback((value: string | Date | null | undefined): string | null => {
+    if (!value) return null
+    const d = value instanceof Date ? value : new Date(String(value))
+    if (isNaN(d.getTime())) return null
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return isMinute
+      ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+      : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+  }, [isMinute])
+  const autoAnchorForTask = useCallback((target: Task, taskList: Task[] = allTasks): string => {
+    const candidates: string[] = []
+    const today = normalizeAnchor(new Date())
+    if (today) candidates.push(today)
+    const statusAnchor = normalizeAnchor(currentProject?.status_date ?? null)
+    if (statusAnchor) candidates.push(statusAnchor)
+    const parentStart = target.parent_id
+      ? normalizeAnchor(taskList.find(x => x.id === target.parent_id)?.start_date)
+      : null
+    if (parentStart) candidates.push(parentStart)
+    candidates.sort()
+    return candidates[candidates.length - 1] ?? today ?? normalizeAnchor(new Date())!
+  }, [allTasks, currentProject?.status_date, normalizeAnchor])
+  const buildAutoScheduleTask = useCallback((
+    target: Task,
+    autoSchedule: boolean,
+    taskList: Task[] = allTasks,
+    depList: Dependency[] = deps,
+  ): Task => {
+    const updated = { ...target, auto_schedule: autoSchedule }
+    if (!autoSchedule) return updated
+    if (depList.some(d => d.active !== false && d.to_task_id === target.id)) return updated
+    if (!target.start_date || !target.end_date) return updated
+    const anchor = autoAnchorForTask(target, taskList)
+    const dur = target.duration ?? Math.max(0, Math.round((new Date(target.end_date).getTime() - new Date(target.start_date).getTime()) / 60_000))
+    const endDt = new Date(anchor)
+    endDt.setMinutes(endDt.getMinutes() + dur)
+    return {
+      ...updated,
+      start_date: anchor,
+      end_date: normalizeAnchor(endDt),
+      duration: dur,
+    }
+  }, [allTasks, deps, autoAnchorForTask, normalizeAnchor])
 
   // ── 本地依赖变更后跑级联 ─────────────────────────────────────────────
   const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
@@ -288,26 +331,14 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       dispatch(markDirty([task.id]))
       dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为手动排程` }))
     } else {
-      // 切回自动排程：从项目起点开始 + 当前 duration（分钟）
-      const earliest = (currentProject?.start_date ?? '').slice(0, 16) ||
-                       (new Date().toISOString().slice(0, 16))
-      const dur = task.duration ?? 0
-      const startDt = new Date(earliest)
-      const endDt = new Date(startDt.getTime() + dur * 60_000)
-      const pad = (n: number) => String(n).padStart(2, '0')
-      const fmtTok = (d: Date) => isMinute
-        ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-        : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
-      const startStr = fmtTok(startDt)
-      const newEnd = fmtTok(endDt)
-      const updated = { ...task, auto_schedule: true, start_date: startStr, end_date: newEnd, duration: dur }
+      const updated = buildAutoScheduleTask(task, true)
       dispatch(updateTasks([updated]))
       dispatch(markDirty([task.id]))
       dispatch(setEditDescription({ taskId: task.id, description: `「${task.name}」切换为自动排程` }))
-      setStartDate(startStr)
-      setEndDate(newEnd)
+      setStartDate((updated.start_date ?? '').slice(0, dtSlice))
+      setEndDate((updated.end_date ?? '').slice(0, dtSlice))
     }
-  }, [task, allTasks, currentProject, dispatch, projectId])
+  }, [task, dispatch, buildAutoScheduleTask, dtSlice])
 
   const loadLifecycle = useCallback(() => {
     if (tab !== 'history') return
@@ -361,7 +392,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   const handleSave = async () => {
     const clampedStart = (startDate && projStart && startDate < projStart) ? projStart : startDate
-    const updated = {
+    const formTask = {
       ...task,
       name: name.trim() || task.name,
       assignee: assignee.trim() || null,
@@ -379,6 +410,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       inactive,
       project_boundary: projectBoundary,
     }
+    const updated = task.auto_schedule === false && !manualSchedule
+      ? buildAutoScheduleTask(formTask, true, allTasks.map(t => t.id === task.id ? formTask : t), deps)
+      : formTask
     dispatch(updateTasks([updated]))
     dispatch(markDirty([task.id]))
     dispatch(setEditDescription({ taskId: task.id, description: `编辑了任务「${task.name}」` }))

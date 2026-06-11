@@ -86,7 +86,15 @@ export default function ProjectPage() {
         const parsed = JSON.parse(saved) as OptionalCol[]
         const validKeys = new Set(OPTIONAL_COL_META.map(c => c.key))
         const filtered = Array.isArray(parsed) ? parsed.filter(k => validKeys.has(k)) : []
-        if (filtered.length > 0) return filtered
+        if (filtered.length > 0) {
+          if (!filtered.includes('taskType')) {
+            const idx = filtered.includes('ctype')
+              ? filtered.indexOf('ctype')
+              : (filtered.includes('lag') ? filtered.indexOf('lag') + 1 : filtered.length)
+            return [...filtered.slice(0, idx), 'taskType', ...filtered.slice(idx)]
+          }
+          return filtered
+        }
       }
     } catch { /* ignore */ }
     return DEFAULT_VISIBLE_COLS
