@@ -10,7 +10,7 @@ import React, { useEffect, useRef, useState } from 'react'
  *   彻底回避原生 datetime-local 在英语 locale 下变 12h AM/PM。
  */
 export default function YmdDateInput({
-  value, max, min, onChange, includeTime = false, size = 'normal',
+  value, max, min, onChange, includeTime = false, size = 'normal', minuteStep = 15,
 }: {
   value: string
   max?: string
@@ -18,6 +18,7 @@ export default function YmdDateInput({
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
   includeTime?: boolean
   size?: 'normal' | 'compact'
+  minuteStep?: number
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const dateInputRef = useRef<HTMLInputElement>(null)
@@ -30,6 +31,7 @@ export default function YmdDateInput({
   const minPart  = iso.slice(14, 16) || '00'
   const minDt = min ? min.slice(0, 16) : ''
   const maxDt = max ? max.slice(0, 16) : ''
+  const defaultDatePart = datePart || minDt.slice(0, 10)
 
   // 分钟精度：只显示 'YYYY-MM-DD HH:mm'，不带秒
   const ctlVal = (value || '').slice(0, includeTime ? 16 : 10)
@@ -86,10 +88,9 @@ export default function YmdDateInput({
   }
   const onHourChange = (h: string) => {
     if (!datePart) {
-      // 默认填今天
       const t = new Date()
       const today = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`
-      emit(`${today}T${h}:${minPart}`)
+      emit(`${defaultDatePart || today}T${h}:${minPart}`)
     } else {
       emit(`${datePart}T${h}:${minPart}`)
     }
@@ -98,19 +99,24 @@ export default function YmdDateInput({
     if (!datePart) {
       const t = new Date()
       const today = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`
-      emit(`${today}T${hourPart}:${m}`)
+      emit(`${defaultDatePart || today}T${hourPart}:${m}`)
     } else {
       emit(`${datePart}T${hourPart}:${m}`)
     }
   }
 
   const HOURS = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'))
-  const MINUTES = ['00', '15', '30', '45']
+  const normalizedMinuteStep = Number.isFinite(minuteStep) && minuteStep > 0 ? Math.max(1, Math.floor(minuteStep)) : 15
+  const MINUTES = Array.from(
+    { length: Math.ceil(60 / normalizedMinuteStep) },
+    (_, i) => String(Math.min(i * normalizedMinuteStep, 59)).padStart(2, '0'),
+  )
   const visibleHours = includeTime
     ? HOURS.filter(h => {
-        const start = `${datePart}T${h}:59`
-        const end = `${datePart}T${h}:00`
-        if (!datePart) return true
+        const activeDate = defaultDatePart
+        const start = `${activeDate}T${h}:59`
+        const end = `${activeDate}T${h}:00`
+        if (!activeDate) return true
         if (minDt && start < minDt) return false
         if (maxDt && end > maxDt) return false
         return true
@@ -118,8 +124,9 @@ export default function YmdDateInput({
     : HOURS
   const visibleMinutes = includeTime
     ? MINUTES.filter(m => {
-        if (!datePart) return true
-        const v = `${datePart}T${hourPart}:${m}`
+        const activeDate = defaultDatePart
+        if (!activeDate) return true
+        const v = `${activeDate}T${hourPart}:${m}`
         if (minDt && v < minDt) return false
         if (maxDt && v > maxDt) return false
         return true

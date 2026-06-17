@@ -12,7 +12,7 @@ import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
-import { toDateTimeStr } from '@/lib/clientTime'
+import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import YmdDateInput from '@/components/YmdDateInput'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
@@ -190,6 +190,15 @@ export default function GanttToolbar({
     if (!dt) return null
     return isMinute ? dt : dt.slice(0, 10)
   }, [isMinute])
+  const statusDateRange = React.useMemo(() => {
+    if (!isMinute) return { min: undefined, max: undefined }
+    const firstTask = getFlatOrder(tasks).find(t => t.start_date)
+    const min = toDateTimeStr(firstTask?.start_date ?? null)?.slice(0, 16)
+    return {
+      min,
+      max: min ? addMinutesStr(min, 24 * 60)?.slice(0, 16) : undefined,
+    }
+  }, [isMinute, tasks])
   const normalizeStatusDate = useCallback((value: string | null) => {
     if (!value) return null
     const normalized = isMinute
@@ -1607,6 +1616,9 @@ export default function GanttToolbar({
                     value={v}
                     onChange={handleStatusDatePick}
                     includeTime={isMinute}
+                    min={statusDateRange.min}
+                    max={statusDateRange.max}
+                    minuteStep={isMinute ? 1 : 15}
                   />
                 )
               })()}
@@ -1739,6 +1751,9 @@ export default function GanttToolbar({
               value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
               includeTime={isMinute}
+              min={statusDateRange.min}
+              max={statusDateRange.max}
+              minuteStep={isMinute ? 1 : 15}
             />
           </>
         )}
