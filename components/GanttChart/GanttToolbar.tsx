@@ -12,7 +12,7 @@ import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
-import { toDateTimeStr, addMinutesStr } from '@/lib/clientTime'
+import { toDateTimeStr } from '@/lib/clientTime'
 import YmdDateInput from '@/components/YmdDateInput'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
@@ -190,29 +190,13 @@ export default function GanttToolbar({
     if (!dt) return null
     return isMinute ? dt : dt.slice(0, 10)
   }, [isMinute])
-  const statusTimeMin = isMinute
-    ? (toDateTimeStr(currentProject?.start_date ?? null)?.slice(0, 16) ?? undefined)
-    : (currentProject?.start_date?.split('T')[0] ?? undefined)
-  const statusTimeMax = isMinute
-    ? (toDateTimeStr(currentProject?.end_date ?? null)?.slice(0, 16) ?? undefined)
-    : (currentProject?.end_date?.split('T')[0] ?? undefined)
-  const clampStatusDate = useCallback((value: string | null) => {
+  const normalizeStatusDate = useCallback((value: string | null) => {
     if (!value) return null
     const normalized = isMinute
       ? toDateTimeStr(value)?.slice(0, 16)
       : value.slice(0, 10)
-    if (!normalized) return null
-    if (statusTimeMin && normalized < statusTimeMin) return statusTimeMin
-    if (statusTimeMax && normalized > statusTimeMax) return statusTimeMax
-    return normalized
-  }, [isMinute, statusTimeMin, statusTimeMax])
-
-  // 上一版本带状态日期的快照。非当天状态时间必须晚于它；当天允许反复确认。
-  // 分钟级：保留完整 datetime，不再裁到日。
-  const lastVersionDate = React.useMemo(() => {
-    const latest = versions.find(v => !v.is_autosave && v.status_date)
-    return toDateTimeStr(latest?.status_date ?? null)
-  }, [versions])
+    return normalized ?? null
+  }, [isMinute])
 
   // Column settings dropdown
   const [colSettingsOpen, setColSettingsOpen] = useState(false)
@@ -1309,37 +1293,17 @@ export default function GanttToolbar({
   const [statusDateSaving, setStatusDateSaving] = useState(false)
 
   // 状态日期：进入"待确认"流程，仅改 Redux，不直接落库。
-  // 允许任意历史日期以便预览进展；用户点"确认变更"才一并保存（带合规校验和版本快照），
+  // 允许任意日期时间以便预览进展；用户点"确认变更"才一并保存并创建版本快照，
   // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
   const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = clampStatusDate(e.target.value || null)
+    const val = normalizeStatusDate(e.target.value || null)
     dispatch(setStatusDate({ projectId, statusDate: val }))
-  }, [dispatch, projectId, clampStatusDate])
+  }, [dispatch, projectId, normalizeStatusDate])
 
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
     if (!sd || statusDateSaving) return
-
-    // 保存时校验：1) 不晚于当前时刻 2) 非当天状态日期不早于 72 小时前 3) 非当天状态日期不早于上一版本。
-    // 当天状态日期允许反复保存，用于当天内多次确认当前进展。
-    const sdLabel = isMinute ? '状态时间' : '状态日期'
-    const nowStr = toDateTimeStr(new Date())!
-    const isTodayStatusDate = sd.slice(0, 10) === nowStr.slice(0, 10)
-    const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
-    if (sd > nowStr) {
-      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 晚于当前时间 (${fmtDt(nowStr)})`)
-      return
-    }
-    const earliestStr = addMinutesStr(nowStr, -3 * 24 * 60)!
-    if (!isTodayStatusDate && sd < earliestStr) {
-      alert(`无法保存：${sdLabel} ${fmtDt(sd)} 早于 ${fmtDt(earliestStr)}（仅允许最近 72 小时内）`)
-      return
-    }
-    if (!isTodayStatusDate && lastVersionDate && sd <= lastVersionDate) {
-      alert(`无法保存：${sdLabel}必须晚于上一版本 (${fmtDt(lastVersionDate)})`)
-      return
-    }
 
     setStatusDateSaving(true)
 
@@ -1521,7 +1485,7 @@ export default function GanttToolbar({
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, primaryCodes, requiredReasonCodes, passiveReasonMap,
-      baselineTasks, baselineDeps, lastVersionDate, statusDateChanged,
+      baselineTasks, baselineDeps, statusDateChanged,
       isMinute, snapshotEndForBaseline])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
@@ -1643,41 +1607,21 @@ export default function GanttToolbar({
                     value={v}
                     onChange={handleStatusDatePick}
                     includeTime={isMinute}
-                    min={statusTimeMin}
-                    max={statusTimeMax}
                   />
                 )
               })()}
               {(() => {
                 const sd = toDateTimeStr(currentProject?.status_date ?? null)
-                const nowStr = toDateTimeStr(new Date())!
-                const isFuture = !!sd && sd > nowStr
-                const isTodayStatusDate = !!sd && sd.slice(0, 10) === nowStr.slice(0, 10)
-                const fmtDt = (s: string) => s.slice(0, 16).replace('T', ' ')
                 const sdLabel = isMinute ? '状态时间' : '状态日期'
-                const isBeforeLastVersion = !!(
-                  sd
-                  && !isTodayStatusDate
-                  && lastVersionDate
-                  && sd < lastVersionDate
-                )
-                const canSubmit = !!sd && !statusDateSaving && !isFuture && !isBeforeLastVersion && hasChanges
+                const canSubmit = !!sd && !statusDateSaving && hasChanges
                 const tip = !sd
                   ? `请先设置${sdLabel}`
-                  : isFuture ? `${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`
-                  : isBeforeLastVersion ? `${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate!)})`
                   : hasChanges ? '确认变更：保存所有改动并创建版本快照'
                   : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
                       if (!sd) { alert(`请先设置${sdLabel}`); return }
-                      if (sd > nowStr) {
-                        alert(`${sdLabel}不能晚于当前时间 (${fmtDt(nowStr)})`); return
-                      }
-                      if (!isTodayStatusDate && lastVersionDate && sd < lastVersionDate) {
-                        alert(`${sdLabel}不能早于上一版本 (${fmtDt(lastVersionDate)})`); return
-                      }
                       openReview()
                     }}
                     disabled={!canSubmit}
@@ -1795,8 +1739,6 @@ export default function GanttToolbar({
               value={currentProject?.status_date ?? ''}
               onChange={handleStatusDatePick}
               includeTime={isMinute}
-              min={statusTimeMin}
-              max={statusTimeMax}
             />
           </>
         )}

@@ -3,7 +3,6 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
-import { getNowYmdHm, getStatusDateYmd, getTodayYmd, isStatusDateAfterNow, isStatusDateAfterToday } from '@/lib/statusDatePolicy'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -78,48 +77,12 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
     const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
 
-    // 禁止保存未来状态：分钟级按当前分钟校验，天级按当前日期校验。
-    if (statusDate) {
-      const nowYmdHm = getNowYmdHm()
-      const today = nowYmdHm.slice(0, 10)
-      const isFuture = isMinuteProject
-        ? isStatusDateAfterNow(statusDate, nowYmdHm)
-        : isStatusDateAfterToday(statusDate, today)
-      if (isFuture) {
-        await client.query('ROLLBACK')
-        const label = isMinuteProject ? '状态时间' : '状态日期'
-        const limit = isMinuteProject ? nowYmdHm.replace('T', ' ') : today
-        return NextResponse.json(failure(`${label}不能晚于当前${isMinuteProject ? '时间' : '日期'} (${limit})`, 400), { status: 400 })
-      }
-    }
-
-    // 验证：新状态日期必须严格大于上一版本的状态日期
     const lastRes = await client.query(
       `SELECT id, version_number, status_date, snapshot FROM project_versions
        WHERE project_id = $1 ORDER BY version_number DESC LIMIT 1`,
       [projectId],
     )
     const lastVersion = lastRes.rows[0] ?? null
-    if (statusDate && lastVersion?.status_date) {
-      const today = getTodayYmd()
-      const isTodayStatusDate = getStatusDateYmd(statusDate) === today
-      // 分钟级：完整 datetime 比较，避免同日不同时间被误判
-      const toIso = (v: unknown): string => {
-        if (v instanceof Date) {
-          const pad = (n: number) => String(n).padStart(2, '0')
-          return `${v.getFullYear()}-${pad(v.getMonth()+1)}-${pad(v.getDate())}` +
-                 `T${pad(v.getHours())}:${pad(v.getMinutes())}:${pad(v.getSeconds())}`
-        }
-        return String(v).replace(' ', 'T').slice(0, 19)
-      }
-      const lastSD = toIso(lastVersion.status_date)
-      const curSD = toIso(statusDate)
-      if ((isMinuteProject || !isTodayStatusDate) && curSD < lastSD) {
-        await client.query('ROLLBACK')
-        const label = isMinuteProject ? '状态时间' : '状态日期'
-        return NextResponse.json(failure(`${label}不能早于上一版本 (${lastSD.replace('T', ' ').slice(0, 16)})`, 400), { status: 400 })
-      }
-    }
 
     // 确认变更流程必须使用服务端最终落库状态。
     // 前端提交任务后，服务端可能会触发依赖级联、摘要任务重算和天级归整；
