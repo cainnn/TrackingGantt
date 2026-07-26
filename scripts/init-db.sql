@@ -235,6 +235,26 @@ INSERT INTO users (username, email, password_hash)
 VALUES ('admin', 'admin@example.com', '$2b$10$aGgOBHIbgTHw2xtl9gGjb.63smMtPpt.TpyFrlkX/COt1sq/hB9cq')
 ON CONFLICT (username) DO NOTHING;
 
+-- 插入预置项目管理员用户（密码均为 用户名 + 123）
+INSERT INTO users (username, email, password_hash, role)
+VALUES
+  ('adminqu', 'adminqu@example.com', '$2b$10$u9nP05MR/09wl1DQa0f2qOVD.y7gKlhxprVdDA80NL9E9iv794ZoG', 'admin'),
+  ('adminnn', 'adminnn@example.com', '$2b$10$bZlTlBrTbxHjqbkhbTTcjuDb5HJzTEwIJ676VsB/jVEkWaZMP6s3y', 'admin'),
+  ('admingl', 'admingl@example.com', '$2b$10$95fWtQ4siUcPBYe2CtNJwexT0b5gjdW2KZBGf3etNhC5pkutbE6De', 'admin'),
+  ('adminlz', 'adminlz@example.com', '$2b$10$MjJx7KuvzuA4FpVc67PUouxOB/DPl8AKvZAq12JXyY9Gbmo50fP8.', 'admin'),
+  ('adminyl', 'adminyl@example.com', '$2b$10$JmI0C7C5zzjsBgLcSn6H/uhV1OfwAdyixaaI3qfM2Ae9lgFwT5YBO', 'admin'),
+  ('adminbs', 'adminbs@example.com', '$2b$10$Jl6glVGC8w1xEHboXJKcH.cZwqmzGnc1Bq31TH2MlOtE1qzIN41se', 'admin'),
+  ('adminhc', 'adminhc@example.com', '$2b$10$sLOxy7PA3BN9w9DQCDMveOq35Q9uZk7c6GtXpA8w44qqSBrqr2TGu', 'admin'),
+  ('admingg', 'admingg@example.com', '$2b$10$8pMY4kQSVEEq1WU9C9HTBuwONIvoA9AOkoDPYjrmpRD77MUe71J8C', 'admin'),
+  ('adminqz', 'adminqz@example.com', '$2b$10$HHK6ZoHCj4ZEqryLT1TuI.zkIw9wlhc.54AgAwgmTGgffIxR0cHJW', 'admin'),
+  ('adminwz', 'adminwz@example.com', '$2b$10$xuXCq5UbKdH/wI9DYtC/UudZHVrb8Yc/ihUOjT4LKuU6UMQHM4fMa', 'admin'),
+  ('adminbh', 'adminbh@example.com', '$2b$10$BdsXunvx3W2SQ5irBfKASOfnMnsuRQiREE7dep7XwXBMErlzu85Ky', 'admin'),
+  ('admincz', 'admincz@example.com', '$2b$10$lOWdmoxS/3pfj1q1/Z1Ra..MMeZeF7JvAqOVB7jW9y1XS4bBPfTXW', 'admin'),
+  ('adminlb', 'adminlb@example.com', '$2b$10$YjhdPQhp.yUDnYKgHCgUjuVdKlhKqGfRoP9StrhhGgME16FbZnixa', 'admin'),
+  ('adminhz', 'adminhz@example.com', '$2b$10$dI9qIH27hk835VHLepIIM.1S7eFU/M.rCIvaXiYeiMMOsUa6x4rDG', 'admin'),
+  ('adminfcg', 'adminfcg@example.com', '$2b$10$T2EpznM4rfGwTkc0xFci6ObHlEEXZWSu9S4oKbxc1zGKKm51zT5Yi', 'admin')
+ON CONFLICT (username) DO NOTHING;
+
 -- 插入预置只读用户（用户名: view  密码: view123）
 -- 可查看所有项目、试用AI功能，无法保存任何修改
 INSERT INTO users (username, email, password_hash, role)

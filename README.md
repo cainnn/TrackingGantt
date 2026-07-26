@@ -27,11 +27,13 @@ createdb -h localhost -p 5432 -U postgres gantt_app
 npm run db:init
 ```
 
-默认会写入一个测试账号：
+默认会写入以下测试账号：
 
-- 用户名：`admin`
-- 邮箱：`admin@example.com`
-- 密码：`admin123`
+- 超级管理员：`administrator` / `admin123`
+- 默认管理员：`admin` / `admin123`
+- 预置管理员：`adminqu`、`adminnn`、`admingl`、`adminlz`、`adminyl`、`adminbs`、`adminhc`、`admingg`、`adminqz`、`adminwz`、`adminbh`、`admincz`、`adminlb`、`adminhz`、`adminfcg`
+- 预置管理员密码：均为 `用户名 + 123`，例如 `adminqu123`
+- 只读用户：`view` / `view123`
 
 ### 3) Run dev server
 

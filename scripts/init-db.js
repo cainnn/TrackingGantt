@@ -73,11 +73,13 @@ async function initDatabase() {
     });
 
     // 显示测试账号信息
-    const users = await client.query('SELECT username FROM users LIMIT 1');
+    const users = await client.query('SELECT username FROM users ORDER BY username LIMIT 1');
     if (users.rows.length > 0) {
       console.log(`\n测试账号：`);
-      console.log(`  用户名: ${users.rows[0].username}`);
-      console.log(`  密码: admin123`);
+      console.log(`  超级管理员: administrator / admin123`);
+      console.log(`  默认管理员: admin / admin123`);
+      console.log(`  预置管理员: adminqu 等账号，密码均为 用户名 + 123`);
+      console.log(`  只读账号: view / view123`);
       console.log(`  \n提示：也可以访问 http://localhost:3000/register 注册新账号`);
     }
 
