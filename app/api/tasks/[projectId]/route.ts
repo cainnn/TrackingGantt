@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
+import { normalizeDurationMinutes } from '@/lib/taskNumbers'
 import {
   type TaskLike,
   toDateStr, addDaysStr, diffDaysStr,
@@ -371,13 +372,23 @@ export async function POST(req: NextRequest, { params }: Params) {
 
       let normalizedStart = normalizeDate(start_date)
       let normalizedEnd = normalizeDate(end_date)
+      let normalizedDuration: number | null
+      try {
+        normalizedDuration = normalizeDurationMinutes(duration, normalizedStart, normalizedEnd)
+      } catch (err) {
+        await client.query('ROLLBACK')
+        return NextResponse.json(
+          failure(err instanceof Error ? err.message : '工期格式错误', 400),
+          { status: 400 },
+        )
+      }
 
       // 限制开始日期不早于项目开始日期
       {
         const projRes = await client.query('SELECT start_date FROM projects WHERE id = $1', [projectId])
         const projStart = projRes.rows[0]?.start_date ? toDateStr(projRes.rows[0].start_date) : null
         if (projStart && normalizedStart && normalizedStart < projStart) {
-          const dur = (duration as number) ?? 0
+          const dur = normalizedDuration ?? 0
           normalizedStart = projStart
           if (is_milestone) {
             normalizedEnd = projStart
@@ -396,7 +407,7 @@ export async function POST(req: NextRequest, { params }: Params) {
          VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
         [clientId, projectId, await resolveParentId(parent_id, clientId), code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
-         duration ?? null, duration_unit ?? 'day',
+         normalizedDuration, duration_unit ?? 'day',
          percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
          constraint_type ?? 'asap', normalizeDate(constraint_date), normalizeDate(deadline),
          status ?? null, rollup ?? false, inactive ?? false,
@@ -575,6 +586,26 @@ export async function PUT(req: NextRequest, { params }: Params) {
         taskRec.percent_done = 100
         const sd = normalizeDate(taskRec.start_date) ?? toDateStr(old.start_date as string)
         if (sd) taskRec.end_date = sd
+      }
+
+      try {
+        if ('duration' in taskRec) {
+          taskRec.duration = normalizeDurationMinutes(
+            taskRec.duration,
+            (taskRec.start_date as string | Date | null | undefined) ?? (old.start_date as string | Date | null),
+            (taskRec.end_date as string | Date | null | undefined) ?? (old.end_date as string | Date | null),
+          )
+        }
+      } catch (err) {
+        await client.query('ROLLBACK')
+        return NextResponse.json({
+          ok: false,
+          errors: [{
+            taskId: id,
+            field: 'duration',
+            message: err instanceof Error ? err.message : '工期格式错误',
+          }],
+        }, { status: 400 })
       }
 
       // ── 校验字段合法性 ──────────────────────────────────────────────────

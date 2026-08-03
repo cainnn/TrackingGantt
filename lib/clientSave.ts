@@ -5,6 +5,7 @@
  */
 import type { Task, Dependency } from '@/types'
 import { toDateTimeStr } from './clientTime'
+import { normalizeDurationMinutes } from './taskNumbers'
 
 const TASK_FIELDS = [
   'name', 'parent_id', 'assignee', 'start_date', 'end_date',
@@ -98,12 +99,17 @@ export function buildSaveDiff(
   const tasksToUpdate: Task[] = []
   const tasksToDelete: string[] = []
 
+  const normalizeTaskDuration = (task: Task): Task => {
+    const duration = normalizeDurationMinutes(task.duration, task.start_date, task.end_date)
+    return duration === task.duration ? task : { ...task, duration }
+  }
+
   for (const [id, cur] of curTaskMap) {
     const old = baseTaskMap.get(id)
     if (!old) {
-      tasksToAdd.push(cur)
+      tasksToAdd.push(normalizeTaskDuration(cur))
     } else if (!taskFieldsEqual(old, cur)) {
-      tasksToUpdate.push(cur)
+      tasksToUpdate.push(normalizeTaskDuration(cur))
     }
   }
   for (const id of baseTaskMap.keys()) {

@@ -46,3 +46,20 @@ test('renumbers added tasks when client task codes collide with existing tasks o
 
   assert.deepEqual(diff.tasksToAdd.map(t => t.task_code), ['4', '5', '6'])
 })
+
+test('repairs a fractional legacy duration from task dates before updating', () => {
+  const baseline = [task({ id: 'historical', duration: 1440, percent_done: 100 })]
+  const current = [task({
+    id: 'historical',
+    start_date: '2026-06-01T00:00:00',
+    end_date: '2026-06-08T16:00:00',
+    duration: 7.666666666666667,
+    percent_done: 100,
+  })]
+
+  const diff = buildSaveDiff(baseline, deps, current, deps)
+
+  assert.equal(diff.tasksToUpdate.length, 1)
+  assert.equal(diff.tasksToUpdate[0].duration, 11_040)
+  assert.equal(Number.isInteger(diff.tasksToUpdate[0].duration), true)
+})
