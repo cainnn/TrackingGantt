@@ -121,6 +121,27 @@ const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="n
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V2M5 5l3-3 3 3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 
+async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch { /* fall through for HTTP or denied clipboard permission */ }
+  }
+
+  const input = document.createElement('textarea')
+  input.value = text
+  input.setAttribute('readonly', '')
+  input.style.position = 'fixed'
+  input.style.opacity = '0'
+  document.body.appendChild(input)
+  input.select()
+  let copied = false
+  try { copied = document.execCommand('copy') } catch { /* manual copy below */ }
+  document.body.removeChild(input)
+  return copied
+}
+
 // YmdDateInput 提取到 components/YmdDateInput.tsx 复用
 
 // ── Props ─────────────────────────────────────────────────────────────────
@@ -762,9 +783,13 @@ export default function GanttToolbar({
       const data = await response.json()
       if (!response.ok || !data.ok) throw new Error(data.error ?? '创建分享链接失败')
       const url = `${window.location.origin}/share/${data.value.code}`
-      await navigator.clipboard.writeText(url)
       setExportDropdown(false)
-      alert('分享链接已复制，有效期一小时。获得链接的人无需登录，并可使用项目全部功能。')
+      const copied = await copyText(url)
+      if (copied) {
+        alert('分享链接已复制，有效期一小时。获得链接的人无需登录，并可使用项目全部功能。')
+      } else {
+        window.prompt('分享链接已创建，有效期一小时。请手动复制：', url)
+      }
     } catch (error) {
       alert(`创建分享链接失败：${error instanceof Error ? error.message : '未知错误'}`)
     }
