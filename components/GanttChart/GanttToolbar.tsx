@@ -752,6 +752,24 @@ export default function GanttToolbar({
     }
   }, [tasks, dependencies, currentProject, isMinute])
 
+  const handleCreateShareLink = useCallback(async () => {
+    try {
+      const response = await authFetch('/api/share-links', {
+        method: 'POST',
+        headers: authFetchHeaders(true),
+        body: JSON.stringify({ projectId }),
+      })
+      const data = await response.json()
+      if (!response.ok || !data.ok) throw new Error(data.error ?? '创建分享链接失败')
+      const url = `${window.location.origin}/share/${data.value.code}`
+      await navigator.clipboard.writeText(url)
+      setExportDropdown(false)
+      alert('分享链接已复制，有效期一小时。获得链接的人无需登录，并可使用项目全部功能。')
+    } catch (error) {
+      alert(`创建分享链接失败：${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }, [projectId])
+
   // ── Import (Excel + MPP 共用流程) ─────────────────────────────────────
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mppFileInputRef = useRef<HTMLInputElement>(null)
@@ -1869,6 +1887,13 @@ export default function GanttToolbar({
                 <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="1" width="12" height="14" rx="1.5"/><path d="M5 5h6M5 8h6M5 11h6"/><path d="M3 1v14" strokeWidth="2"/></svg>
                 导出 MS Project (.mpp)
               </button>
+              {!readOnly && (
+                <button className="w-full px-3 py-1.5 mt-1 border-t border-gray-100 text-left text-[12px] text-gray-700 hover:bg-blue-50 hover:text-blue-600 flex items-center gap-2 cursor-pointer"
+                        onClick={handleCreateShareLink}>
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.8 7.1l4.4-2.2M5.8 8.9l4.4 2.2"/></svg>
+                  复制一小时分享链接
+                </button>
+              )}
             </div>
           )}
         </div>

@@ -11,7 +11,19 @@ export function getAuthUser(req: NextRequest): Result<JwtPayload> {
     return failure('Unauthorized', 401)
   }
 
-  return verifyToken(token)
+  const auth = verifyToken(token)
+  if (!auth.ok || !auth.value.shareProjectId) return auth
+
+  const projectIds = req.nextUrl.pathname.match(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi) ?? []
+  if (projectIds.some(id => id.toLowerCase() !== auth.value.shareProjectId?.toLowerCase())) {
+    return failure('分享会话无权访问其他项目', 403)
+  }
+
+  const blockedPaths = ['/api/projects', '/api/users']
+  if (blockedPaths.some(path => req.nextUrl.pathname === path)) {
+    return failure('分享会话仅限当前项目', 403)
+  }
+  return auth
 }
 
 /** 检查写权限，view 用户返回 403 响应，admin/administrator 返回 null（放行） */

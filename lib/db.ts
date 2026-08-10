@@ -11,7 +11,10 @@ types.setTypeParser(1082, (val: string) => val)
 // 少一天。直接给字符串就避开这条 Date 转 UTC 的回路。
 types.setTypeParser(1114, (val: string) => (val ? val.replace(' ', 'T') : val))
 
-const globalForPg = globalThis as unknown as { pgPool: Pool | undefined }
+const globalForPg = globalThis as unknown as {
+  pgPool: Pool | undefined
+  shareLinkCleanupTimer: ReturnType<typeof setInterval> | undefined
+}
 
 function envInt(name: string, fallback: number): number {
   const v = process.env[name]
@@ -40,6 +43,20 @@ export const pool =
 
 if (process.env.NODE_ENV !== 'production') {
   globalForPg.pgPool = pool
+}
+
+// 分享链接是临时数据。服务运行期间定期物理删除；创建和兑换接口也会同步清理，
+// 因而重启或无请求期间遗留的过期记录会在下一次使用时立即移除。
+if (!globalForPg.shareLinkCleanupTimer) {
+  const cleanupIntervalMs = envInt('SHARE_LINK_CLEANUP_INTERVAL_MS', 5 * 60 * 1000)
+  const timer = setInterval(() => {
+    void pool.query('DELETE FROM project_share_links WHERE expires_at <= NOW()').catch(error => {
+      // 兼容尚未执行分享链接迁移的环境，保留日志但不影响主业务请求。
+      console.error('share link cleanup failed:', error instanceof Error ? error.message : error)
+    })
+  }, cleanupIntervalMs)
+  timer.unref()
+  globalForPg.shareLinkCleanupTimer = timer
 }
 
 export default pool

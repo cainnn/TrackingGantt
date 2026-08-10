@@ -15,10 +15,15 @@ export interface JwtPayload {
   userId: string
   username: string
   role: 'administrator' | 'admin' | 'view'
+  shareProjectId?: string
 }
 
 export function signToken(payload: JwtPayload): string {
   return jwt.sign(payload, getJwtSecret(), { expiresIn: JWT_EXPIRES_IN })
+}
+
+export function signShareToken(payload: JwtPayload): string {
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: '1h' })
 }
 
 export function verifyToken(token: string): Result<JwtPayload> {

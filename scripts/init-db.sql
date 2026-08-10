@@ -128,6 +128,17 @@ CREATE TABLE IF NOT EXISTS project_versions (
 
 CREATE INDEX IF NOT EXISTS idx_project_versions_project_id ON project_versions(project_id);
 
+-- 一小时免登录项目分享链接（仅保存短码哈希，避免数据库泄露可直接使用的链接）
+CREATE TABLE IF NOT EXISTS project_share_links (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  token_hash CHAR(64) UNIQUE NOT NULL,
+  created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_project_share_links_expires_at ON project_share_links(expires_at);
+
 -- 项目线（自定义垂直标记线）
 CREATE TABLE IF NOT EXISTS project_lines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
