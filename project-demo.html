@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tracking Gantt · 单文件功能演示</title>
+  <style>
+    :root{--ink:#182233;--muted:#697386;--line:#e7eaf0;--soft:#f6f7fa;--blue:#2563eb;--blue2:#dbeafe;--green:#16a34a;--amber:#d97706;--red:#dc2626;--navy:#14213d;--panel:#fff;--shadow:0 18px 48px rgba(20,33,61,.13)}
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#eef1f6;color:var(--ink);font-size:13px;overflow:hidden}button,input,select,textarea{font:inherit}button{cursor:pointer}.hidden{display:none!important}
+    .app{height:100%;display:grid;grid-template-rows:58px 1fr}.top{display:flex;align-items:center;gap:18px;padding:0 20px;background:var(--navy);color:#fff}.brand{display:flex;align-items:center;gap:10px;font-weight:750;font-size:16px;letter-spacing:.2px}.logo{display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,#60a5fa,#2563eb);box-shadow:inset 0 0 0 1px #ffffff30}.logo span{display:block;width:15px;height:12px;border-left:2px solid white;border-bottom:2px solid white;transform:skew(-12deg);position:relative}.logo span:after{content:"";position:absolute;width:10px;border-top:2px solid white;transform:rotate(-32deg);left:2px;top:3px}.crumb{color:#94a3b8}.project-title{font-weight:650}.top-spacer{flex:1}.top-pill{padding:6px 10px;border-radius:20px;background:#ffffff14;color:#dbeafe}.avatar{width:31px;height:31px;border-radius:50%;display:grid;place-items:center;background:#31527c;font-weight:700}
+    .body{min-height:0;display:grid;grid-template-columns:210px 1fr}.side{background:#fff;border-right:1px solid var(--line);padding:18px 12px;display:flex;flex-direction:column}.nav-label{padding:0 10px 7px;color:#9aa3b2;font-size:11px;font-weight:700;letter-spacing:1px}.nav{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;border-radius:8px;padding:9px 10px;color:#4b5565;text-align:left;margin:2px 0}.nav:hover{background:#f3f6fb}.nav.active{background:#eaf1ff;color:#1d4ed8;font-weight:650}.nav i{font-style:normal;width:18px;text-align:center;font-size:15px}.side hr{width:100%;border:0;border-top:1px solid var(--line);margin:14px 0}.mini-project{padding:10px;border:1px solid var(--line);border-radius:9px;margin-bottom:8px;cursor:pointer}.mini-project.active{border-color:#93b4ff;background:#f5f8ff}.mini-project b{display:block;font-size:12px;margin-bottom:6px}.progress{height:4px;background:#e8ebf0;border-radius:4px;overflow:hidden}.progress span{display:block;height:100%;background:var(--blue);border-radius:4px}.side-foot{margin-top:auto;padding:10px;border-radius:9px;background:#f7f8fa;color:var(--muted);font-size:11px;line-height:1.6}
+    .main{min-width:0;min-height:0;display:grid;grid-template-rows:auto auto 1fr;background:#fff}.headline{display:flex;align-items:flex-end;gap:20px;padding:17px 20px 14px;border-bottom:1px solid var(--line)}.headline h1{font-size:20px;margin:0 0 4px}.headline p{margin:0;color:var(--muted)}.metrics{margin-left:auto;display:flex;gap:26px}.metric{border-left:1px solid var(--line);padding-left:18px}.metric b{display:block;font-size:17px}.metric span{font-size:11px;color:var(--muted)}
+    .toolbar{display:flex;align-items:center;gap:7px;padding:9px 14px;border-bottom:1px solid var(--line);background:#fbfcfe;white-space:nowrap}.btn{height:31px;border:1px solid #d9dee8;background:#fff;border-radius:7px;padding:0 10px;color:#465064;display:inline-flex;align-items:center;gap:6px}.btn:hover{border-color:#9ab5eb;background:#f8faff}.btn.primary{background:var(--blue);border-color:var(--blue);color:#fff}.btn.green{color:#15803d;border-color:#9fd5af}.btn.active{color:#1d4ed8;border-color:#89aaf0;background:#edf4ff}.sep{height:21px;border-left:1px solid #dfe3eb;margin:0 2px}.search{height:31px;width:170px;border:1px solid #d9dee8;border-radius:7px;padding:0 10px;outline:none}.search:focus{border-color:#7ea2eb;box-shadow:0 0 0 3px #dbeafe}.toolbar .right{margin-left:auto;display:flex;gap:7px}
+    .work{min-height:0;display:grid;grid-template-columns:560px minmax(620px,1fr);overflow:auto}.table-wrap,.chart-wrap{min-height:0;overflow:auto}.table-wrap{border-right:1px solid #cfd5df}.grid-table{width:100%;border-collapse:collapse;table-layout:fixed}.grid-table th{position:sticky;top:0;z-index:5;height:42px;background:#f3f5f8;border-bottom:1px solid #d9dee7;border-right:1px solid #e3e6ec;text-align:left;padding:0 8px;color:#596477;font-size:11px}.grid-table td{height:39px;border-bottom:1px solid #edf0f4;border-right:1px solid #f0f2f5;padding:0 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.grid-table tbody tr:hover{background:#f7faff}.grid-table tr.selected{background:#eaf2ff}.grid-table tr.summary{font-weight:700;background:#fafbfc}.drag{color:#b3bac5}.namecell{display:flex;align-items:center;gap:6px}.indent{display:inline-block}.twisty{width:15px;color:#5f6b7c}.task-dot{width:7px;height:7px;border-radius:2px;background:#5b8def}.task-dot.mile{transform:rotate(45deg);background:#9b59b6}.badge{padding:2px 6px;border-radius:10px;font-size:10px;background:#eaf2ff;color:#2563eb}.status{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px}.status.done{background:#22c55e}.status.run{background:#3b82f6}.status.risk{background:#f59e0b}.status.wait{background:#cbd5e1}
+    .chart-wrap{position:relative;background:#fff;overflow:auto}.timeline{min-width:1040px;position:relative}.months{position:sticky;top:0;z-index:4;height:21px;display:grid;grid-template-columns:repeat(4,260px);background:#eef2f7;border-bottom:1px solid #d8dee8}.months div{text-align:center;border-right:1px solid #d8dee8;font-size:11px;line-height:21px;color:#586477}.days{position:sticky;top:21px;z-index:4;height:21px;display:grid;grid-template-columns:repeat(40,26px);background:#f7f8fa;border-bottom:1px solid #d8dee8}.days div{text-align:center;border-right:1px solid #e4e8ee;line-height:21px;font-size:10px;color:#7a8493}.gantt-body{position:relative;background-image:linear-gradient(to right,transparent 25px,#edf0f4 26px);background-size:26px 100%}.gantt-row{height:39px;border-bottom:1px solid #edf0f4;position:relative}.gantt-row:hover{background:#f7faff80}.bar{position:absolute;top:11px;height:17px;border-radius:4px;background:#5785dc;color:#fff;box-shadow:inset 0 -1px #0002;font-size:9px;padding:2px 5px;overflow:hidden;white-space:nowrap}.bar:before{content:"";position:absolute;inset:0 auto 0 0;width:var(--pct);background:#1f58bd}.bar span{position:relative}.bar.summarybar{height:8px;top:15px;border-radius:0;background:#253d66;overflow:visible}.bar.summarybar:after,.bar.summarybar:before{content:"";position:absolute;top:7px;width:0;height:0;border:4px solid transparent;border-top-color:#253d66}.bar.summarybar:before{left:0}.bar.summarybar:after{right:0}.bar.risk{background:#ef9f41}.bar.done{background:#45a36b}.milestone{position:absolute;top:13px;width:13px;height:13px;background:#8b5cf6;transform:rotate(45deg);border:2px solid #fff;box-shadow:0 0 0 1px #7c3aed}.today{position:absolute;z-index:3;top:0;bottom:0;left:442px;border-left:2px solid #ef4444;pointer-events:none}.today label{position:absolute;top:3px;left:3px;background:#ef4444;color:#fff;font-size:9px;padding:2px 4px;border-radius:3px}.dep{position:absolute;height:1px;background:#718096;transform-origin:left center;z-index:2}.legend{position:fixed;right:18px;bottom:16px;z-index:6;padding:8px 11px;border:1px solid var(--line);border-radius:8px;background:#fff;box-shadow:0 5px 18px #22314d18;color:var(--muted);font-size:10px}.legend span{display:inline-flex;align-items:center;margin-left:10px}.legend i{width:13px;height:6px;margin-right:4px;border-radius:2px;background:#5785dc}
+    .overlay{position:fixed;inset:0;background:#11182766;z-index:20;display:grid;place-items:center;padding:20px}.modal{width:min(720px,95vw);max-height:88vh;background:#fff;border-radius:14px;box-shadow:var(--shadow);overflow:hidden}.modal-head{display:flex;align-items:center;padding:17px 20px;border-bottom:1px solid var(--line)}.modal-head h2{font-size:17px;margin:0}.close{margin-left:auto;border:0;background:transparent;font-size:23px;color:#7a8493}.tabs{display:flex;padding:0 20px;border-bottom:1px solid var(--line)}.tab{padding:12px 14px;border:0;border-bottom:2px solid transparent;background:transparent;color:#6b7280}.tab.active{color:var(--blue);border-bottom-color:var(--blue);font-weight:650}.modal-body{padding:20px;overflow:auto;max-height:58vh}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px 18px}.field label{display:block;color:#667085;margin-bottom:6px;font-size:11px}.field input,.field select,.field textarea{width:100%;height:35px;border:1px solid #d8dde6;border-radius:7px;padding:7px 9px;outline:none}.field textarea{height:78px;resize:vertical}.field input:focus,.field select:focus,.field textarea:focus{border-color:#7c9fe8;box-shadow:0 0 0 3px #e6efff}.span2{grid-column:span 2}.checkrow{display:flex;gap:20px;padding-top:8px}.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:13px 20px;border-top:1px solid var(--line);background:#fafbfc}
+    .drawer{position:fixed;z-index:15;right:0;top:58px;bottom:0;width:410px;background:#fff;box-shadow:-12px 0 40px #14213d24;border-left:1px solid var(--line);display:flex;flex-direction:column}.drawer-head{display:flex;align-items:center;padding:18px;border-bottom:1px solid var(--line)}.drawer-head h2{margin:0;font-size:17px}.drawer-body{overflow:auto;padding:14px 18px}.version{border:1px solid var(--line);border-radius:10px;padding:13px;margin-bottom:10px}.version-top{display:flex;align-items:center}.version b{font-size:13px}.version p{margin:7px 0;color:var(--muted);font-size:11px}.version-actions{display:flex;gap:8px;margin-top:8px}.link{border:0;background:transparent;color:var(--blue);padding:0;font-size:11px}.toast{position:fixed;z-index:40;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);background:#152238;color:#fff;border-radius:9px;padding:10px 15px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:.25s}.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+    .bar{z-index:2;cursor:grab;touch-action:none;user-select:none}.bar:hover{outline:2px solid #93b4ff;outline-offset:2px}.bar.dragging{cursor:grabbing;outline:2px solid #2563eb;box-shadow:0 5px 14px #1d4ed84d}.milestone{z-index:2;cursor:grab;touch-action:none}.milestone.dragging{outline:3px solid #c4b5fd}.dep-layer{position:absolute;z-index:1;inset:0;pointer-events:none}.dep-h,.dep-v{position:absolute;background:#6b7c96}.dep-h{height:2px}.dep-v{width:2px}.dep-arrow{position:absolute;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:6px solid #6b7c96;transform:translateY(-3px)}.dep-label{position:absolute;padding:1px 3px;border-radius:3px;background:#eef2f7;color:#526078;font-size:8px;line-height:11px}.drag-hint{position:fixed;z-index:8;left:50%;bottom:18px;transform:translateX(-50%);padding:7px 11px;border:1px solid #b9c8e5;border-radius:7px;background:#f8fbff;color:#31527c;box-shadow:0 4px 16px #22314d20;font-size:11px}
+    @media(max-width:1050px){.side{display:none}.body{grid-template-columns:1fr}.work{grid-template-columns:500px minmax(620px,1fr)}.metrics{display:none}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="top"><div class="brand"><div class="logo"><span></span></div>Tracking Gantt</div><span class="crumb">/</span><span class="project-title">网络云资源池扩容项目</span><span class="top-pill">天级排期</span><div class="top-spacer"></div><span>状态日期 2026-08-06</span><div class="avatar">吕</div></header>
+  <div class="body">
+    <aside class="side">
+      <div class="nav-label">工作台</div>
+      <button class="nav"><i>⌂</i>项目总览</button><button class="nav active"><i>▤</i>甘特图</button><button class="nav"><i>◫</i>资源负荷</button><button class="nav" id="sideVersions"><i>◷</i>版本与变更</button><button class="nav"><i>◎</i>项目线</button>
+      <hr><div class="nav-label">最近项目</div>
+      <div class="mini-project active"><b>网络云资源池扩容项目</b><div class="progress"><span style="width:62%"></span></div></div>
+      <div class="mini-project"><b>DNS 系统升级三期</b><div class="progress"><span style="width:38%"></span></div></div>
+      <div class="mini-project"><b>CDN 七期集成</b><div class="progress"><span style="width:81%"></span></div></div>
+      <div class="side-foot">演示模式<br>数据仅保存在当前页面，刷新后重置。</div>
+    </aside>
+    <main class="main">
+      <section class="headline"><div><h1>网络云资源池扩容项目</h1><p>2026-07-20 — 2026-09-18 · 负责人：吕洞宾</p></div><div class="metrics"><div class="metric"><b>62%</b><span>整体进度</span></div><div class="metric"><b>18</b><span>任务总数</span></div><div class="metric"><b style="color:#d97706">3</b><span>风险任务</span></div><div class="metric"><b>60 天</b><span>计划工期</span></div></div></section>
+      <div class="toolbar">
+        <button class="btn primary" id="addTask">＋ 新建任务</button><button class="btn" id="editTask">✎ 编辑</button><button class="btn" id="deleteTask">⌫</button><div class="sep"></div>
+        <button class="btn" id="undo">↶</button><button class="btn" id="redo">↷</button><button class="btn" id="indent">→ 缩进</button><div class="sep"></div>
+        <button class="btn" id="zoomOut">−</button><button class="btn" id="zoomIn">＋</button><button class="btn" id="todayBtn">⌖ 今天</button><button class="btn active" id="critical">关键路径</button>
+        <div class="right"><input class="search" id="search" placeholder="搜索任务或负责人"><button class="btn" id="importBtn">⇧ 导入</button><button class="btn" id="exportBtn">⇩ 导出</button><button class="btn green" id="versionBtn">◴ 保存版本</button></div>
+      </div>
+      <section class="work">
+        <div class="table-wrap"><table class="grid-table"><thead><tr><th style="width:32px">#</th><th style="width:220px">任务名称</th><th style="width:82px">负责人</th><th style="width:92px">开始</th><th style="width:92px">完成</th><th style="width:42px">%</th></tr></thead><tbody id="taskRows"></tbody></table></div>
+        <div class="chart-wrap" id="chartWrap"><div class="timeline" id="timeline"><div class="months"><div>2026 年 7 月</div><div>2026 年 8 月</div><div>2026 年 9 月</div><div>2026 年 10 月</div></div><div class="days" id="days"></div><div class="gantt-body" id="ganttBody"></div><div class="today"><label>今天</label></div></div></div>
+      </section>
+    </main>
+  </div>
+</div>
+<div class="drag-hint">拖动任务条可调整日期 · 后续依赖自动顺延</div><div class="legend"><b>图例</b><span><i></i>正常</span><span><i style="background:#ef9f41"></i>风险</span><span><i style="background:#45a36b"></i>完成</span><span><i style="background:#8b5cf6;transform:rotate(45deg)"></i>里程碑</span></div>
+
+<div class="overlay hidden" id="taskModal"><div class="modal"><div class="modal-head"><h2 id="modalTitle">编辑任务</h2><button class="close" data-close>×</button></div><div class="tabs"><button class="tab active">常规</button><button class="tab">前置任务</button><button class="tab">后续任务</button><button class="tab">约束</button><button class="tab">备注</button><button class="tab">历史</button></div><div class="modal-body"><div class="form-grid"><div class="field span2"><label>任务名称</label><input id="fName"></div><div class="field"><label>负责人</label><input id="fOwner"></div><div class="field"><label>排程模式</label><select><option>自动排程</option><option>手动排程</option></select></div><div class="field"><label>开始日期</label><input type="date" id="fStart"></div><div class="field"><label>结束日期</label><input type="date" id="fEnd"></div><div class="field"><label>完成百分比</label><input type="number" min="0" max="100" id="fPct"></div><div class="field"><label>约束类型</label><select><option>越早越好</option><option>不得早于</option><option>必须开始于</option><option>必须完成于</option></select></div><div class="field span2"><label>任务备注</label><textarea placeholder="输入交付标准、风险或协作说明"></textarea></div><div class="checkrow span2"><label><input type="checkbox" id="fMilestone"> 设为里程碑</label><label><input type="checkbox"> 在摘要任务上汇总</label><label><input type="checkbox"> 标记为非活动任务</label></div></div></div><div class="modal-foot"><button class="btn" data-close>取消</button><button class="btn primary" id="saveTask">保存更改</button></div></div></div>
+
+<aside class="drawer hidden" id="versionDrawer"><div class="drawer-head"><h2>版本与变更</h2><button class="close" id="closeDrawer">×</button></div><div class="tabs"><button class="tab active">版本快照</button><button class="tab">变更日志</button><button class="tab">版本对比</button></div><div class="drawer-body"><button class="btn primary" id="createVersion" style="width:100%;justify-content:center;margin-bottom:14px">＋ 创建当前版本快照</button><div id="versionList"><div class="version"><div class="version-top"><b>V12 · 周例会基线</b><span class="badge" style="margin-left:auto">当前</span></div><p>状态日期：2026-08-06 · 吕洞宾创建</p><span>完成机房勘察，设备到货存在 2 天风险。</span><div class="version-actions"><button class="link">查看</button><button class="link compare">对比当前</button><button class="link">回退</button></div></div><div class="version"><div class="version-top"><b>V11 · 设备采购确认</b></div><p>状态日期：2026-07-30 · 系统自动保存</p><span>采购清单冻结，新增安全域交换机。</span><div class="version-actions"><button class="link">查看</button><button class="link compare">对比当前</button><button class="link">回退</button></div></div><div class="version"><div class="version-top"><b>V10 · 初始执行基线</b></div><p>状态日期：2026-07-23 · 何仙姑创建</p><span>项目执行计划首次发布。</span><div class="version-actions"><button class="link">查看</button><button class="link compare">对比当前</button><button class="link">回退</button></div></div></div></div></aside>
+<div class="toast" id="toast"></div>
+<input type="file" id="fileInput" class="hidden" accept=".xlsx,.xls,.csv">
+<script>
+const tasks=[
+ {n:'1',name:'项目启动与规划',owner:'吕洞宾',s:0,e:9,p:100,summary:1,status:'done'},
+ {n:'2',name:'需求范围确认',owner:'何仙姑',s:0,e:3,p:100,level:1,status:'done'},
+ {n:'3',name:'现网资源核查',owner:'汉钟离',s:2,e:7,p:100,level:1,status:'done'},
+ {n:'4',name:'实施方案评审',owner:'吕洞宾',s:7,e:9,p:100,level:1,mile:1,status:'done'},
+ {n:'5',name:'设备采购与到货',owner:'曹国舅',s:8,e:25,p:65,summary:1,status:'run'},
+ {n:'6',name:'采购清单冻结',owner:'曹国舅',s:8,e:11,p:100,level:1,status:'done'},
+ {n:'7',name:'核心交换机到货',owner:'张果老',s:11,e:22,p:45,level:1,risk:1,status:'risk'},
+ {n:'8',name:'服务器与存储到货',owner:'蓝采和',s:13,e:25,p:30,level:1,risk:1,status:'risk'},
+ {n:'9',name:'机房部署实施',owner:'汉钟离',s:24,e:38,p:18,summary:1,status:'run'},
+ {n:'10',name:'机柜上架与布线',owner:'汉钟离',s:24,e:29,p:35,level:1,status:'run'},
+ {n:'11',name:'网络设备配置',owner:'何仙姑',s:29,e:34,p:0,level:1,status:'wait'},
+ {n:'12',name:'计算节点部署',owner:'蓝采和',s:30,e:38,p:0,level:1,status:'wait'},
+ {n:'13',name:'系统联调与验收',owner:'吕洞宾',s:37,e:51,p:0,summary:1,status:'wait'},
+ {n:'14',name:'业务联调测试',owner:'韩湘子',s:37,e:44,p:0,level:1,status:'wait'},
+ {n:'15',name:'性能与容灾测试',owner:'蓝采和',s:43,e:48,p:0,level:1,risk:1,status:'risk'},
+ {n:'16',name:'安全合规检查',owner:'铁拐李',s:46,e:50,p:0,level:1,status:'wait'},
+ {n:'17',name:'项目终验',owner:'吕洞宾',s:51,e:51,p:0,level:1,mile:1,status:'wait'},
+ {n:'18',name:'运维移交与复盘',owner:'韩湘子',s:52,e:58,p:0,status:'wait'}
+];
+// Finish-to-start dependencies; indexes refer to the task list above.
+const dependencies=[[1,2],[2,3],[3,5],[5,6],[6,9],[6,10],[7,11],[9,13],[10,13],[11,14],[13,15],[14,15],[15,16],[16,17]];
+let selected=6, zoom=1, history=[];
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+function dateAt(day){const d=new Date(2026,6,20+day);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+function render(filter=''){
+ const rows=$('#taskRows'), body=$('#ganttBody');rows.innerHTML='';body.innerHTML='';
+ const visible=[];
+ tasks.forEach((t,i)=>{const show=!filter||`${t.name}${t.owner}`.toLowerCase().includes(filter.toLowerCase());
+  if(show)visible.push(i);
+  const tr=document.createElement('tr');tr.dataset.i=i;tr.className=(i===selected?'selected ':'')+(t.summary?'summary ':'');if(!show)tr.classList.add('hidden');
+  tr.innerHTML=`<td><span class="drag">${t.n}</span></td><td><div class="namecell"><span class="indent" style="width:${(t.level||0)*15}px"></span><span class="twisty">${t.summary?'▾':''}</span><i class="task-dot ${t.mile?'mile':''}"></i><span>${t.name}</span>${t.risk?'<span class="badge" style="color:#b45309;background:#fff3d8">风险</span>':''}</div></td><td>${t.owner}</td><td>${dateAt(t.s)}</td><td>${dateAt(t.e)}</td><td><span class="status ${t.status}"></span>${t.p}</td>`;
+  tr.onclick=()=>{selected=i;render($('#search').value)};tr.ondblclick=()=>openTask(false);rows.appendChild(tr);
+  const gr=document.createElement('div');gr.className='gantt-row';if(!show)gr.classList.add('hidden');
+  if(t.mile)gr.innerHTML=`<div class="milestone" data-task="${i}" title="拖动：${t.name}" style="left:${t.s*26+8}px"></div>`;
+  else gr.innerHTML=`<div class="bar ${t.summary?'summarybar ':''}${t.risk?'risk ':''}${t.p===100?'done':''}" data-task="${i}" title="拖动调整日期 · ${t.name} · ${t.p}%" style="left:${t.s*26+3}px;width:${Math.max(25,(t.e-t.s+1)*26-6)}px;--pct:${t.p}%"><span>${t.summary?'':t.name}</span></div>`;
+  body.appendChild(gr);
+ });
+ drawDependencies(body,visible);
+ $('#timeline').style.transform=`scaleX(${zoom})`;$('#timeline').style.transformOrigin='left top';
+}
+function drawDependencies(body,visible){
+ const pos=new Map(visible.map((taskIndex,rowIndex)=>[taskIndex,rowIndex]));
+ const layer=document.createElement('div');layer.className='dep-layer';layer.style.height=`${visible.length*39}px`;
+ dependencies.forEach(([from,to])=>{
+  if(!pos.has(from)||!pos.has(to))return;
+  const a=tasks[from],b=tasks[to],x1=(a.e+1)*26-2,x2=b.s*26+1,y1=pos.get(from)*39+20,y2=pos.get(to)*39+20;
+  const mid=Math.max(x1+9,Math.min(x2-9,x1+16));
+  addSeg(layer,'dep-h',x1,y1,Math.max(2,mid-x1),2);addSeg(layer,'dep-v',mid,Math.min(y1,y2),2,Math.max(2,Math.abs(y2-y1)));addSeg(layer,'dep-h',Math.min(mid,x2),y2,Math.max(2,Math.abs(x2-mid)),2);
+  const arrow=document.createElement('i');arrow.className='dep-arrow';arrow.style.cssText=`left:${x2}px;top:${y2}px`;layer.appendChild(arrow);
+  const label=document.createElement('span');label.className='dep-label';label.textContent='FS';label.style.cssText=`left:${mid+3}px;top:${Math.min(y1,y2)+4}px`;layer.appendChild(label);
+ });body.appendChild(layer)
+}
+function addSeg(layer,cls,x,y,w,h){const el=document.createElement('i');el.className=cls;el.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px`;layer.appendChild(el)}
+function cascadeFrom(index){
+ const queue=[index],seen=new Set();
+ while(queue.length){const from=queue.shift();if(seen.has(from))continue;seen.add(from);dependencies.filter(d=>d[0]===from).forEach(([,to])=>{const minStart=tasks[from].e+1;if(tasks[to].s<minStart){const duration=tasks[to].e-tasks[to].s;tasks[to].s=minStart;tasks[to].e=minStart+duration}queue.push(to)})}
+}
+function enableBarDragging(){
+ $('#ganttBody').addEventListener('pointerdown',e=>{
+  const bar=e.target.closest('[data-task]');if(!bar)return;e.preventDefault();
+  const i=+bar.dataset.task,startX=e.clientX,startS=tasks[i].s,startE=tasks[i].e,snapshot=JSON.stringify(tasks);bar.classList.add('dragging');
+  const move=ev=>{const delta=Math.round((ev.clientX-startX)/(26*zoom));tasks[i].s=Math.max(0,startS+delta);tasks[i].e=Math.max(tasks[i].s,startE+delta);cascadeFrom(i);selected=i;render($('#search').value);const active=$(`[data-task="${i}"]`);if(active)active.classList.add('dragging')};
+  const up=()=>{history.push(snapshot);document.removeEventListener('pointermove',move);render($('#search').value);toast(`${tasks[i].name} 已调整至 ${dateAt(tasks[i].s)}，后续依赖已重排`)};
+  document.addEventListener('pointermove',move);document.addEventListener('pointerup',up,{once:true})
+ })
+}
+for(let i=0;i<40;i++){const d=document.createElement('div');d.textContent=((20+i-1)%31)+1;$('#days').appendChild(d)}
+function toast(msg){const el=$('#toast');el.textContent=msg;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2200)}
+function openTask(add){const t=add?{name:'',owner:'',s:18,e:20,p:0}:tasks[selected];$('#modalTitle').textContent=add?'新建任务':'编辑任务';$('#taskModal').dataset.add=add?'1':'0';$('#fName').value=t.name;$('#fOwner').value=t.owner;$('#fStart').value=dateAt(t.s);$('#fEnd').value=dateAt(t.e);$('#fPct').value=t.p;$('#fMilestone').checked=!!t.mile;$('#taskModal').classList.remove('hidden')}
+function closeModal(){$('#taskModal').classList.add('hidden')}
+$('#addTask').onclick=()=>openTask(true);$('#editTask').onclick=()=>openTask(false);$$('[data-close]').forEach(b=>b.onclick=closeModal);
+$('#saveTask').onclick=()=>{const add=$('#taskModal').dataset.add==='1', base=new Date(2026,6,20), day=v=>Math.max(0,Math.round((new Date(v)-base)/86400000));const data={n:String(tasks.length+1),name:$('#fName').value||'未命名任务',owner:$('#fOwner').value||'待分配',s:day($('#fStart').value),e:day($('#fEnd').value),p:+$('#fPct').value||0,mile:$('#fMilestone').checked,status:'wait'};history.push(JSON.stringify(tasks));if(add){tasks.push(data);selected=tasks.length-1}else Object.assign(tasks[selected],data,{n:tasks[selected].n});render($('#search').value);closeModal();toast(add?'任务已创建':'任务修改已保存')};
+$('#deleteTask').onclick=()=>{if(!confirm(`删除“${tasks[selected].name}”？`))return;history.push(JSON.stringify(tasks));for(let i=dependencies.length-1;i>=0;i--){if(dependencies[i].includes(selected))dependencies.splice(i,1);else dependencies[i]=dependencies[i].map(x=>x>selected?x-1:x)}tasks.splice(selected,1);selected=Math.max(0,selected-1);render();toast('任务及关联依赖已删除，可使用撤销恢复')};
+$('#undo').onclick=()=>{if(!history.length)return toast('没有可撤销的操作');const old=JSON.parse(history.pop());tasks.splice(0,tasks.length,...old);selected=0;render();toast('已撤销')};$('#redo').onclick=()=>toast('演示：已到最新状态');
+$('#indent').onclick=()=>{tasks[selected].level=tasks[selected].level?0:1;render();toast(tasks[selected].level?'任务已缩进':'任务已取消缩进')};
+$('#search').oninput=e=>render(e.target.value);$('#zoomIn').onclick=()=>{zoom=Math.min(1.5,zoom+.1);render()};$('#zoomOut').onclick=()=>{zoom=Math.max(.7,zoom-.1);render()};$('#todayBtn').onclick=()=>{$('#chartWrap').scrollTo({left:320,behavior:'smooth'});toast('已定位到状态日期')};
+$('#critical').onclick=e=>{e.currentTarget.classList.toggle('active');toast(e.currentTarget.classList.contains('active')?'已显示关键路径':'已隐藏关键路径')};
+function openDrawer(){$('#versionDrawer').classList.remove('hidden')}$('#versionBtn').onclick=openDrawer;$('#sideVersions').onclick=openDrawer;$('#closeDrawer').onclick=()=>$('#versionDrawer').classList.add('hidden');
+$('#createVersion').onclick=()=>{const box=document.createElement('div');box.className='version';box.innerHTML=`<div class="version-top"><b>V13 · 手动快照</b><span class="badge" style="margin-left:auto">刚刚</span></div><p>状态日期：2026-08-06 · 吕洞宾创建</p><span>包含 ${tasks.length} 个任务及当前依赖关系。</span><div class="version-actions"><button class="link">查看</button><button class="link compare">对比当前</button><button class="link">回退</button></div>`;$('#versionList').prepend(box);toast('版本快照 V13 已创建')};
+document.addEventListener('click',e=>{if(e.target.classList.contains('compare'))toast('版本对比：新增 2，变更 4，延期 1')});
+$('#exportBtn').onclick=()=>{const csv=['编号,任务,负责人,开始,完成,进度',...tasks.map(t=>`${t.n},${t.name},${t.owner},${dateAt(t.s)},${dateAt(t.e)},${t.p}%`)].join('\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));a.download='项目计划演示.csv';a.click();URL.revokeObjectURL(a.href);toast('项目计划已导出')};
+$('#importBtn').onclick=()=>$('#fileInput').click();$('#fileInput').onchange=()=>toast('演示模式：文件校验通过，可导入任务与依赖');
+$$('.tabs').forEach(group=>group.onclick=e=>{if(!e.target.classList.contains('tab'))return;group.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));e.target.classList.add('active');toast(`已切换到“${e.target.textContent}”`)});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal();$('#versionDrawer').classList.add('hidden')}if((e.ctrlKey||e.metaKey)&&e.key==='s'){e.preventDefault();toast('项目更改已保存')}});
+enableBarDragging();render();
+</script>
+</body>
+</html>
