@@ -304,6 +304,9 @@ gantt-app/
 | `OPENAI_API_KEY` | OpenAI / GLM API 密钥 | `sk-xxx` |
 | `OPENAI_BASE_URL` | API 地址（可选，用于 GLM 等） | `https://open.bigmodel.cn/api/paas/v4` |
 | `OPENAI_MODEL` | 模型名称（可选） | `gpt-4o` / `glm-4` |
+| `OPENAI_THINKING_MODE` | 深度思考模式（可选，`enabled` / `disabled`；智谱 GLM 默认关闭以避免空正文） | `disabled` |
+| `OPENAI_TIMEOUT_MS` | 服务端 AI 请求超时毫秒数（可选，默认 60000） | `60000` |
+| `NEXT_PUBLIC_AI_REQUEST_TIMEOUT_MS` | 浏览器等待 AI 响应的超时毫秒数（可选，默认 75000，构建时生效） | `75000` |
 
 ---
 

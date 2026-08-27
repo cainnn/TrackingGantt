@@ -85,6 +85,33 @@ interface Props {
   onAutoMessageConsumed?: () => void
 }
 
+const AI_REQUEST_TIMEOUT_MS = (() => {
+  const configured = Number(process.env.NEXT_PUBLIC_AI_REQUEST_TIMEOUT_MS)
+  return Number.isInteger(configured) && configured > 0 ? configured : 75_000
+})()
+
+async function postAiChat(body: Record<string, unknown>): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
+  try {
+    return await authFetch('/api/ai/chat', {
+      method: 'POST',
+      headers: authFetchHeaders(true),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
+}
+
+function describeAiRequestError(err: unknown): string {
+  if (err instanceof DOMException && err.name === 'AbortError') {
+    return `AI 分析请求超过 ${Math.round(AI_REQUEST_TIMEOUT_MS / 1000)} 秒，请稍后重试`
+  }
+  return err instanceof Error ? err.message : '未知错误'
+}
+
 // ── Helper: resolve task_code → id ───────────────────────────────────────────
 function codeToId(tasks: Task[], code: string): string | null {
   return tasks.find(t => t.task_code === code)?.id ?? null
@@ -553,10 +580,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           diffs: v.changes!.diffs,
         }))
 
-      const res = await authFetch('/api/ai/chat', {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({
+      const res = await postAiChat({
           projectName: currentProject?.name ?? '',
           messages: apiMessages,
           tasks: enrichedTasks,
@@ -566,7 +590,6 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           progress: computeProjectProgressPercent(tasks, currentProject?.status_date),
           prevTaskIds: prevSnapshotTaskIds,
           isMinute: currentProject?.time_granularity === 'minute',
-        }),
       })
 
       const data = await res.json()
@@ -596,10 +619,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           ...toolMessages.map(m => ({ role: m.role, content: m.content, tool_call_id: m.tool_call_id })),
         ]
 
-        const followRes = await authFetch('/api/ai/chat', {
-          method: 'POST',
-          headers: authFetchHeaders(true),
-          body: JSON.stringify({
+        const followRes = await postAiChat({
             projectName: currentProject?.name ?? '',
             messages: followUpMessages,
             tasks: enrichedTasks,
@@ -607,13 +627,13 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             versionChanges,
             prevTaskIds: prevSnapshotTaskIds,
             isMinute: currentProject?.time_granularity === 'minute',
-          }),
         })
         const followData = await followRes.json()
+        if (!followData.ok) {
+          throw new Error(followData.error ?? `AI 后续请求失败 (${followRes.status})`)
+        }
 
-        const followUpContent = followData.ok
-          ? (followData.value.message.content ?? '')
-          : 'Actions completed.'
+        const followUpContent = followData.value.message.content ?? ''
 
         setMessages(prev => [...prev, {
           role: 'assistant',
@@ -630,7 +650,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     } catch (err) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: `Request failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        content: `请求失败：${describeAiRequestError(err)}`,
       }])
     } finally {
       setLoading(false)

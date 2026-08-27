@@ -15,6 +15,7 @@
     "lib/clientTime.ts",
     "lib/statusDatePolicy.ts",
     "lib/projectProgress.ts",
+    "lib/ai/chatPolicy.ts",
     "lib/scheduling.ts",
     "lib/client/excelImport.ts",
     "types/**/*.ts"
