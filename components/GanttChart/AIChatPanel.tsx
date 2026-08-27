@@ -11,6 +11,10 @@ import { computeProjectProgressPercent } from '@/lib/projectProgress'
 import { collapseDeletedTaskSuccessors, runFullCascade } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
+import {
+  isWeeklySummaryIntent,
+  WEEKLY_SUMMARY_OUTPUT_REQUIREMENT,
+} from '@/lib/ai/summaryPolicy'
 import type { Task, Dependency } from '@/types'
 
 function fmtStatusDate(value?: string | null): string {
@@ -461,12 +465,17 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     const previousFinish = getProjectFinishDate(tasks, prevSnapshotEnds)
     const currentFinish = getProjectFinishDate(tasks)
     const finishConclusion = buildFinishDateConclusion(previousFinish, currentFinish)
+    const weeklySummary = isWeeklySummaryIntent(text)
 
     lines.push(`【提交给 AI 的分析要求】`)
     lines.push(`统计范围: ${label}（周报/本周为提交当天往前 7 天到当天；月报/本月为提交当天往前 1 个月到当天。本次为 ${from} ~ ${to}）`)
-    lines.push(`回答第一句必须是以下三种之一: "完工日期不变" / "完工日期推迟到YYYY-MM-DD" / "完工日期提前到YYYY-MM-DD"。`)
-    lines.push(`优先分析总工期影响和计划变动影响；任务描述只挑重点，重点包括新增任务、结束日期延期、结束日期提前、工期变化、关键依赖变化。`)
-    lines.push(`不要按流水账列出所有字段变化；责任人、名称、顺序等非工期变化只在确实影响管理判断时简述。`)
+    if (weeklySummary) {
+      lines.push(WEEKLY_SUMMARY_OUTPUT_REQUIREMENT)
+    } else {
+      lines.push(`回答第一句必须是以下三种之一: "完工日期不变" / "完工日期推迟到YYYY-MM-DD" / "完工日期提前到YYYY-MM-DD"。`)
+      lines.push(`优先分析总工期影响和计划变动影响；任务描述只挑重点，重点包括新增任务、结束日期延期、结束日期提前、工期变化、关键依赖变化。`)
+      lines.push(`不要按流水账列出所有字段变化；责任人、名称、顺序等非工期变化只在确实影响管理判断时简述。`)
+    }
     lines.push(`完成百分比只作为参考信息，不作为延期、提前或完工日期变化的判断依据。`)
     lines.push(`\n【项目完工日期对比】`)
     lines.push(`上一状态版本完工日期: ${previousFinish ?? '无可对比数据'}`)

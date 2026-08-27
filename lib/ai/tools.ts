@@ -1,6 +1,7 @@
 import type { Task, Dependency } from '@/types'
 import { computeTimeBasedPercent } from '@/lib/projectProgress'
 import { formatMinDuration } from '@/lib/clientTime'
+import { WEEKLY_SUMMARY_OUTPUT_REQUIREMENT } from '@/lib/ai/summaryPolicy'
 
 // ── OpenAI tool definitions ────────────────────────────────────────────────
 export const AI_TOOLS = [
@@ -384,34 +385,36 @@ Rules:
      - 未指定周期: default to from_date="${previousWeek}", to_date="${today}"
      Include new tasks, deleted tasks, and field modifications.
   2. Also call get_version_diffs to get version snapshot diffs (what changed between status date confirmations).
-  3. Combine both results into a structured summary. **输出顺序严格按照以下结构，必须先分析工期/计划，再分析新增删除和依赖关系；完成百分比只能放在参考信息里；第一句必须直接给出完工日期结论**：
+  3. Choose the final output format from the reporting period:
+     - **周报/本周/weekly（最高优先级）**：${WEEKLY_SUMMARY_OUTPUT_REQUIREMENT}
+     - **月报、本月或未明确要求周报的其他进展总结**：Combine both results into a structured summary. 输出顺序严格按照以下结构，必须先分析工期/计划，再分析新增删除和依赖关系；完成百分比只能放在参考信息里；第一句必须直接给出完工日期结论：
 
-     开头第一句只能使用以下三类表达之一：
-     - **完工日期不变**
-     - **完工日期推迟到YYYY-MM-DD**
-     - **完工日期提前到YYYY-MM-DD**
+       开头第一句只能使用以下三类表达之一：
+       - **完工日期不变**
+       - **完工日期推迟到YYYY-MM-DD**
+       - **完工日期提前到YYYY-MM-DD**
 
-     ### 一、工期和计划变更（优先）
-     - **项目整体工期影响**：比较最新两个版本，量化项目结束日期/关键里程碑的偏移天数（延期N天 / 提前N天 / 无变化）。如果系统上下文已提供"项目完工日期对比/结论"，必须优先采用该结论。
-     - **延期任务清单**：只挑重点列出 end_date 被推后的任务，给出 old → new 和 Δ天数，并引用 delay_flag 字段；优先选择关键路径、影响下游、影响里程碑或延期幅度大的任务。
-     - **提前任务清单**：只挑重点列出 end_date 被提前的任务（如有）。
-     - **级联影响分析**：对每个延期任务，沿依赖关系追踪下游受影响任务，写出完整链路。示例："任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"。
+       ### 一、工期和计划变更（优先）
+       - **项目整体工期影响**：比较最新两个版本，量化项目结束日期/关键里程碑的偏移天数（延期N天 / 提前N天 / 无变化）。如果系统上下文已提供"项目完工日期对比/结论"，必须优先采用该结论。
+       - **延期任务清单**：只挑重点列出 end_date 被推后的任务，给出 old → new 和 Δ天数，并引用 delay_flag 字段；优先选择关键路径、影响下游、影响里程碑或延期幅度大的任务。
+       - **提前任务清单**：只挑重点列出 end_date 被提前的任务（如有）。
+       - **级联影响分析**：对每个延期任务，沿依赖关系追踪下游受影响任务，写出完整链路。示例："任务A(T-005)延期3天 → FS → 任务B(T-006) → FS → 里程碑(T-010)，项目整体工期延期3天"。
 
-     ### 二、新增、删除和任务审计
-     - **新增任务**：挑重点列出本期新建任务，引用任务创建时间 created/审计记录时间；优先列出影响计划、里程碑、关键路径或资源安排的新增任务。
-     - **删除任务**：列出本期删除任务及审计记录时间。
-     - **任务字段变更**：仅列出会影响计划或管理的信息，例如名称、开始/结束、工期、负责人、里程碑、父任务、顺序；不要把 percent_done 作为核心变更，不要流水账罗列低重要性字段。
+       ### 二、新增、删除和任务审计
+       - **新增任务**：挑重点列出本期新建任务，引用任务创建时间 created/审计记录时间；优先列出影响计划、里程碑、关键路径或资源安排的新增任务。
+       - **删除任务**：列出本期删除任务及审计记录时间。
+       - **任务字段变更**：仅列出会影响计划或管理的信息，例如名称、开始/结束、工期、负责人、里程碑、父任务、顺序；不要把 percent_done 作为核心变更，不要流水账罗列低重要性字段。
 
-     ### 三、依赖关系变化
-     - 列出新增、删除、修改的依赖关系，包括依赖类型和 lag。
-     - 说明这些依赖变化是否造成下游任务日期变化或关键路径影响。
+       ### 三、依赖关系变化
+       - 列出新增、删除、修改的依赖关系，包括依赖类型和 lag。
+       - 说明这些依赖变化是否造成下游任务日期变化或关键路径影响。
 
-     ### 四、参考信息
-     - 可简要给出状态日期和自动计算的整体进度百分比。
-     - 明确说明完成百分比是由状态日期推算出的参考值，不作为任务工期变动判断依据。
+       ### 四、参考信息
+       - 可简要给出状态日期和自动计算的整体进度百分比。
+       - 明确说明完成百分比是由状态日期推算出的参考值，不作为任务工期变动判断依据。
 
-  若本期"计划不变、工期不变"（参见上面的判定规则），第一段直接写"本期计划不变，工期不变"即可，仍需继续列出新增/删除任务和依赖关系变化（如有）。
-  You MUST call both tools in parallel in one response, then synthesize a comprehensive summary.
+     对于非周报总结，若本期"计划不变、工期不变"（参见上面的判定规则），第一段直接写"本期计划不变，工期不变"即可，仍需继续列出新增/删除任务和依赖关系变化（如有）。
+  You MUST call both tools in parallel in one response, then synthesize the final answer in the selected output format.
 - When the user asks about version comparison or what changed between status dates, use get_version_diffs.
 - Today is ${today}. Default weekly progress-summary range: ${previousWeek} ~ ${today} (提交当天到前一周). Monthly progress-summary range: ${previousMonth} ~ ${today} (提交当天到前一月).`
 }
