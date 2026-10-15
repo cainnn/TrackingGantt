@@ -10,6 +10,8 @@ import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
 import { runFullCascade, snapTaskUpdatesToDayLevel } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
+import { addMinutesStr, parseLocal } from '@/lib/clientTime'
+import { defaultTaskSchedule, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
 
 interface Props {
   taskId: string
@@ -62,6 +64,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [isMilestone, setIsMilestone] = useState(false)
   const [note,        setNote]        = useState('')
   const [durationIn,  setDurationIn]  = useState('')
+  const [formError, setFormError] = useState('')
   const [constraintType, setConstraintType] = useState<string>('asap')
   const [constraintDate, setConstraintDate] = useState<string>('')
   const [deadline, setDeadline] = useState<string>('')
@@ -115,10 +118,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     return map
   }, [allTasks])
 
-  // Determine current schedule mode from deps
-  const hasDepMode = incomingDeps.length > 0
-  const isManual = task?.auto_schedule === false && !hasDepMode
-
   // 仅在 taskId 变化时初始化表单
   const prevTaskId = useRef(taskId)
   useEffect(() => {
@@ -156,8 +155,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
   const normalizeAnchor = useCallback((value: string | Date | null | undefined): string | null => {
     if (!value) return null
-    const d = value instanceof Date ? value : new Date(String(value))
-    if (isNaN(d.getTime())) return null
+    const d = parseLocal(value)
+    if (!d || isNaN(d.getTime())) return null
     const pad = (n: number) => String(n).padStart(2, '0')
     return isMinute
       ? `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
@@ -190,12 +189,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (ct && ct !== 'asap' && ct !== 'none') return updated
     const anchor = autoAnchorForTask(target, taskList)
     const dur = target.duration ?? Math.max(0, Math.round((new Date(target.end_date).getTime() - new Date(target.start_date).getTime()) / 60_000))
-    const endDt = new Date(anchor)
-    endDt.setMinutes(endDt.getMinutes() + dur)
     return {
       ...updated,
       start_date: anchor,
-      end_date: normalizeAnchor(endDt),
+      end_date: normalizeAnchor(addMinutesStr(anchor, dur)),
       duration: dur,
     }
   }, [allTasks, deps, autoAnchorForTask, normalizeAnchor])
@@ -247,7 +244,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
         setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
       }
     }
-  }, [dispatch, allTasks, deps, taskId, dtSlice, durMul, buildAutoScheduleTask])
+  }, [dispatch, allTasks, deps, taskId, dtSlice, durMul, buildAutoScheduleTask, isMinute])
 
   // ── Add predecessor ──────────────────────────────────────────────────
   const handleAddPredecessor = useCallback((fromTaskId: string) => {
@@ -362,47 +359,70 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const duration = durNum != null && !isNaN(durNum) ? Math.round(durNum * durMul) : task.duration
 
   // Determine date editability based on dep types
-  const hasFS_SS = incomingDeps.some(d => d.type === 2 || d.type === 0)
-  const hasFF_SF = incomingDeps.some(d => d.type === 3 || d.type === 1)
-  const startReadonly = hasDepMode ? hasFS_SS : !isManual
-  const endReadonly   = hasDepMode ? hasFF_SF : false
+  const activeIncoming = incomingDeps.filter(d => activeEdits[d.id] ?? d.active ?? true)
+  const hasFS_SS = activeIncoming.some(d => d.type === 2 || d.type === 0)
+  const hasFF_SF = activeIncoming.some(d => d.type === 3 || d.type === 1)
+  const startReadonly = !manualSchedule && (activeIncoming.length === 0 || hasFS_SS)
+  const endReadonly = !manualSchedule && hasFF_SF
 
   const projStart = (currentProject?.start_date ?? '').slice(0, dtSlice)
 
-  const pad2 = (n: number) => String(n).padStart(2, '0')
-  const fmtDtLocal = (d: Date) => isMinute
-    ? `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-    : `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
+  const handleDateChange = (field: 'start' | 'end', value: string) => {
+    setFormError('')
+    const start = field === 'start' ? value : startDate
+    const end = field === 'end' ? value : endDate
+    if (isMilestone) {
+      setStartDate(value)
+      setEndDate(value)
+      setDurationIn('0')
+      return
+    }
+    setStartDate(start)
+    setEndDate(end)
+    const span = scheduleDurationMinutes(start, end, isMinute)
+    if (span != null && span >= 0) setDurationIn(String(span / durMul))
+  }
 
   // duration 输入单位：天级=天，分钟级=分钟；内部统一换算为分钟保存。
   const handleDurationChange = (val: string) => {
     setDurationIn(val)
+    setFormError('')
     const n = Number(val)
-    if (!isNaN(n) && n >= 0) {
+    if (val.trim() !== '' && Number.isSafeInteger(n * durMul) && n >= 0 && (isMinute || Number.isInteger(n))) {
       const totalMins = n * durMul
       if (endReadonly && endDate) {
-        const d = new Date(endDate)
-        d.setMinutes(d.getMinutes() - totalMins)
-        let s = fmtDtLocal(d)
+        let s = addMinutesStr(normalizeScheduleDate(endDate, isMinute), -totalMins)?.slice(0, dtSlice)
+        if (!s) return
         if (projStart && s < projStart) s = projStart
         setStartDate(s)
+        const span = scheduleDurationMinutes(s, endDate, isMinute)
+        if (span != null && span >= 0) setDurationIn(String(span / durMul))
       } else if (startDate) {
-        const d = new Date(startDate)
-        d.setMinutes(d.getMinutes() + totalMins)
-        setEndDate(fmtDtLocal(d))
+        const end = addMinutesStr(normalizeScheduleDate(startDate, isMinute), totalMins)
+        if (end) setEndDate(end.slice(0, dtSlice))
       }
     }
   }
 
   const handleSave = async () => {
     const clampedStart = (startDate && projStart && startDate < projStart) ? projStart : startDate
+    if (!isMilestone && durationIn.trim() !== '' && (!Number.isSafeInteger(Number(durationIn) * durMul) || Number(durationIn) < 0 || (!isMinute && !Number.isInteger(Number(durationIn))))) {
+      setFormError(isMinute ? '工期必须是非负整数分钟' : '工期必须是非负整数天')
+      return
+    }
+    const normalizedStart = normalizeScheduleDate(clampedStart, isMinute)
+    const normalizedEnd = isMilestone ? normalizedStart : normalizeScheduleDate(endDate, isMinute)
+    if (normalizedStart && normalizedEnd && normalizedStart > normalizedEnd) {
+      setFormError('开始日期不能晚于结束日期')
+      return
+    }
     const formTask = {
       ...task,
       name: name.trim() || task.name,
       assignee: assignee.trim() || null,
-      start_date: clampedStart || null,
-      end_date: isMilestone ? (clampedStart || null) : (endDate || null),
-      duration: isMilestone ? 0 : duration,
+      start_date: normalizedStart,
+      end_date: normalizedEnd,
+      duration: isMilestone ? 0 : (scheduleDurationMinutes(normalizedStart, normalizedEnd, isMinute) ?? duration),
       percent_done: isMilestone ? 100 : task.percent_done,
       is_milestone: isMilestone,
       note: note || null,
@@ -775,7 +795,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                       includeTime={isMinute}
                       onChange={e => {
                         const v = e.target.value
-                        setStartDate(projStart && v < projStart ? projStart : v)
+                        handleDateChange('start', projStart && v && v < projStart ? projStart : v)
                       }}
                     />
                   )}
@@ -790,7 +810,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                     <YmdDateInput
                       value={endDate}
                       includeTime={isMinute}
-                      onChange={e => setEndDate(e.target.value)}
+                      onChange={e => handleDateChange('end', e.target.value)}
                     />
                   )}
                 </div>
@@ -799,7 +819,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 <label className="block text-xs font-medium text-gray-500 mb-1">
                   {durLabel}{durHint && <span className="text-gray-400 ml-2">{durHint}</span>}
                 </label>
-                <input type="number" min={0} step={durStep} value={durationIn}
+                <input type="number" min={0} step={durStep} value={durationIn} disabled={isMilestone}
                        onChange={e => handleDurationChange(e.target.value)}
                        placeholder={isMinute ? '分钟数' : '天数'}
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
@@ -831,18 +851,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                        onChange={e => {
                          const checked = e.target.checked
                          setIsMilestone(checked)
-                         if (checked) {
-                           setDurationIn('0')
-                           if (startDate) setEndDate(startDate)
-                         } else {
-                           // 默认工期 1 天：UI 单位换算
-                           setDurationIn(String(1440 / durMul))
-                           if (startDate) {
-                             const d = new Date(startDate)
-                             d.setMinutes(d.getMinutes() + 1440)
-                             setEndDate(fmtDtLocal(d))
-                           }
-                         }
+                         setFormError('')
+                         const schedule = defaultTaskSchedule(startDate, isMinute, checked)
+                         setDurationIn(String((schedule.duration ?? 0) / durMul))
+                         setEndDate((schedule.end_date ?? '').slice(0, dtSlice))
                        }}
                        className="w-4 h-4 accent-blue-500" />
                 <label htmlFor="edit-milestone" className="text-sm text-gray-700 cursor-pointer">里程碑</label>
@@ -958,6 +970,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
         </div>
 
         {/* Footer (hidden on history tab) */}
+        {formError && <div role="alert" className="px-5 py-2 text-sm text-red-600">{formError}</div>}
         {tab !== 'history' && (
           <div className="flex justify-end gap-2 px-5 py-3 border-t bg-gray-50 rounded-b-lg flex-none">
             <button onClick={onClose}

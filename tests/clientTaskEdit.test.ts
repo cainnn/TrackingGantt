@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTaskScheduleEdit, durationInputValue } from '../lib/clientTaskEdit'
+import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
 import { buildSaveDiff } from '../lib/clientSave'
 import { runFullCascade } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
@@ -118,4 +118,58 @@ test('empty, invalid and non-positive inline durations leave the schedule unchan
   for (const value of ['', 'invalid', '2days', 'Infinity', '1e308', '-1', '0']) {
     assert.deepEqual(buildTaskScheduleEdit(task(), [], 'duration', value, false), {})
   }
+})
+
+test('new day tasks and restored milestones have one full day stored in minutes', () => {
+  const normal = defaultTaskSchedule('2026-06-01T09:15:00', false)
+  assert.deepEqual(normal, {
+    start_date: '2026-06-01T00:00:00', end_date: '2026-06-02T00:00:00', duration: 1440,
+  })
+  const milestone = defaultTaskSchedule(normal.start_date, false, true)
+  assert.equal(milestone.duration, 0)
+  assert.equal(milestone.start_date, milestone.end_date)
+  assert.deepEqual(defaultTaskSchedule(milestone.start_date, false), normal)
+})
+
+test('new minute tasks and restored milestones preserve their time with a one-hour default', () => {
+  const normal = defaultTaskSchedule('2026-06-01T09:15:00', true)
+  assert.deepEqual(normal, {
+    start_date: '2026-06-01T09:15:00', end_date: '2026-06-01T10:15:00', duration: 60,
+  })
+  const milestone = defaultTaskSchedule(normal.start_date, true, true)
+  assert.equal(milestone.duration, 0)
+  assert.equal(milestone.end_date, '2026-06-01T09:15:00')
+  assert.deepEqual(defaultTaskSchedule(milestone.start_date, true), normal)
+})
+
+test('resizing a minute task to 45 minutes stays consistent through save', () => {
+  const original = task({ start_date: '2026-06-01T09:15:00', end_date: '2026-06-01T10:45:00', duration: 90 })
+  const resized = resizeTaskSchedule(original, 'end', '2026-06-01T10:00:00', true)
+  assert.equal(resized.end_date, '2026-06-01T10:00:00')
+  assert.equal(resized.duration, 45)
+  assert.equal(buildSaveDiff([original], [], [resized], []).tasksToUpdate[0].duration, 45)
+  const leftResize = resizeTaskSchedule(original, 'start', '2026-06-01T10:00:00', true)
+  assert.equal(leftResize.start_date, '2026-06-01T10:00:00')
+  assert.equal(leftResize.end_date, original.end_date)
+  assert.equal(leftResize.duration, 45)
+})
+
+test('resizing across the opposite edge clamps both date and duration to project precision', () => {
+  const minuteTask = task({ start_date: '2026-06-01T09:15:00', end_date: '2026-06-01T10:45:00', duration: 90 })
+  const right = resizeTaskSchedule(minuteTask, 'end', '2026-06-01T08:00:00', true)
+  assert.equal(right.end_date, '2026-06-01T09:30:00')
+  assert.equal(right.duration, 15)
+  const left = resizeTaskSchedule(minuteTask, 'start', '2026-06-01T11:00:00', true)
+  assert.equal(left.start_date, '2026-06-01T10:30:00')
+  assert.equal(left.duration, 15)
+  const day = resizeTaskSchedule(task(), 'end', '2026-05-30', false)
+  assert.equal(day.end_date, '2026-06-02T00:00:00')
+  assert.equal(day.duration, 1440)
+})
+
+test('date spans used by form and hierarchy edits always return stored minute units', () => {
+  assert.equal(scheduleDurationMinutes('2026-06-01', '2026-06-06', false), 7200)
+  assert.equal(scheduleDurationMinutes('2026-06-01T09:15:00', '2026-06-01T10:45:00', true), 90)
+  assert.equal(scheduleDurationMinutes(null, '2026-06-06', false), null)
+  assert.equal(scheduleDurationMinutes('2026-06-06', '2026-06-01', false), -7200)
 })

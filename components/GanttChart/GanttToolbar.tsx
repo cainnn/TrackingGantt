@@ -13,6 +13,7 @@ import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
+import { scheduleDurationMinutes } from '@/lib/clientTaskEdit'
 import YmdDateInput from '@/components/YmdDateInput'
 import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
@@ -1144,15 +1145,14 @@ export default function GanttToolbar({
       if (starts.length > 0 && ends.length > 0) {
         const minStart = starts.sort()[0]
         const maxEnd = ends.sort().reverse()[0]
-        const d1 = new Date(minStart), d2 = new Date(maxEnd)
-        const dur = Math.round((d2.getTime() - d1.getTime()) / 86400000)
+        const dur = scheduleDurationMinutes(minStart, maxEnd, isMinute)
         parentUpdates.push({ ...parent, start_date: minStart, end_date: maxEnd, duration: dur })
       }
     }
     if (parentUpdates.length > 0) dispatch(updateTasks(parentUpdates))
 
-    dispatch(markDirty(allUpdates.map(u => u.id)))
-  }, [dispatch, projectId, tasks, selectedIds, hasSelection, dependencies])
+    dispatch(markDirty([...allUpdates.map(u => u.id), ...parentUpdates.map(t => t.id)]))
+  }, [dispatch, projectId, tasks, selectedIds, hasSelection, dependencies, isMinute])
 
   // ── Demote (降级) ─────────────────────────────────────────────────────
   const handleDemote = useCallback(async () => {
@@ -1217,14 +1217,13 @@ export default function GanttToolbar({
       if (starts.length === 0 || ends.length === 0) continue
       const minStart = starts.sort()[0]
       const maxEnd = ends.sort().reverse()[0]
-      const d1 = new Date(minStart), d2 = new Date(maxEnd)
-      const dur = Math.round((d2.getTime() - d1.getTime()) / 86400000)
+      const dur = scheduleDurationMinutes(minStart, maxEnd, isMinute)
       parentUpdates.push({ ...parent, start_date: minStart, end_date: maxEnd, duration: dur })
     }
     if (parentUpdates.length > 0) dispatch(updateTasks(parentUpdates))
 
-    dispatch(markDirty(allUpdates.map(u => u.id)))
-  }, [dispatch, projectId, tasks, selectedIds, hasSelection, dependencies])
+    dispatch(markDirty([...allUpdates.map(u => u.id), ...parentUpdates.map(t => t.id)]))
+  }, [dispatch, projectId, tasks, selectedIds, hasSelection, dependencies, isMinute])
 
   // ── Copy / Paste ──────────────────────────────────────────────────────
   const handleCopy = useCallback(() => {

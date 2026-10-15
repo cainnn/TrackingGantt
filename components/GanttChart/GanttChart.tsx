@@ -21,7 +21,8 @@ import {
   snapTaskUpdatesToDayLevel,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
-import { buildTaskScheduleEdit, durationInputValue } from '@/lib/clientTaskEdit'
+import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
+import { addMinutesStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -1108,21 +1109,17 @@ export default function GanttChart({
 
   // ── Project start date（用于"空"类型任务的自动对齐）──────────────────────
   const projectStartDate = useMemo(() => {
-    if (currentProject?.start_date) return currentProject.start_date.split('T')[0]
+    if (currentProject?.start_date) return normalizeScheduleDate(currentProject.start_date, isMinute)!
     // Fallback: earliest task start date
     const starts = tasks.filter(t => t.start_date).map(t => new Date(t.start_date!))
-    if (starts.length === 0) return fmtDate(sod(new Date()))
-    return fmtDate(new Date(Math.min(...starts.map(x => x.getTime()))))
-  }, [currentProject?.start_date, tasks])
+    const start = starts.length === 0 ? new Date() : new Date(Math.min(...starts.map(x => x.getTime())))
+    return normalizeScheduleDate(fmtDt(start), isMinute)!
+  }, [currentProject?.start_date, tasks, isMinute])
 
   const defaultStart = useMemo(() => {
-    let d = new Date(projectStartDate)
-    if (statusDate) {
-      const sd = new Date(statusDate)
-      if (sd > d) d = sd
-    }
-    return fmtDate(d)
-  }, [projectStartDate, statusDate])
+    const status = normalizeScheduleDate(statusDate, isMinute)
+    return status && status > projectStartDate ? status : projectStartDate
+  }, [projectStartDate, statusDate, isMinute])
 
   // ── 关键路径计算（正推 + 反推，浮动=0 的任务即为关键路径） ─────────────────
   const inactiveSet = useMemo((): Set<string> => {
@@ -1556,12 +1553,12 @@ export default function GanttChart({
             newEnd   = addDays(drag.origEnd,   days)
             cascadeDays = diffDays(drag.origStart, newStart)
           } else if (drag.mode === 'resize-right') {
-            newEnd = addDays(drag.origEnd, days)
-            if (newEnd <= newStart) newEnd = addDays(newStart, 1)
+            const resized = resizeTaskSchedule(orig, 'end', fmtDt(addDays(drag.origEnd, days)), isMinute)
+            newEnd = new Date(resized.end_date!)
             cascadeDays = diffDays(drag.origEnd, newEnd)
           } else if (drag.mode === 'resize-left') {
-            newStart = addDays(drag.origStart, days)
-            if (newStart >= newEnd) newStart = addDays(newEnd, -1)
+            const resized = resizeTaskSchedule(orig, 'start', fmtDt(addDays(drag.origStart, days)), isMinute)
+            newStart = new Date(resized.start_date!)
             cascadeDays = 0
           }
 
@@ -1803,26 +1800,13 @@ export default function GanttChart({
                 auto_schedule: false,
               })
             } else if (depType === 3 || depType === 1) {
-              const fixedEnd = draggedTask.end_date!
               const newStart = dragged?.start_date ?? draggedTask.start_date
-              const newDur = newStart ? diffMins(new Date(newStart), new Date(fixedEnd)) : (draggedTask.duration ?? 0)
-              previewById.set(draggedTask.id, {
-                ...draggedTask,
-                start_date: newStart,
-                end_date: fixedEnd,
-                duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
-              })
+              if (newStart) previewById.set(draggedTask.id, resizeTaskSchedule(draggedTask, 'start', newStart, isMinute))
             } else {
               const hasIncoming = incoming.length > 0
               const fixedStart = hasIncoming ? draggedTask.start_date! : (dragged?.start_date ?? draggedTask.start_date!)
               const newEnd = dragged?.end_date ?? draggedTask.end_date
-              const newDur = newEnd ? diffMins(new Date(fixedStart), new Date(newEnd)) : (draggedTask.duration ?? 0)
-              previewById.set(draggedTask.id, {
-                ...draggedTask,
-                start_date: fixedStart,
-                end_date: newEnd,
-                duration: Math.max(newDur, draggedTask.is_milestone ? 0 : 1440),
-              })
+              if (newEnd) previewById.set(draggedTask.id, resizeTaskSchedule({ ...draggedTask, start_date: fixedStart }, 'end', newEnd, isMinute))
             }
             dirtyList = [...previewById.values()]
           } else if (draggedTask) {
@@ -2023,7 +2007,7 @@ export default function GanttChart({
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot])
+  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot, isMinute])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -2225,7 +2209,7 @@ export default function GanttChart({
       const remainDeps = deps.filter(d => !incoming.some(x => x.id === d.id))
       const dur = t.duration ?? 0
       const emptyStart = projectStartDate
-      const newEnd = fmtDate(addDays(new Date(emptyStart), dur))
+      const newEnd = addMinutesStr(emptyStart, dur)
       const updatedEmpty = { ...t, auto_schedule: true, start_date: emptyStart, end_date: newEnd, duration: dur }
       dispatch(updateTasks([updatedEmpty]))
       dispatch(markDirty([taskId]))
@@ -2292,15 +2276,9 @@ export default function GanttChart({
     name: string,
     parent_id: string | null,
     order_index: number,
-    extra: { is_milestone?: boolean; start_date?: string | null; end_date?: string | null; auto_schedule?: boolean } = {}
+    extra: { is_milestone?: boolean; start_date?: string | null; auto_schedule?: boolean } = {}
   ): Task | null => {
-    const startDate = extra.start_date !== undefined ? extra.start_date : defaultStart
-    const endDate = extra.end_date !== undefined
-      ? extra.end_date
-      : startDate
-        ? fmtDate(addDays(new Date(startDate), extra.is_milestone ? 0 : 1))
-        : null
-    const duration = extra.is_milestone ? 0 : 1
+    const schedule = defaultTaskSchedule(extra.start_date !== undefined ? extra.start_date : defaultStart, isMinute, extra.is_milestone)
 
     const siblings = tasks.filter(t => t.parent_id === parent_id && t.order_index >= order_index)
     if (siblings.length > 0) {
@@ -2321,11 +2299,9 @@ export default function GanttChart({
       parent_id,
       order_index,
       assignee: null,
-      start_date: startDate,
-      end_date: endDate,
-      duration,
-      duration_unit: 'day',
-      percent_done: 0,
+      ...schedule,
+      duration_unit: isMinute ? 'minute' : 'day',
+      percent_done: extra.is_milestone ? 100 : 0,
       is_milestone: extra.is_milestone ?? false,
       note: null,
       auto_schedule: extra.auto_schedule !== undefined ? extra.auto_schedule : true,
@@ -2346,7 +2322,7 @@ export default function GanttChart({
     dispatch(addTasks([newTask]))
     dispatch(markDirty([newTask.id]))
     return newTask
-  }, [tasks, dispatch, projectId, defaultStart])
+  }, [tasks, dispatch, projectId, defaultStart, isMinute])
 
   // ── Context menu: action handlers ────────────────────────────────────────
   const handleCtxDeleteTask = useCallback((taskId: string) => {
@@ -2368,18 +2344,14 @@ export default function GanttChart({
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
-    const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index, { start_date: startDate, end_date: endDate })
+    addTask('New Task', t.parent_id, t.order_index, { start_date: t.start_date ?? defaultStart })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddBelow = useCallback((taskId: string) => {
     setCtxMenu(null)
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
-    const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
-    const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: startDate, end_date: endDate })
+    addTask('New Task', t.parent_id, t.order_index + 1, { start_date: t.start_date ?? defaultStart })
   }, [tasks, addTask, defaultStart])
 
   const handleCtxAddMilestone = useCallback((taskId: string) => {
@@ -2395,9 +2367,7 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
     const childCount = tasks.filter(x => x.parent_id === taskId).length
-    const startDate = t.start_date ? (t.start_date.includes('T') ? t.start_date.split('T')[0] : t.start_date) : defaultStart
-    const endDate = startDate ? fmtDate(addDays(new Date(startDate + 'T00:00:00'), 1)) : null
-    addTask('New Sub-task', taskId, childCount, { start_date: startDate, end_date: endDate })
+    addTask('New Sub-task', taskId, childCount, { start_date: t.start_date ?? defaultStart })
     setExpanded(prev => ({ ...prev, [taskId]: true }))
   }, [tasks, addTask, defaultStart])
 
@@ -2490,21 +2460,13 @@ export default function GanttChart({
     if (!t) return
 
     const toMilestone = !t.is_milestone
-    const patch: Partial<Task> = { is_milestone: toMilestone }
-    if (toMilestone) {
-      // 转为里程碑：工期=0, end_date=start_date, 完成度=100%
-      patch.duration = 0
-      patch.percent_done = 100
-      if (t.start_date) patch.end_date = t.start_date
-    } else {
-      // 转为普通任务：工期=1, end_date=start+1, 完成度保留
-      patch.duration = 1
-      if (t.start_date) patch.end_date = fmtDate(addDays(new Date(t.start_date), 1))
-    }
-    const updated = { ...t, ...patch }
-    dispatch(updateTasks([updated]))
-    dispatch(markDirty([taskId]))
-  }, [dispatch, tasks])
+    const updated = { ...t, ...defaultTaskSchedule(t.start_date, isMinute, toMilestone), is_milestone: toMilestone, percent_done: toMilestone ? 100 : t.percent_done }
+    const cascaded = runFullCascade(tasks.map(task => task.id === taskId ? updated : task), deps, { isMinute })
+    const merged = new Map([[taskId, updated], ...cascaded.map(task => [task.id, task] as const)])
+    const updates = isMinute ? [...merged.values()] : snapTaskUpdatesToDayLevel([...merged.values()])
+    dispatch(updateTasks(updates))
+    dispatch(markDirty(updates.map(task => task.id)))
+  }, [dispatch, tasks, deps, isMinute])
 
   const handleCtxIndent = useCallback((taskId: string) => {
     setCtxMenu(null)
