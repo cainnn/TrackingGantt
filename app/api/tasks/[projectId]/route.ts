@@ -1,3 +1,4 @@
+import { addLifecycle, addLifecycleBatch, normalizeChangeReason, type LifecycleInput } from '@/lib/taskLifecycle'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
@@ -82,26 +83,6 @@ function sortTaskInputsForInsert(taskInputs: unknown[]): Record<string, unknown>
 
   for (const task of tasks) visit(task)
   return sorted
-}
-
-// Insert a lifecycle event
-async function addLifecycle(
-  client: PoolClient,
-  opts: {
-    taskId: string; taskCode: string; projectId: string; userId: string
-    event_type: string; field_name?: string | null
-    old_value?: string | null; new_value?: string | null
-    description: string
-  }
-) {
-  await client.query(
-    `INSERT INTO task_lifecycle
-       (task_id, task_code, project_id, event_type, field_name, old_value, new_value, description, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [opts.taskId, opts.taskCode, opts.projectId, opts.event_type,
-     opts.field_name ?? null, opts.old_value ?? null, opts.new_value ?? null,
-     opts.description, opts.userId]
-  )
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -421,6 +402,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         taskId: newTask.id, taskCode: code, projectId,
         userId: auth.value.userId, event_type: 'created',
         description: `创建任务「${name}」（${code}）`,
+        reason: (task as Record<string, unknown>)._reason,
       })
     }
 
@@ -458,35 +440,6 @@ const normalizeDate = (date: unknown): string | null => {
            `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   }
   return null
-}
-
-// Batch insert lifecycle events in one query
-async function addLifecycleBatch(
-  client: PoolClient,
-  events: Array<{
-    taskId: string; taskCode: string; projectId: string; userId: string
-    event_type: string; field_name?: string | null
-    old_value?: string | null; new_value?: string | null
-    description: string
-  }>
-) {
-  if (events.length === 0) return
-  const values: unknown[] = []
-  const rows: string[] = []
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i]
-    const off = i * 9
-    rows.push(`($${off+1},$${off+2},$${off+3},$${off+4},$${off+5},$${off+6},$${off+7},$${off+8},$${off+9})`)
-    values.push(e.taskId, e.taskCode, e.projectId, e.event_type,
-                e.field_name ?? null, e.old_value ?? null, e.new_value ?? null,
-                e.description, e.userId)
-  }
-  await client.query(
-    `INSERT INTO task_lifecycle
-       (task_id, task_code, project_id, event_type, field_name, old_value, new_value, description, created_by)
-     VALUES ${rows.join(',')}`,
-    values
-  )
 }
 
 export async function PUT(req: NextRequest, { params }: Params) {
@@ -550,12 +503,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     }
 
     // Collect lifecycle events for batch insert at the end
-    const lifecycleEvents: Array<{
-      taskId: string; taskCode: string; projectId: string; userId: string
-      event_type: string; field_name?: string | null
-      old_value?: string | null; new_value?: string | null
-      description: string
-    }> = []
+    const lifecycleEvents: LifecycleInput[] = []
 
     // Collect parent IDs that need name lookups for lifecycle descriptions
     const parentLookupIds = new Set<string>()
@@ -703,7 +651,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       const statusCutoff = projIsMinute ? projStatusDate : auditStatusDate
       const isHistorical = statusCutoff && oldEndStr && oldEndStr <= statusCutoff
       if (isHistorical) {
-        const reason = (t._reason as string | undefined) ?? null
+        const reason = normalizeChangeReason(t._reason)
         for (const f of AUDIT_FIELDS) {
           if (!(f in task)) continue
           const norm = (v: unknown) => {
@@ -736,7 +684,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         // Defer lifecycle event — parent name lookup done later in batch
         // Store move info for post-processing
         (cur as Record<string, unknown>)._moveInfo = {
-          parentChanged, orderChanged, old, code,
+          parentChanged, orderChanged, old, code, reason: normalizeChangeReason(t._reason),
         }
 
         // ── When parent_id changes, update both old and new parent task dates ────────
@@ -797,7 +745,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         lifecycleEvents.push({
           taskId: id, taskCode: code, projectId, userId: auth.value.userId,
           event_type: 'updated', field_name: f,
-          old_value: ovStr, new_value: nvStr, description: desc,
+          old_value: ovStr, new_value: nvStr, description: desc, reason: t._reason,
         })
 
         if (f === 'start_date' || f === 'end_date') dateChanged = true
@@ -829,7 +777,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     for (const cur of updated) {
       const moveInfo = (cur as Record<string, unknown>)._moveInfo as {
         parentChanged: boolean; orderChanged: boolean
-        old: Record<string, unknown>; code: string
+        old: Record<string, unknown>; code: string; reason: string | null
       } | undefined
       if (!moveInfo) continue
       delete (cur as Record<string, unknown>)._moveInfo
@@ -855,7 +803,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         field_name: parentChanged ? 'parent_id' : 'order_index',
         old_value: parentChanged ? String(old.parent_id ?? '顶级') : String(old.order_index),
         new_value: parentChanged ? String(curRec.parent_id ?? '顶级') : String(curRec.order_index),
-        description: desc,
+        description: desc, reason: moveInfo.reason,
       })
     }
 
@@ -955,7 +903,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   const owned = await verifyProjectOwnership(projectId, auth.value.userId)
   if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
 
-  let body: { ids?: string[]; id?: string }
+  let body: { ids?: string[]; id?: string; reasons?: Record<string, unknown> }
   try {
     body = await req.json()
   } catch {
@@ -1014,6 +962,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
         taskId: t.id, taskCode: t.task_code ?? t.id.slice(0, 8),
         projectId, userId: auth.value.userId,
         event_type: 'deleted',
+        reason: body.reasons?.[t.id],
         description: `删除任务「${t.name}」（${t.task_code ?? ''}）`,
       })
     }

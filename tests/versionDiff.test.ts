@@ -14,6 +14,7 @@ function task(partial: Partial<SnapshotTask> & Pick<SnapshotTask, 'task_code'>):
     percent_done: partial.percent_done ?? 0,
     is_milestone: partial.is_milestone ?? false,
     auto_schedule: partial.auto_schedule ?? true,
+    note: partial.note ?? null,
     parent_id: partial.parent_id ?? null,
     order_index: partial.order_index ?? 0,
   }
@@ -28,6 +29,15 @@ test('day-level diff ignores sub-day date and duration unit noise', () => {
   ]
 
   assert.deepEqual(diffSnapshots(oldTasks, newTasks, { isMinute: false }), [])
+})
+
+test('a note-only edit appears in the change review and preserves its full text', () => {
+  const oldTask = task({ task_code: '55' })
+  const note = '2026-10-15 设备到货延期\n安装顺延至下周'
+  const changes = diffSnapshots([oldTask], [{ ...oldTask, note }])
+  assert.deepEqual(changes[0].changes, [{ field: '备注', old: '(空)', new: note }])
+  assert.deepEqual(diffSnapshots([{ ...oldTask, note }], [{ ...oldTask, note }]), [])
+  assert.deepEqual(diffSnapshots([oldTask], [{ ...oldTask, note: '' }]), [])
 })
 
 test('reports task type changes between auto and manual', () => {

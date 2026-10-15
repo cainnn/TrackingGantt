@@ -12,6 +12,7 @@ import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
 import { defaultTaskSchedule, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
+import { describeLifecycleChange } from '@/lib/taskLifecycleDisplay'
 
 interface Props {
   taskId: string
@@ -78,6 +79,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   const [lifecycle, setLifecycle] = useState<TaskLifecycleEvent[]>([])
   const [lcLoading, setLcLoading] = useState(false)
+  const [lcError, setLcError] = useState('')
 
   // Adding predecessor UI
   const [showAddPred, setShowAddPred] = useState(false)
@@ -341,16 +343,29 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     }
   }, [task, dispatch, buildAutoScheduleTask, dtSlice])
 
-  const loadLifecycle = useCallback(() => {
+  const loadLifecycle = useCallback((signal: AbortSignal) => {
     if (tab !== 'history') return
     setLcLoading(true)
-    authFetch(`/api/tasks/${projectId}/${taskId}`)
+    setLcError('')
+    authFetch(`/api/tasks/${projectId}/${taskId}`, { signal })
       .then(r => r.json())
-      .then(d => { if (d.ok) setLifecycle(d.value.lifecycle) })
-      .finally(() => setLcLoading(false))
+      .then(d => {
+        if (!d.ok) throw new Error(d.error || '加载失败')
+        if (!signal.aborted) setLifecycle(d.value.lifecycle)
+      })
+      .catch(error => {
+        if (signal.aborted) return
+        console.error('加载任务生命周期失败:', error)
+        setLcError('变更记录加载失败，请重新打开生命周期。')
+      })
+      .finally(() => { if (!signal.aborted) setLcLoading(false) })
   }, [tab, projectId, taskId])
 
-  useEffect(() => { loadLifecycle() }, [loadLifecycle])
+  useEffect(() => {
+    const controller = new AbortController()
+    loadLifecycle(controller.signal)
+    return () => controller.abort()
+  }, [loadLifecycle])
 
   if (!task) return null
 
@@ -939,8 +954,13 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
           {/* Lifecycle tab */}
           {tab === 'history' && (
             <div className="px-5 py-4">
+              <p className="mb-4 text-xs leading-relaxed text-gray-500">
+                记录任务的变更内容、原因、时间和操作人。变更原因在“确认变更”时填写，提交后显示在这里。
+              </p>
               {lcLoading ? (
                 <div className="flex items-center justify-center h-32 text-gray-400 text-sm">加载中...</div>
+              ) : lcError ? (
+                <div role="alert" className="py-6 text-sm text-red-600">{lcError}</div>
               ) : lifecycle.length === 0 ? (
                 <div className="flex items-center justify-center h-32 text-gray-400 text-sm">暂无记录</div>
               ) : (
@@ -954,10 +974,18 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                           {icon}
                         </span>
                         <div className="bg-gray-50 rounded-md px-3 py-2 border border-gray-100">
-                          <p className="text-[13px] text-gray-700 leading-snug">{ev.description}</p>
+                          <p className="text-[13px] text-gray-700 leading-snug whitespace-pre-wrap break-words">
+                            {describeLifecycleChange(ev, isMinute)}
+                          </p>
+                          <div className="mt-2 border-t border-gray-200 pt-2 text-xs leading-relaxed">
+                            <span className="font-medium text-gray-600">变更原因：</span>
+                            <span className={`whitespace-pre-wrap break-words ${ev.reason ? 'text-gray-700' : 'text-gray-400'}`}>
+                              {ev.reason || '未记录'}
+                            </span>
+                          </div>
                           <div className="mt-1 flex items-center gap-3 text-[11px] text-gray-400">
                             <span>{fmtDate(ev.created_at)}</span>
-                            {ev.created_by_name && <span>by {ev.created_by_name}</span>}
+                            {ev.created_by_name && <span>操作人：{ev.created_by_name}</span>}
                           </div>
                         </div>
                       </li>

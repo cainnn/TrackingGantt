@@ -37,6 +37,7 @@ ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS original_start_date DATE;
 ALTER TABLE tasks            ADD COLUMN IF NOT EXISTS original_end_date   DATE;
 ALTER TABLE dependencies     ADD COLUMN IF NOT EXISTS active              BOOLEAN     DEFAULT true;
 ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS is_autosave         BOOLEAN     DEFAULT false;
+ALTER TABLE task_lifecycle   ADD COLUMN IF NOT EXISTS reason              TEXT;
 
 CREATE TABLE IF NOT EXISTS task_change_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

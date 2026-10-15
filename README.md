@@ -53,6 +53,16 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+### 任务生命周期与变更原因
+
+编辑任务后，在工具栏“确认变更”中填写实际调整原因并提交。“编辑任务 → 生命周期”展示变更前后值、原因、时间和操作人；被动调整使用确认页显示的关联任务说明。原因随日志独立保存，同一状态日期的版本替换不会覆盖它。仅修改备注也会进入确认流程。
+
+每条记录仅展示发生变化的字段；任务名称只在改名时展示，天级项目的日期不重复显示 `00:00`。依赖关系变更也可在确认页填写原因。
+
+旧日志优先从对应版本中匹配同一任务、操作人和字段前后值的原因；无法唯一匹配的记录显示“未记录”。
+
+已有数据库在启动新版前执行 `scripts/migrate-task-lifecycle-reason.sql`（使用现有数据库连接配置）；新数据库初始化和常规 VPS 部署会自动执行这项幂等迁移。
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Deploy to VPS (Fast Path)

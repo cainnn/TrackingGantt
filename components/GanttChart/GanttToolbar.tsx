@@ -196,7 +196,7 @@ export default function GanttToolbar({
   onDiscardChanges,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
-  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, editDescriptions, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
+  const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
   const formatStatusDate = useCallback((value?: string | Date | null) => {
@@ -319,7 +319,7 @@ export default function GanttToolbar({
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-      auto_schedule: t.auto_schedule,
+      auto_schedule: t.auto_schedule, note: t.note,
       parent_id: t.parent_id,
     })))
     setBaselineTasks(livingTasks.map(t => ({ ...t })))
@@ -336,7 +336,7 @@ export default function GanttToolbar({
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-      auto_schedule: t.auto_schedule,
+      auto_schedule: t.auto_schedule, note: t.note,
       parent_id: t.parent_id,
     }))
     return diffSnapshots(baseline, currentSnap, { isMinute })
@@ -422,6 +422,7 @@ export default function GanttToolbar({
   const [reviewOpen, setReviewOpen] = useState(false)
   // 每个变更项的原因（key = task_code）
   const [reasons, setReasons] = useState<Record<string, string>>({})
+  const [dependencyReasons, setDependencyReasons] = useState<Record<string, string>>({})
 
   // 对比模式：仅以"上一次状态日期快照"作为基准条覆盖在当前主视图下方。
   // 不再切换主视图——查看历史版本请使用版本面板中的"查看"按钮。
@@ -570,21 +571,15 @@ export default function GanttToolbar({
   }, [primaryCodes, manualReasonCodes])
 
   const openReview = useCallback(() => {
-    // 用自动描述预填主动变更的原因
-    const prefilled: Record<string, string> = {}
-    for (const [taskId, desc] of Object.entries(editDescriptions)) {
-      const t = tasks.find(t => t.id === taskId)
-      if (t && requiredReasonCodes.has(t.task_code)) {
-        prefilled[t.task_code] = desc
-      }
-    }
-    setReasons(prefilled)
+    setReasons({})
+    setDependencyReasons({})
     setReviewOpen(true)
-  }, [editDescriptions, tasks, requiredReasonCodes])
+  }, [])
   // 有任意变更（任务/依赖/状态日期）即视为可提交；
   // 任务变更里所有主动项需要填理由，纯状态日期变更不需要理由。
   const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged) &&
-    changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0)
+    changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0) &&
+    depDiff.items.every(d => (dependencyReasons[d.id] ?? '').trim().length > 0)
 
   // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
   const initVersionRef = useRef(false)
@@ -1354,7 +1349,7 @@ export default function GanttToolbar({
   // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
   const handleConfirmChanges = useCallback(async () => {
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
-    if (!sd || statusDateSaving) return
+    if (!sd || statusDateSaving || !allReasonsFilled) return
 
     setStatusDateSaving(true)
 
@@ -1388,6 +1383,19 @@ export default function GanttToolbar({
     // 用 recomputed 后的状态作为本次保存的快照
     const finalTasks = tasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
 
+    const reasonMap: Record<string, string> = {}
+    for (const d of changeDiffs) {
+      if (requiredReasonCodes.has(d.task_code)) {
+        const r = (reasons[d.task_code] ?? '').trim()
+        if (r) reasonMap[d.task_code] = r
+      } else if (passiveReasonMap[d.task_code]) {
+        reasonMap[d.task_code] = passiveReasonMap[d.task_code]
+      }
+    }
+    const reasonByTaskId = Object.fromEntries(
+      [...baselineTasks, ...tasks].map(t => [t.id, reasonMap[t.task_code] ?? null]),
+    )
+
     // 2. 与基线 diff，生成批量操作
     const diff = buildSaveDiff(baselineTasks, baselineDeps, finalTasks, dependencies)
     let saveError: string | null = null
@@ -1396,7 +1404,7 @@ export default function GanttToolbar({
       for (const depId of diff.depsToDelete) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
           method: 'DELETE', headers: authFetchHeaders(true),
-          body: JSON.stringify({ id: depId }),
+          body: JSON.stringify({ id: depId, _reason: dependencyReasons[depId]?.trim() }),
         })
         if (!r.ok) throw new Error(`删除依赖失败 (${r.status})`)
       }
@@ -1404,7 +1412,7 @@ export default function GanttToolbar({
       if (diff.tasksToDelete.length > 0) {
         const r = await authFetch(`/api/tasks/${projectId}`, {
           method: 'DELETE', headers: authFetchHeaders(true),
-          body: JSON.stringify({ ids: diff.tasksToDelete }),
+          body: JSON.stringify({ ids: diff.tasksToDelete, reasons: reasonByTaskId }),
         })
         if (!r.ok) throw new Error(`删除任务失败 (${r.status})`)
       }
@@ -1412,7 +1420,7 @@ export default function GanttToolbar({
       if (diff.tasksToAdd.length > 0) {
         const r = await authFetch(`/api/tasks/${projectId}`, {
           method: 'POST', headers: authFetchHeaders(true),
-          body: JSON.stringify(diff.tasksToAdd),
+          body: JSON.stringify(diff.tasksToAdd.map(t => ({ ...t, _reason: reasonByTaskId[t.id] }))),
         })
         if (!r.ok) throw new Error(`新增任务失败 (${r.status})`)
       }
@@ -1427,6 +1435,7 @@ export default function GanttToolbar({
           status: t.status, deadline: t.deadline,
           rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
           baseline_end_date: t.baseline_end_date, task_code: t.task_code,
+          _reason: reasonByTaskId[t.id],
         }))
         const r = await authFetch(`/api/tasks/${projectId}`, {
           method: 'PUT', headers: authFetchHeaders(true),
@@ -1441,6 +1450,7 @@ export default function GanttToolbar({
           body: JSON.stringify({
             id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
             type: dep.type, lag: dep.lag, active: dep.active ?? true,
+            _reason: dependencyReasons[dep.id]?.trim(),
           }),
         })
         if (!r.ok) throw new Error(`新增依赖失败 (${r.status})`)
@@ -1449,7 +1459,7 @@ export default function GanttToolbar({
       for (const dep of diff.depsToUpdate) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
           method: 'PUT', headers: authFetchHeaders(true),
-          body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true }),
+          body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true, _reason: dependencyReasons[dep.id]?.trim() }),
         })
         if (!r.ok) throw new Error(`更新依赖失败 (${r.status})`)
       }
@@ -1481,15 +1491,6 @@ export default function GanttToolbar({
     }
 
     // 3. 创建版本快照
-    const reasonMap: Record<string, string> = {}
-    for (const d of changeDiffs) {
-      if (requiredReasonCodes.has(d.task_code)) {
-        const r = (reasons[d.task_code] ?? '').trim()
-        if (r) reasonMap[d.task_code] = r
-      } else if (passiveReasonMap[d.task_code]) {
-        reasonMap[d.task_code] = passiveReasonMap[d.task_code]
-      }
-    }
     const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
       method: 'POST',
       headers: authFetchHeaders(true),
@@ -1520,7 +1521,7 @@ export default function GanttToolbar({
         start_date: t.start_date, end_date: t.end_date,
         duration: t.duration, assignee: t.assignee,
         percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-        auto_schedule: t.auto_schedule,
+        auto_schedule: t.auto_schedule, note: t.note,
         parent_id: t.parent_id,
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
@@ -1535,7 +1536,7 @@ export default function GanttToolbar({
       alert(`版本保存失败：${snapshotData.error ?? '未知错误'}`)
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
-      changeDiffs, versions, reasons, primaryCodes, requiredReasonCodes, passiveReasonMap,
+      changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, statusDateChanged,
       isMinute, snapshotEndForBaseline])
 
@@ -2183,9 +2184,10 @@ export default function GanttToolbar({
                   <div className="mt-2">
                     {requiredReasonCodes.has(d.task_code) ? (
                       <textarea
+                        aria-label={`任务 ${d.task_code} 的变更原因`}
                         value={reasons[d.task_code] ?? ''}
                         onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
-                        placeholder={manualReasonCodes.has(d.task_code) ? '手动任务原因（必填）' : '变更原因（必填）'}
+                        placeholder={manualReasonCodes.has(d.task_code) ? '手动任务原因（必填）' : '变更原因（必填，例如：设备到货延期，安装时间顺延）'}
                         rows={2}
                         className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
                           (reasons[d.task_code] ?? '').trim().length === 0
@@ -2238,6 +2240,14 @@ export default function GanttToolbar({
                       ))}
                     </div>
                   )}
+                  <textarea
+                    aria-label={`${item.fromName} 到 ${item.toName} 的依赖变更原因`}
+                    value={dependencyReasons[item.id] ?? ''}
+                    onChange={e => setDependencyReasons(prev => ({ ...prev, [item.id]: e.target.value }))}
+                    placeholder="依赖变更原因（必填）"
+                    rows={2}
+                    className="mt-2 w-full text-xs px-2 py-1 rounded border border-gray-300 resize-y bg-white focus:outline-none focus:border-blue-400"
+                  />
                 </div>
               ))}
             </div>
@@ -2253,7 +2263,7 @@ export default function GanttToolbar({
               <button
                 onClick={() => { setReviewOpen(false); handleConfirmChanges() }}
                 disabled={statusDateSaving || !allReasonsFilled}
-                title={!allReasonsFilled ? '请为主动变更和手动任务填写原因' : ''}
+                title={!allReasonsFilled ? '请为主动变更、手动任务和依赖变更填写原因' : ''}
                 className="px-4 py-2 text-sm text-white bg-green-600 rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed cursor-pointer"
               >
                 {statusDateSaving ? '保存中...' : '确认并保存'}

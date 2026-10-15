@@ -38,7 +38,7 @@ export async function GET(req: NextRequest, { params }: Params) {
 
   const res = await pool.query(
     `SELECT l.id, l.task_id, l.task_code, l.event_type, l.field_name,
-            l.old_value, l.new_value, l.description,
+            l.old_value, l.new_value, l.description, l.reason,
             u.username AS created_by_name, l.created_at
      FROM task_lifecycle l
      LEFT JOIN users u ON u.id = l.created_by

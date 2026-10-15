@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS task_lifecycle (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+ALTER TABLE task_lifecycle ADD COLUMN IF NOT EXISTS reason TEXT;
+
 -- 版本管理表（双轨制：工作版本 + 冻结快照）
 CREATE TABLE IF NOT EXISTS project_versions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

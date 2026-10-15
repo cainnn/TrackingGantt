@@ -62,6 +62,7 @@ export interface TaskLifecycleEvent {
   old_value: string | null
   new_value: string | null
   description: string
+  reason?: string | null
   created_by_name: string | null
   created_at: string
 }

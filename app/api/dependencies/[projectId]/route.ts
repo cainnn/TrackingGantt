@@ -1,3 +1,4 @@
+import { addLifecycle } from '@/lib/taskLifecycle'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
@@ -33,16 +34,10 @@ async function logDepLifecycle(
   client: PoolClient,
   opts: {
     taskId: string; taskCode: string; projectId: string; userId: string
-    event_type: string; description: string
+    event_type: string; description: string; reason?: unknown
   },
 ) {
-  await client.query(
-    `INSERT INTO task_lifecycle
-       (task_id, task_code, project_id, event_type, field_name, old_value, new_value, description, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [opts.taskId, opts.taskCode, opts.projectId, opts.event_type,
-     'dependency', null, null, opts.description, opts.userId],
-  )
+  await addLifecycle(client, { ...opts, field_name: 'dependency' })
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
@@ -55,7 +50,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!(await verifyOwnership(projectId, auth.value.userId)))
       return NextResponse.json(failure('Not found', 404), { status: 404 })
 
-    let body: { id?: string; from_task_id?: string; to_task_id?: string; type?: number; lag?: number; active?: boolean }
+    let body: { id?: string; from_task_id?: string; to_task_id?: string; type?: number; lag?: number; active?: boolean; _reason?: unknown }
     try {
       body = await req.json()
     } catch {
@@ -110,7 +105,7 @@ export async function POST(req: NextRequest, { params }: Params) {
         const lagStr = Number(lag) ? ` (lag=${lag}d)` : ''
         await logDepLifecycle(client, {
           taskId: to_task_id, taskCode: toI.task_code, projectId,
-          userId: auth.value.userId, event_type: 'dep_added',
+          userId: auth.value.userId, event_type: 'dep_added', reason: body._reason,
           description: `添加${typeLabel}依赖：「${fromI.name}」(${fromI.task_code}) → 「${toI.name}」(${toI.task_code})${lagStr}`,
         })
       }
@@ -157,7 +152,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (!(await verifyOwnership(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
-  const { id, type, lag, active } = await req.json()
+  const { id, type, lag, active, _reason } = await req.json()
   if (!id) return NextResponse.json(failure('id required', 400), { status: 400 })
 
   const client = await pool.connect()
@@ -203,7 +198,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       if (parts.length > 0) {
         await logDepLifecycle(client, {
           taskId: old.to_task_id, taskCode: toI.task_code, projectId,
-          userId: auth.value.userId, event_type: 'dep_updated',
+          userId: auth.value.userId, event_type: 'dep_updated', reason: _reason,
           description: `修改依赖「${fromI.name}」(${fromI.task_code}) → 「${toI.name}」(${toI.task_code})：${parts.join('，')}`,
         })
       }
@@ -248,7 +243,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   if (!(await verifyOwnership(projectId, auth.value.userId)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
-  const { id } = await req.json()
+  const { id, _reason } = await req.json()
   if (!id) return NextResponse.json(failure('id required', 400), { status: 400 })
 
   const client = await pool.connect()
@@ -276,7 +271,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       const typeLabel = DEP_TYPE_LABEL[old.type] ?? 'FS'
       await logDepLifecycle(client, {
         taskId: old.to_task_id, taskCode: toI.task_code, projectId,
-        userId: auth.value.userId, event_type: 'dep_removed',
+        userId: auth.value.userId, event_type: 'dep_removed', reason: _reason,
         description: `删除${typeLabel}依赖：「${fromI.name}」(${fromI.task_code}) → 「${toI.name}」(${toI.task_code})`,
       })
     }
