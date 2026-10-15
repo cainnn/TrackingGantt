@@ -21,6 +21,7 @@ import {
   snapTaskUpdatesToDayLevel,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
+import { buildTaskScheduleEdit, durationInputValue } from '@/lib/clientTaskEdit'
 import { uuid } from '@/lib/uuid'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -2051,42 +2052,8 @@ export default function GanttChart({
     let patch: Record<string, unknown> = {}
     if (cellEdit.field === 'assignee') {
       patch = { assignee: cellEdit.value.trim() || null }
-    } else if (cellEdit.field === 'duration') {
-      const dur = parseFloat(cellEdit.value)
-      if (!isNaN(dur) && dur > 0) {
-        const incoming = deps.filter(d => d.to_task_id === orig.id)
-        const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
-        if (orig.auto_schedule !== false && (depType === 3 || depType === 1) && orig.end_date) {
-          // FF/SF: 结束日期固定，工期改变时调整开始日期
-          const newStart = fmtDate(addDays(new Date(orig.end_date), -Math.round(dur)))
-          patch = { duration: Math.round(dur), start_date: newStart }
-        } else if (orig.start_date) {
-          // FS/SS/空/手动: 开始日期固定，工期改变时调整结束日期
-          const newEnd = fmtDate(addDays(new Date(orig.start_date), Math.round(dur)))
-          patch = { duration: Math.round(dur), end_date: newEnd }
-        }
-      }
-    } else if (cellEdit.field === 'start_date') {
-      if (orig.auto_schedule !== false) {
-        // FF/SF: 允许编辑开始日期；FS/SS/空: 不允许
-        const incoming = deps.filter(d => d.to_task_id === orig.id)
-        const depType = incoming.length > 0 ? (incoming[0].type ?? 2) : -1
-        if (depType !== 3 && depType !== 1) { setCellEdit(null); return }
-      }
-      if (cellEdit.value) {
-        const clampedStart = cellEdit.value
-        const newDur = orig.end_date
-          ? diffDays(new Date(clampedStart), new Date(orig.end_date))
-          : orig.duration
-        patch = { start_date: clampedStart, duration: (newDur != null && newDur > 0) ? newDur : orig.duration }
-      }
-    } else if (cellEdit.field === 'end_date') {
-      if (cellEdit.value) {
-        const newDur = orig.start_date
-          ? diffDays(new Date(orig.start_date), new Date(cellEdit.value))
-          : orig.duration
-        patch = { end_date: cellEdit.value, duration: (newDur != null && newDur > 0) ? newDur : orig.duration }
-      }
+    } else {
+      patch = buildTaskScheduleEdit(orig, deps, cellEdit.field, cellEdit.value, isMinute)
     }
 
     if (Object.keys(patch).length === 0) { setCellEdit(null); return }
@@ -3170,10 +3137,12 @@ export default function GanttChart({
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
-                         setCellEdit({ taskId: t.id, field: 'duration', value: t.duration != null ? String(t.duration) : '' })
+                         setCellEdit({ taskId: t.id, field: 'duration', value: durationInputValue(t.duration, isMinute) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'duration'
-                      ? <input autoFocus type="number" min={1}
+                      ? <input autoFocus type="number" min={1} step={1}
+                               aria-label={isMinute ? '工期（分钟）' : '工期（天）'}
+                               title={isMinute ? '工期（分钟）' : '工期（天）'}
                                className="w-full border border-blue-400 rounded px-1 text-[11px] outline-none text-right"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
