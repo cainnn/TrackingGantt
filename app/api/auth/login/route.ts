@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await pool.query(
-      'SELECT id, username, email, password_hash, role FROM users WHERE email = $1 OR username = $1',
+      'SELECT id, username, email, password_hash, role FROM users WHERE email = $1 OR LOWER(username) = LOWER($1)',
       [login]
     )
 

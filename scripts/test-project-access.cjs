@@ -26,7 +26,7 @@ async function newUser(label, role = 'admin') {
   const username = `access_${suffix}_${label}`;
   const user = await api(root.token, '/users', 'POST', { username, email: `${username}@example.com`, password, role }, 201);
   users.push(user);
-  return { ...user, ...(await login(username)) };
+  return { ...user, ...(await login(username.toUpperCase())) };
 }
 async function newProject(session, label, extra = {}) {
   const project = await api(session.token, '/projects', 'POST', { name: `权限回归-${suffix}-${label}`, ...extra }, 201);
@@ -152,6 +152,9 @@ async function main() {
     return;
   }
   const owner = await newUser('owner');
+  await api(root.token, '/users', 'POST', {
+    username: owner.username.toUpperCase(), email: `case_${owner.username}@example.com`, password,
+  }, 409);
   const member = await newUser('member');
   const view = await newUser('view', 'view');
   const shortUsername = `access_${suffix}_short`;
