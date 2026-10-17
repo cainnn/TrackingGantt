@@ -33,8 +33,8 @@ export async function POST(req: NextRequest) {
   if (!username || username.length > 50 || username.toLowerCase() === 'root' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) {
     return NextResponse.json(failure('请填写有效的用户名和邮箱（root 为保留账号）', 400), { status: 400 })
   }
-  if (password.length < 6 || Buffer.byteLength(password, 'utf8') > 72) {
-    return NextResponse.json(failure('密码至少6位，且不能超过72字节', 400), { status: 400 })
+  if (!password) {
+    return NextResponse.json(failure('密码不能为空', 400), { status: 400 })
   }
   if (!['admin', 'view'].includes(role)) {
     return NextResponse.json(failure('请选择普通用户或只读用户', 400), { status: 400 })
@@ -59,8 +59,8 @@ export async function PUT(req: NextRequest) {
   const block = requireAdministrator(await getAuthUser(req))
   if (block) return block
   const body = await req.json().catch(() => null)
-  if (!isUuid(body?.userId) || typeof body?.password !== 'string' || body.password.length < 6 || Buffer.byteLength(body.password, 'utf8') > 72) {
-    return NextResponse.json(failure('请提供有效的用户 ID 和新密码（至少6位，不超过72字节）', 400), { status: 400 })
+  if (!isUuid(body?.userId) || typeof body?.password !== 'string' || !body.password) {
+    return NextResponse.json(failure('请提供有效的用户 ID 和新密码', 400), { status: 400 })
   }
   try {
     const passwordHash = await bcrypt.hash(body.password, 10)

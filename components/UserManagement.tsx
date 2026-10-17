@@ -92,7 +92,7 @@ export default function UserManagement() {
   }
 
   const handleChangePwd = async (userId: string) => {
-    if (!newPwd || newPwd.length < 6) { alert('密码长度不能少于6位'); return }
+    if (!newPwd) { alert('密码不能为空'); return }
     setSavingPwd(true)
     try {
       const res = await authFetch('/api/users', {
@@ -149,8 +149,8 @@ export default function UserManagement() {
               className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <input
-              type="password" autoComplete="new-password" required minLength={6}
-              placeholder="密码（至少6位）" aria-label="新用户密码"
+              type="password" autoComplete="new-password" required
+              placeholder="密码" aria-label="新用户密码"
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
               className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"

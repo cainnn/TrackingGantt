@@ -154,6 +154,16 @@ async function main() {
   const owner = await newUser('owner');
   const member = await newUser('member');
   const view = await newUser('view', 'view');
+  const shortUsername = `access_${suffix}_short`;
+  const shortUser = await api(root.token, '/users', 'POST', {
+    username: shortUsername, email: `${shortUsername}@example.com`, password: '1',
+  }, 201);
+  users.push(shortUser);
+  assert.equal((await login(shortUsername, '1')).user.id, shortUser.id);
+  await api(root.token, '/users', 'PUT', { userId: shortUser.id, password: '2' });
+  await api(null, '/auth/login', 'POST', { login: shortUsername, password: '1' }, 401);
+  assert.equal((await login(shortUsername, '2')).user.id, shortUser.id);
+  await api(root.token, '/users', 'PUT', { userId: shortUser.id, password: '' }, 400);
   const p = await newProject(owner, 'owner');
   const q = await newProject(member, 'private');
   const t = (await api(owner.token, `/tasks/${p.id}`, 'POST', { name: '测试任务', start_date: '2026-10-17', end_date: '2026-10-18', duration: 1440 }, 201))[0];
