@@ -1,3 +1,4 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser } from '@/lib/middleware'
@@ -7,13 +8,11 @@ type Params = { params: Promise<{ projectId: string }> }
 
 // GET /api/tasks/[projectId]/changelog?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=200
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const { projectId } = await params
 
-  const proj = auth.value.role === 'view'
-    ? await pool.query('SELECT id FROM projects WHERE id = $1', [projectId])
-    : await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
+  const proj = await getAccessibleProject(projectId, auth.value)
   if (!proj.rows.length)
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 

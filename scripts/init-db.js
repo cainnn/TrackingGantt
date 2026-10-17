@@ -53,6 +53,7 @@ async function initDatabase() {
     // 执行SQL
     console.log('正在执行SQL脚本...');
     await client.query(sql);
+    await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-memberships.sql'), 'utf8'));
     console.log('✓ 数据库初始化完成');
 
     // 显示测试数据
@@ -77,6 +78,7 @@ async function initDatabase() {
     if (users.rows.length > 0) {
       console.log(`\n测试账号：`);
       console.log(`  超级管理员: administrator / admin123`);
+      console.log(`  root 管理员: root / root123（仅首次迁移设置）`);
       console.log(`  默认管理员: admin / admin123`);
       console.log(`  预置管理员: adminqu 等账号，密码均为 用户名 + 123`);
       console.log(`  只读账号: view / view123`);

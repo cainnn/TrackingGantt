@@ -1,3 +1,4 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser } from '@/lib/middleware'
@@ -112,13 +113,11 @@ function classifyScheduleChanges(diffs: ReturnType<typeof diffSnapshots>) {
 // GET /api/versions/[projectId]/weekly-diff?current=VERSION_ID
 // 自动选 current 之前最近的正式状态日期版本作为基准。
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const { projectId } = await params
 
-  const projectRes = auth.value.role === 'view'
-    ? await pool.query('SELECT id, name, time_granularity FROM projects WHERE id = $1', [projectId])
-    : await pool.query('SELECT id, name, time_granularity FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
+  const projectRes = await getAccessibleProject(projectId, auth.value)
   if (!projectRes.rows.length) return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const currentId = req.nextUrl.searchParams.get('current')

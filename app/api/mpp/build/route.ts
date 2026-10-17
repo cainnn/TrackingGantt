@@ -6,7 +6,7 @@ import { exportMpp, type ExportPayload } from '@/lib/asposeTasksRunner'
 const MAX_TASKS = 10_000
 
 export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
 
   let payload: ExportPayload

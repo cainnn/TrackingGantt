@@ -269,7 +269,7 @@ VALUES
 ON CONFLICT (username) DO NOTHING;
 
 -- 插入预置只读用户（用户名: view  密码: view123）
--- 可查看所有项目、试用AI功能，无法保存任何修改
+-- 可查看关联的项目、试用AI功能，无法保存任何修改
 INSERT INTO users (username, email, password_hash, role)
 VALUES ('view', 'view@example.com', '$2b$10$BHI8V2g7p395KMBww8kGVOi9eQ7WDWg8i9bB9s42xz.7lIRPgQmG6', 'view')
 ON CONFLICT (username) DO NOTHING;

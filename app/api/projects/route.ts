@@ -1,3 +1,5 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
+import { projectAccessSql } from '@/lib/projectAccessPolicy'
 import { NextRequest, NextResponse } from 'next/server'
 import { randomUUID } from 'crypto'
 import pool from '@/lib/db'
@@ -5,13 +7,13 @@ import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 
 export async function GET(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
 
-  // view/administrator 用户可查看所有项目，admin 只看自己的
-  const projectsResult = (auth.value.role === 'view' || auth.value.role === 'administrator')
-    ? await pool.query('SELECT * FROM projects ORDER BY created_at DESC')
-    : await pool.query('SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC', [auth.value.userId])
+  const access = projectAccessSql(auth.value)
+  const projectsResult = await pool.query(
+    `SELECT p.* FROM projects p WHERE ${access.sql} ORDER BY p.created_at DESC`, access.values,
+  )
 
   // 为每个项目计算进度和预计完成时间
   const projects = await Promise.all(
@@ -76,7 +78,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 
@@ -98,10 +100,7 @@ export async function POST(req: NextRequest) {
   // If copying from another project, use its dates as defaults
   let srcProject: Record<string, unknown> | null = null
   if (copy_from) {
-    const srcRes = await pool.query(
-      'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
-      [copy_from, auth.value.userId]
-    )
+    const srcRes = await getAccessibleProject(copy_from, auth.value)
     if (srcRes.rows.length === 0) {
       return NextResponse.json(failure('Source project not found', 404), { status: 404 })
     }

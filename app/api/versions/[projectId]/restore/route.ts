@@ -1,3 +1,4 @@
+import { hasProjectAccess } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
@@ -40,11 +41,6 @@ type SnapshotDependency = {
   type?: number | null
   lag?: number | null
   active?: boolean | null
-}
-
-async function verifyOwner(projectId: string, userId: string) {
-  const r = await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, userId])
-  return r.rows.length > 0
 }
 
 async function lockProjectTx(client: PoolClient, projectId: string): Promise<void> {
@@ -111,12 +107,12 @@ async function upsertTaskShell(client: PoolClient, projectId: string, task: Snap
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId))) {
+  if (!(await hasProjectAccess(projectId, auth.value))) {
     return NextResponse.json(failure('Not found', 404), { status: 404 })
   }
 

@@ -1,3 +1,4 @@
+import { hasProjectAccess } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
@@ -6,19 +7,14 @@ import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 
 type Params = { params: Promise<{ projectId: string }> }
 
-async function verifyOwner(projectId: string, userId: string) {
-  const r = await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, userId])
-  return r.rows.length > 0
-}
-
 // GET /api/versions/[projectId]
 // ?list=1  → 返回所有版本列表（不含 snapshot 大字段）
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const { projectId } = await params
 
-  if (auth.value.role !== 'view' && auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const listAll = req.nextUrl.searchParams.get('list')
@@ -55,12 +51,12 @@ export async function GET(req: NextRequest, { params }: Params) {
 // POST /api/versions/[projectId] — 创建快照
 // body: { name?, description?, status_date?, tasks?, dependencies? }
 export async function POST(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const client = await pool.connect()
@@ -203,12 +199,12 @@ export async function POST(req: NextRequest, { params }: Params) {
 // PUT /api/versions/[projectId] — 更新版本元数据
 // body: { id, name?, description? }
 export async function PUT(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id, name, description } = await req.json()
@@ -229,12 +225,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
 // DELETE /api/versions/[projectId] — 删除版本
 // body: { id }
 export async function DELETE(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (auth.value.role !== 'administrator' && !(await verifyOwner(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id } = await req.json()

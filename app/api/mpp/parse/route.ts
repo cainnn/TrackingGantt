@@ -7,7 +7,7 @@ import { importMpp } from '@/lib/asposeTasksRunner'
 const MAX_MPP_SIZE = 20 * 1024 * 1024
 
 export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 

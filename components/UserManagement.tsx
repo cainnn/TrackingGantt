@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
+import UserProjectAccess from './UserProjectAccess'
 
 interface UserRow {
   id: string
@@ -13,11 +14,13 @@ interface UserRow {
 
 const ROLE_LABELS: Record<string, string> = {
   administrator: '超级管理员',
-  admin: '管理员',
+  admin: '普通用户',
   view: '只读',
 }
 
 export default function UserManagement() {
+  const [activeTab, setActiveTab] = useState<'users' | 'projects'>('projects')
+  const [newRole, setNewRole] = useState('admin')
   const [users, setUsers] = useState<UserRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -38,8 +41,9 @@ export default function UserManagement() {
     try {
       const res = await authFetch('/api/users')
       const data = await res.json()
-      if (data.ok) setUsers(data.value)
-    } catch { /* ignore */ }
+      if (!res.ok || !data.ok) throw new Error(data.error ?? '加载用户失败')
+      setUsers(data.value)
+    } catch (err) { setError(err instanceof Error ? err.message : '加载用户失败') }
     finally { setLoading(false) }
   }, [])
 
@@ -54,13 +58,14 @@ export default function UserManagement() {
       const res = await authFetch('/api/users', {
         method: 'POST',
         headers: authFetchHeaders(true),
-        body: JSON.stringify({ username: newUsername.trim(), email: newEmail.trim(), password: newPassword }),
+        body: JSON.stringify({ username: newUsername.trim(), email: newEmail.trim(), password: newPassword, role: newRole }),
       })
       const data = await res.json()
       if (data.ok) {
         setUsers(prev => [...prev, data.value])
-        setNewUsername(''); setNewEmail(''); setNewPassword('')
+        setNewUsername(''); setNewEmail(''); setNewPassword(''); setNewRole('admin')
         setShowCreate(false)
+        setActiveTab('projects')
       } else {
         setError(data.error ?? '创建失败')
       }
@@ -111,9 +116,9 @@ export default function UserManagement() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold text-gray-800">用户管理</h2>
+        <h2 className="text-lg font-semibold text-gray-800">用户与项目管理</h2>
         <button
-          onClick={() => setShowCreate(true)}
+          onClick={() => { setShowCreate(true); setActiveTab('users') }}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
         >
           + 新建用户
@@ -126,30 +131,34 @@ export default function UserManagement() {
 
       {showCreate && (
         <form onSubmit={handleCreate} className="mb-4 p-4 bg-white rounded-lg border border-gray-200 shadow-sm space-y-3">
-          <div className="text-sm font-medium text-gray-700 mb-1">创建新用户（admin 类型）</div>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="text-sm font-medium text-gray-700 mb-1">创建新用户</div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <input
               autoFocus
               type="text"
-              placeholder="用户名"
+              placeholder="用户名" aria-label="新用户用户名" required maxLength={50}
               value={newUsername}
               onChange={e => setNewUsername(e.target.value)}
               className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <input
               type="email"
-              placeholder="邮箱"
+              placeholder="邮箱" aria-label="新用户邮箱" required maxLength={255}
               value={newEmail}
               onChange={e => setNewEmail(e.target.value)}
               className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <input
-              type="text"
-              placeholder="密码（至少6位）"
+              type="password" autoComplete="new-password" required minLength={6}
+              placeholder="密码（至少6位）" aria-label="新用户密码"
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
               className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+            <select aria-label="新用户角色" value={newRole} onChange={e => setNewRole(e.target.value)} className="border border-gray-300 rounded px-3 py-2 text-sm">
+              <option value="admin">普通用户（可编辑项目）</option>
+              <option value="view">只读用户</option>
+            </select>
           </div>
           <div className="flex gap-2">
             <button
@@ -170,7 +179,14 @@ export default function UserManagement() {
         </form>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+      <div className="mb-5 flex gap-2 border-b border-gray-200" role="tablist" aria-label="管理内容">
+        {([{ id: 'projects', label: '项目关联' }, { id: 'users', label: '用户账号' }] as const).map(tab => (
+          <button key={tab.id} role="tab" aria-selected={activeTab === tab.id} onClick={() => setActiveTab(tab.id)}
+            className={`border-b-2 px-4 py-2 text-sm font-medium ${activeTab === tab.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500'}`}>{tab.label}</button>
+        ))}
+      </div>
+      {activeTab === 'projects' ? <UserProjectAccess users={users} /> : (
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b border-gray-200">
             <tr>
@@ -199,13 +215,13 @@ export default function UserManagement() {
                   {new Date(u.created_at).toLocaleDateString('zh-CN')}
                 </td>
                 <td className="px-4 py-2.5 text-right">
-                  {u.role !== 'administrator' && (
+                  {
                     <div className="flex items-center justify-end gap-2">
                       {editingPwdId === u.id ? (
                         <div className="flex items-center gap-1">
                           <input
                             autoFocus
-                            type="text"
+                            type="password" autoComplete="new-password"
                             placeholder="新密码"
                             value={newPwd}
                             onChange={e => setNewPwd(e.target.value)}
@@ -234,22 +250,23 @@ export default function UserManagement() {
                           >
                             改密码
                           </button>
-                          <button
+                          {u.role !== 'administrator' && <button
                             onClick={() => handleDelete(u)}
                             className="text-xs text-red-600 hover:text-red-800"
                           >
                             删除
-                          </button>
+                          </button>}
                         </>
                       )}
                     </div>
-                  )}
+                  }
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      )}
     </div>
   )
 }

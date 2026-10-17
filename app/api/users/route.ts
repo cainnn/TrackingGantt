@@ -2,112 +2,105 @@ import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import pool from '@/lib/db'
 import { getAuthUser, requireAdministrator } from '@/lib/middleware'
+import { isUuid } from '@/lib/projectAccessPolicy'
 import { success, failure } from '@/lib/result'
 
-// GET - 获取用户列表（仅 administrator）
-export async function GET(req: NextRequest) {
-  const auth = getAuthUser(req)
-  const block = requireAdministrator(auth)
-  if (block) return block
-
-  const result = await pool.query(
-    `SELECT id, username, email, role, created_at FROM users ORDER BY created_at`
-  )
-  return NextResponse.json(success(result.rows))
+function serverError(error: unknown) {
+  console.error('User management failed:', error)
+  return NextResponse.json(failure('用户操作失败，请重试', 500), { status: 500 })
 }
 
-// POST - 创建新用户（仅 administrator）
-export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
-  const block = requireAdministrator(auth)
+export async function GET(req: NextRequest) {
+  const block = requireAdministrator(await getAuthUser(req))
   if (block) return block
+  try {
+    const result = await pool.query('SELECT id, username, email, role, created_at FROM users ORDER BY created_at, id')
+    return NextResponse.json(success(result.rows))
+  } catch (error) { return serverError(error) }
+}
 
-  const { username, email, password } = await req.json() as {
-    username?: string; email?: string; password?: string
-  }
-
-  if (!username?.trim() || !email?.trim() || !password) {
+export async function POST(req: NextRequest) {
+  const block = requireAdministrator(await getAuthUser(req))
+  if (block) return block
+  const body = await req.json().catch(() => null)
+  if (!body || typeof body.username !== 'string' || typeof body.email !== 'string' || typeof body.password !== 'string') {
     return NextResponse.json(failure('用户名、邮箱和密码不能为空', 400), { status: 400 })
   }
-  if (password.length < 6) {
-    return NextResponse.json(failure('密码长度不能少于6位', 400), { status: 400 })
+  const username = body.username.trim()
+  const email = body.email.trim()
+  const password = body.password as string
+  const role = body.role ?? 'admin'
+  if (!username || username.length > 50 || username.toLowerCase() === 'root' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) {
+    return NextResponse.json(failure('请填写有效的用户名和邮箱（root 为保留账号）', 400), { status: 400 })
   }
-
-  const passwordHash = await bcrypt.hash(password, 10)
-
+  if (password.length < 6 || Buffer.byteLength(password, 'utf8') > 72) {
+    return NextResponse.json(failure('密码至少6位，且不能超过72字节', 400), { status: 400 })
+  }
+  if (!['admin', 'view'].includes(role)) {
+    return NextResponse.json(failure('请选择普通用户或只读用户', 400), { status: 400 })
+  }
   try {
+    const passwordHash = await bcrypt.hash(password, 10)
     const result = await pool.query(
-      `INSERT INTO users (username, email, password_hash, role)
-       VALUES ($1, $2, $3, 'admin')
+      `INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4)
        RETURNING id, username, email, role, created_at`,
-      [username.trim(), email.trim(), passwordHash]
+      [username, email, passwordHash, role],
     )
     return NextResponse.json(success(result.rows[0]), { status: 201 })
-  } catch (err: unknown) {
-    const pgErr = err as { code?: string }
-    if (pgErr.code === '23505') {
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505') {
       return NextResponse.json(failure('用户名或邮箱已存在', 409), { status: 409 })
     }
-    console.error(err)
-    return NextResponse.json(failure('服务器错误', 500), { status: 500 })
+    return serverError(error)
   }
 }
 
-// PUT - 修改用户密码（仅 administrator）
 export async function PUT(req: NextRequest) {
-  const auth = getAuthUser(req)
-  const block = requireAdministrator(auth)
+  const block = requireAdministrator(await getAuthUser(req))
   if (block) return block
-
-  const { userId, password } = await req.json() as {
-    userId?: string; password?: string
+  const body = await req.json().catch(() => null)
+  if (!isUuid(body?.userId) || typeof body?.password !== 'string' || body.password.length < 6 || Buffer.byteLength(body.password, 'utf8') > 72) {
+    return NextResponse.json(failure('请提供有效的用户 ID 和新密码（至少6位，不超过72字节）', 400), { status: 400 })
   }
-
-  if (!userId || !password) {
-    return NextResponse.json(failure('用户ID和新密码不能为空', 400), { status: 400 })
-  }
-  if (password.length < 6) {
-    return NextResponse.json(failure('密码长度不能少于6位', 400), { status: 400 })
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10)
-  const result = await pool.query(
-    `UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id, username`,
-    [passwordHash, userId]
-  )
-
-  if (result.rowCount === 0) {
-    return NextResponse.json(failure('用户不存在', 404), { status: 404 })
-  }
-  return NextResponse.json(success({ message: '密码已更新' }))
+  try {
+    const passwordHash = await bcrypt.hash(body.password, 10)
+    const result = await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING id',
+      [passwordHash, body.userId],
+    )
+    if (!result.rowCount) return NextResponse.json(failure('用户不存在', 404), { status: 404 })
+    return NextResponse.json(success({ message: '密码已更新' }))
+  } catch (error) { return serverError(error) }
 }
 
-// DELETE - 删除用户（仅 administrator，不能删自己和其他 administrator）
 export async function DELETE(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   const block = requireAdministrator(auth)
   if (block) return block
-
-  const { userId } = await req.json() as { userId?: string }
-
-  if (!userId) {
-    return NextResponse.json(failure('用户ID不能为空', 400), { status: 400 })
-  }
-
-  // 不能删除自己
-  if (auth.ok && auth.value.userId === userId) {
+  const body = await req.json().catch(() => null)
+  if (!isUuid(body?.userId)) return NextResponse.json(failure('请提供有效的用户 ID', 400), { status: 400 })
+  if (auth.ok && auth.value.userId === body.userId) {
     return NextResponse.json(failure('不能删除自己的账号', 400), { status: 400 })
   }
-
-  // 不能删除其他 administrator
-  const check = await pool.query('SELECT role FROM users WHERE id = $1', [userId])
-  if (check.rows.length === 0) {
-    return NextResponse.json(failure('用户不存在', 404), { status: 404 })
-  }
-  if (check.rows[0].role === 'administrator') {
-    return NextResponse.json(failure('不能删除管理员账号', 400), { status: 400 })
-  }
-
-  await pool.query('DELETE FROM users WHERE id = $1', [userId])
-  return NextResponse.json(success({ message: '用户已删除' }))
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const user = await client.query('SELECT role FROM users WHERE id = $1 FOR UPDATE', [body.userId])
+    if (!user.rows.length || user.rows[0].role === 'administrator') {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('用户不存在或为受保护的管理员账号', 400), { status: 400 })
+    }
+    // projects.user_id currently cascades on deletion: never delete a creator's projects implicitly.
+    const owned = await client.query('SELECT id FROM projects WHERE user_id = $1 LIMIT 1', [body.userId])
+    if (owned.rows.length) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('该用户仍有创建的项目，不能删除账号；可在项目关联中移除访问权限', 409), { status: 409 })
+    }
+    await client.query('DELETE FROM users WHERE id = $1', [body.userId])
+    await client.query('COMMIT')
+    return NextResponse.json(success({ message: '用户已删除' }))
+  } catch (error) {
+    await client.query('ROLLBACK')
+    return serverError(error)
+  } finally { client.release() }
 }

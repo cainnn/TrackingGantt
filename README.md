@@ -29,6 +29,7 @@ npm run db:init
 
 默认会写入以下测试账号：
 
+- root 超级管理员：`root` / `root123`（首次迁移设置，重复迁移不会重置密码）
 - 超级管理员：`administrator` / `admin123`
 - 默认管理员：`admin` / `admin123`
 - 预置管理员：`adminqu`、`adminnn`、`admingl`、`adminlz`、`adminyl`、`adminbs`、`adminhc`、`admingg`、`adminqz`、`adminwz`、`adminbh`、`admincz`、`adminlb`、`adminhz`、`adminfcg`
@@ -50,6 +51,24 @@ bun dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+### 用户与项目关联
+
+已有数据库在启动新版前运行 `npm run db:access`，自动读取 `.env.local` 中的数据库配置。
+新数据库的 `npm run db:init` 和常规 VPS 部署会自动执行相同迁移。
+
+以 `root` 登录后，进入「用户与项目」，可新建普通或只读用户、修改密码，并在「项目关联」中管理访问权限：
+
+- 将项目拖到用户卡片上，或将用户拖到项目上，添加关联。
+- 选中用户后，在「已关联」与「未关联」两栏之间拖动项目，添加或移除关联；也可使用关联、移除按钮。
+- 普通用户默认只能访问自己创建的项目；root 可增加或撤销关联，包括撤销创建人的访问权限。
+- 同一项目可关联多个用户。普通用户可编辑关联项目，只读用户只能查看关联项目；超级管理员始终可管理全部项目。
+- 关联保存后，后续 API 请求立即使用新权限，无需重新登录。已签发的临时分享链接仍按原有有效期与项目范围工作。
+- 删除仍有创建项目的用户会被阻止，以免级联删除其项目；移除关联不删除项目或更改创建人记录。
+
+迁移仅首次为已有项目补齐创建人关联，重复运行不会恢复 root 已撤销的关联。
+
+运行中的本地服务可执行 `npm run test:access -- --ui`，验证真实数据库与接口权限、重复迁移及浏览器拖动操作。测试创建独立的临时用户和项目，并在结束后清理；可通过 `ACCESS_TEST_URL`、`ACCESS_TEST_ROOT` 和 `ACCESS_TEST_PASSWORD` 指定测试服务和管理员登录信息。
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

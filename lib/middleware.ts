@@ -1,8 +1,10 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { verifyToken, type JwtPayload } from './auth'
 import { type Result, failure } from './result'
+import pool from './db'
+import { isUuid } from './projectAccessPolicy'
 
-export function getAuthUser(req: NextRequest): Result<JwtPayload> {
+export async function getAuthUser(req: NextRequest): Promise<Result<JwtPayload>> {
   const cookie = req.cookies.get('token')?.value
   const header = req.headers.get('authorization')?.replace('Bearer ', '')
   const token = cookie ?? header
@@ -12,15 +14,25 @@ export function getAuthUser(req: NextRequest): Result<JwtPayload> {
   }
 
   const auth = verifyToken(token)
-  if (!auth.ok || !auth.value.shareProjectId) return auth
-
-  const projectIds = req.nextUrl.pathname.match(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi) ?? []
-  if (projectIds.some(id => id.toLowerCase() !== auth.value.shareProjectId?.toLowerCase())) {
-    return failure('分享会话无权访问其他项目', 403)
+  if (!auth.ok) return auth
+  if (!isUuid(auth.value.userId)) return failure('Unauthorized', 401)
+  if (!auth.value.shareProjectId) {
+    try {
+      const result = await pool.query('SELECT username, role FROM users WHERE id = $1', [auth.value.userId])
+      const user = result.rows[0]
+      if (!user || !['administrator', 'admin', 'view'].includes(user.role)) return failure('Unauthorized', 401)
+      return { ok: true, value: { userId: auth.value.userId, username: user.username, role: user.role } }
+    } catch (error) {
+      console.error('Authentication lookup failed:', error)
+      return failure('数据库连接失败', 500)
+    }
   }
+  if (!isUuid(auth.value.shareProjectId)) return failure('Unauthorized', 401)
 
+  // Project routes enforce the share scope through projectAccessSql. Do not
+  // mistake a task/version ID later in the path for a different project ID.
   const blockedPaths = ['/api/projects', '/api/users']
-  if (blockedPaths.some(path => req.nextUrl.pathname === path)) {
+  if (blockedPaths.some(path => req.nextUrl.pathname === path || (path === '/api/users' && req.nextUrl.pathname.startsWith(`${path}/`)))) {
     return failure('分享会话仅限当前项目', 403)
   }
   return auth
@@ -38,7 +50,7 @@ export function requireWrite(auth: Result<JwtPayload>): NextResponse | null {
 /** 检查是否为 administrator 角色 */
 export function requireAdministrator(auth: Result<JwtPayload>): NextResponse | null {
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
-  if (auth.value.role !== 'administrator') {
+  if (auth.value.shareProjectId || auth.value.role !== 'administrator') {
     return NextResponse.json(failure('仅管理员可执行此操作', 403), { status: 403 })
   }
   return null

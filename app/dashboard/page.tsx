@@ -148,7 +148,7 @@ export default function DashboardPage() {
           </button>
         </div>
       </header>
-      <main className="max-w-4xl mx-auto px-6 py-8">
+      <main className={`${isAdministrator && activeTab === 'users' ? 'max-w-7xl' : 'max-w-4xl'} mx-auto px-6 py-8`}>
         {isAdministrator && (
           <div className="flex gap-1 mb-6 border-b border-gray-200">
             <button
@@ -169,7 +169,7 @@ export default function DashboardPage() {
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              用户管理
+              用户与项目
             </button>
           </div>
         )}
@@ -179,7 +179,7 @@ export default function DashboardPage() {
         ) : (
         <>
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-lg font-semibold text-gray-800">我的项目</h2>
+          <h2 className="text-lg font-semibold text-gray-800">{isAdministrator ? '全部项目' : '我的项目'}</h2>
           {!isViewOnly && (
           <button
             onClick={() => setCreating(true)}

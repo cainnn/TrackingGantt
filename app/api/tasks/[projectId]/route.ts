@@ -1,3 +1,5 @@
+import { hasProjectAccess } from '@/lib/projectAccess'
+import { isUuid } from '@/lib/projectAccessPolicy'
 import { addLifecycle, addLifecycleBatch, normalizeChangeReason, type LifecycleInput } from '@/lib/taskLifecycle'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
@@ -17,14 +19,6 @@ type Params = { params: Promise<{ projectId: string }> }
 async function lockProjectTx(client: PoolClient, projectId: string): Promise<void> {
   await client.query('SET LOCAL lock_timeout = \'10s\'')
   await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [projectId])
-}
-
-async function verifyProjectOwnership(projectId: string, userId: string): Promise<boolean> {
-  const result = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-    [projectId, userId]
-  )
-  return result.rows.length > 0
 }
 
 // Generate next task_code for a project: 1, 2, 3, ...
@@ -128,14 +122,14 @@ function fmtFieldVal(field: string, val: unknown, opts?: { isMinute?: boolean })
 // Read-only: 加载图表时不要持锁、不要级联控写，避免与 PUT/其它会话竞争导致 lock_timeout，
 // 前端收到非 ok 后静默不写入 Redux，界面会一直像「空项目」。
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const { projectId } = await params
 
-  if (auth.value.role !== 'view') {
+  {
     let owned: boolean
     try {
-      owned = await verifyProjectOwnership(projectId, auth.value.userId)
+      owned = await hasProjectAccess(projectId, auth.value)
     } catch (err) {
       console.error('GET /api/tasks verifyOwnership error:', err)
       return NextResponse.json(failure('数据库连接失败', 500), { status: 500 })
@@ -270,12 +264,12 @@ export async function GET(req: NextRequest, { params }: Params) {
 
 // ── POST ──────────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  const owned = await verifyProjectOwnership(projectId, auth.value.userId)
+  const owned = await hasProjectAccess(projectId, auth.value)
   if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
 
   let body: unknown
@@ -443,14 +437,14 @@ const normalizeDate = (date: unknown): string | null => {
 }
 
 export async function PUT(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
   let owned: boolean
   try {
-    owned = await verifyProjectOwnership(projectId, auth.value.userId)
+    owned = await hasProjectAccess(projectId, auth.value)
   } catch (err) {
     console.error('PUT /api/tasks verifyOwnership error:', err)
     return NextResponse.json(failure('数据库连接失败', 500), { status: 500 })
@@ -525,6 +519,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
       const hasParentKey = 'parent_id' in task
       const hasAssigneeKey = 'assignee' in task
+
+      if (hasParentKey && task.parent_id != null) {
+        const parentId = task.parent_id
+        const parent = isUuid(parentId) && parentId !== id
+          ? await client.query('SELECT id FROM tasks WHERE id = $1 AND project_id = $2 AND is_deleted = false', [parentId, projectId])
+          : null
+        if (!parent?.rows.length) {
+          await client.query('ROLLBACK')
+          return NextResponse.json(failure('父任务必须属于当前项目且不能是任务自身', 400), { status: 400 })
+        }
+      }
 
       // ── 里程碑强制约束：工期=0, end_date=start_date, percent_done=100 ──
       const taskRec = task as Record<string, unknown>
@@ -895,12 +900,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
 // ── DELETE (soft) ─────────────────────────────────────────────────────────
 export async function DELETE(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  const owned = await verifyProjectOwnership(projectId, auth.value.userId)
+  const owned = await hasProjectAccess(projectId, auth.value)
   if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
 
   let body: { ids?: string[]; id?: string; reasons?: Record<string, unknown> }

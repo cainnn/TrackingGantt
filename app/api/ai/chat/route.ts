@@ -31,7 +31,7 @@ type CompatibleChatParams = ChatCompletionCreateParamsNonStreaming & {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
 
   if (!process.env.OPENAI_API_KEY) {

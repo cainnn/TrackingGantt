@@ -1,3 +1,4 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
@@ -6,17 +7,14 @@ import { success, failure } from '@/lib/result'
 type Params = { params: Promise<{ projectId: string }> }
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
 
   const { projectId } = await params
 
   // 验证项目所有权
-  const owned = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-    [projectId, auth.value.userId]
-  )
+  const owned = await getAccessibleProject(projectId, auth.value)
   if (owned.rows.length === 0) {
     return NextResponse.json(failure('Project not found', 404), { status: 404 })
   }

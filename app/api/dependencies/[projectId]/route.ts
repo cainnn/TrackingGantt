@@ -1,3 +1,5 @@
+import { hasProjectAccess } from '@/lib/projectAccess'
+import { isUuid } from '@/lib/projectAccessPolicy'
 import { addLifecycle } from '@/lib/taskLifecycle'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
@@ -9,14 +11,6 @@ import { wouldCreateCycle, cascadeDependencies, updateSummaryTasksDates, snapTas
 type Params = { params: Promise<{ projectId: string }> }
 
 const DEP_TYPE_LABEL = ['SS', 'SF', 'FS', 'FF']
-
-async function verifyOwnership(projectId: string, userId: string) {
-  const r = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-    [projectId, userId]
-  )
-  return r.rows.length > 0
-}
 
 async function fetchTaskInfo(client: PoolClient, taskIds: string[]): Promise<Map<string, { task_code: string; name: string }>> {
   if (taskIds.length === 0) return new Map()
@@ -42,12 +36,12 @@ async function logDepLifecycle(
 
 export async function POST(req: NextRequest, { params }: Params) {
   try {
-    const auth = getAuthUser(req)
+    const auth = await getAuthUser(req)
     if (!auth.ok) return NextResponse.json(auth, { status: 401 })
     const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
     const { projectId } = await params
 
-    if (!(await verifyOwnership(projectId, auth.value.userId)))
+    if (!(await hasProjectAccess(projectId, auth.value)))
       return NextResponse.json(failure('Not found', 404), { status: 404 })
 
     let body: { id?: string; from_task_id?: string; to_task_id?: string; type?: number; lag?: number; active?: boolean; _reason?: unknown }
@@ -61,6 +55,15 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json(failure('from_task_id and to_task_id required', 400), { status: 400 })
     if (from_task_id === to_task_id)
       return NextResponse.json(failure('任务不能依赖自身', 400), { status: 400 })
+
+    if (!isUuid(from_task_id) || !isUuid(to_task_id))
+      return NextResponse.json(failure('无效的任务 ID', 400), { status: 400 })
+    const endpoints = await pool.query(
+      'SELECT id FROM tasks WHERE project_id = $1 AND id IN ($2, $3) AND is_deleted = false',
+      [projectId, from_task_id, to_task_id],
+    )
+    if (endpoints.rows.length !== 2)
+      return NextResponse.json(failure('依赖任务必须属于当前项目', 400), { status: 400 })
 
     const summaryCheck = await pool.query(
       `SELECT DISTINCT parent_id FROM tasks
@@ -144,12 +147,12 @@ export async function POST(req: NextRequest, { params }: Params) {
 }
 
 export async function PUT(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id, type, lag, active, _reason } = await req.json()
@@ -235,12 +238,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
 }
 
 export async function DELETE(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id, _reason } = await req.json()

@@ -1,3 +1,4 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser } from '@/lib/middleware'
@@ -8,15 +9,12 @@ type Params = { params: Promise<{ projectId: string; taskId: string }> }
 
 // GET /api/tasks/[projectId]/[taskId] — task detail + lifecycle events
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
 
   const { projectId, taskId } = await params
 
-  const proj = await pool.query(
-    'SELECT id, time_granularity FROM projects WHERE id = $1 AND user_id = $2',
-    [projectId, auth.value.userId]
-  )
+  const proj = await getAccessibleProject(projectId, auth.value)
   if (!proj.rows.length)
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 

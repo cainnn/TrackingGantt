@@ -1,3 +1,4 @@
+import { getAccessibleProject } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
@@ -5,7 +6,7 @@ import { createShareCode, hashShareCode, shareExpiry } from '@/lib/shareLinks'
 import { failure, success } from '@/lib/result'
 
 export async function POST(req: NextRequest) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: auth.code ?? 401 })
   const writeBlock = requireWrite(auth)
   if (writeBlock) return writeBlock
@@ -16,7 +17,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(failure('分享会话不能继续创建分享链接', 403), { status: 403 })
   }
 
-  const project = await pool.query('SELECT id FROM projects WHERE id = $1 AND user_id = $2', [projectId, auth.value.userId])
+  const project = await getAccessibleProject(projectId, auth.value)
   if (project.rows.length === 0) return NextResponse.json(failure('Project not found', 404), { status: 404 })
 
   const code = createShareCode()

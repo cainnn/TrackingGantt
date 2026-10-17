@@ -12,8 +12,12 @@ export async function POST(req: NextRequest) {
     password?: string
   }
 
-  if (!username || !email || !password) {
+  if (typeof username !== 'string' || !username.trim() || typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
     return NextResponse.json(failure('username, email and password are required', 400), { status: 400 })
+  }
+
+  if (username.trim().toLowerCase() === 'root') {
+    return NextResponse.json(failure('root 为系统保留账号', 400), { status: 400 })
   }
 
   const userRole = 'admin'
@@ -22,7 +26,7 @@ export async function POST(req: NextRequest) {
   try {
     const result = await pool.query(
       'INSERT INTO users (username, email, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role, created_at',
-      [username, email, passwordHash, userRole]
+      [username.trim(), email.trim(), passwordHash, userRole]
     )
     const user = result.rows[0]
     const token = signToken({ userId: user.id, username: user.username, role: user.role })

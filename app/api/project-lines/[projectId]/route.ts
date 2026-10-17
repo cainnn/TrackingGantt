@@ -1,3 +1,4 @@
+import { hasProjectAccess } from '@/lib/projectAccess'
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
@@ -5,20 +6,12 @@ import { success, failure } from '@/lib/result'
 
 type Params = { params: Promise<{ projectId: string }> }
 
-async function verifyOwnership(projectId: string, userId: string) {
-  const r = await pool.query(
-    'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
-    [projectId, userId],
-  )
-  return r.rows.length > 0
-}
-
 export async function GET(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const { projectId } = await params
 
-  if (auth.value.role !== 'view' && !(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const r = await pool.query(
@@ -29,12 +22,12 @@ export async function GET(req: NextRequest, { params }: Params) {
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { name, line_date, color = '#f59e0b', visible = true } = await req.json()
@@ -51,12 +44,12 @@ export async function POST(req: NextRequest, { params }: Params) {
 }
 
 export async function PUT(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id, name, line_date, color, visible } = await req.json()
@@ -79,12 +72,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
 }
 
 export async function DELETE(req: NextRequest, { params }: Params) {
-  const auth = getAuthUser(req)
+  const auth = await getAuthUser(req)
   if (!auth.ok) return NextResponse.json(auth, { status: 401 })
   const writeBlock = requireWrite(auth); if (writeBlock) return writeBlock
   const { projectId } = await params
 
-  if (!(await verifyOwnership(projectId, auth.value.userId)))
+  if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
   const { id } = await req.json()
