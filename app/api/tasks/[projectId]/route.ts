@@ -868,6 +868,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
       }
     }
 
+    // Cascading and summary recalculation may update a row already present in
+    // `updated`; return its final database value instead of the pre-cascade copy.
+    const updatedIds = [...new Set(updated.map((task: TaskLike) => task.id))]
+    if (updatedIds.length > 0) {
+      const finalRows = await client.query(
+        'SELECT * FROM tasks WHERE project_id = $1 AND id = ANY($2::uuid[]) AND is_deleted = false',
+        [projectId, updatedIds],
+      )
+      updated.splice(0, updated.length, ...finalRows.rows)
+    }
+
     // 审计日志批量插入
     if (auditEntries.length > 0) {
       const vals: unknown[] = []

@@ -54,6 +54,63 @@ export interface SaveDiff {
   depsToDelete: string[]
 }
 
+function hasChangedFields<T extends { id: string }>(submitted: T, current: T): boolean {
+  const keys = new Set([...Object.keys(submitted), ...Object.keys(current)])
+  for (const key of keys) {
+    if (!Object.is((submitted as Record<string, unknown>)[key], (current as Record<string, unknown>)[key])) return true
+  }
+  return false
+}
+
+/**
+ * Reconcile an authoritative server result with edits made locally after the
+ * save request was sent. Server values win for untouched fields; newer local
+ * edits, additions, and deletions remain in the working copy.
+ */
+export function mergeSavedRecords<T extends { id: string }>(
+  saved: T[],
+  submitted: T[],
+  current: T[],
+): T[] {
+  const savedById = new Map(saved.map(item => [item.id, item]))
+  const submittedById = new Map(submitted.map(item => [item.id, item]))
+  const currentById = new Map(current.map(item => [item.id, item]))
+  const ids = new Set([...savedById.keys(), ...submittedById.keys(), ...currentById.keys()])
+  const merged: T[] = []
+
+  for (const id of ids) {
+    const serverItem = savedById.get(id)
+    const submittedItem = submittedById.get(id)
+    const currentItem = currentById.get(id)
+
+    if (!serverItem) {
+      // Keep local additions and edits made while the request was in flight.
+      if (currentItem && (!submittedItem || hasChangedFields(submittedItem, currentItem))) merged.push(currentItem)
+      continue
+    }
+    if (!currentItem) {
+      // A missing item is a newer local deletion if it existed when submitted.
+      if (!submittedItem) merged.push(serverItem)
+      continue
+    }
+    if (!submittedItem) {
+      merged.push(currentItem)
+      continue
+    }
+
+    const item: Record<string, unknown> = { ...serverItem }
+    for (const key of new Set([...Object.keys(submittedItem), ...Object.keys(currentItem)])) {
+      if (!Object.is(
+        (submittedItem as Record<string, unknown>)[key],
+        (currentItem as Record<string, unknown>)[key],
+      )) item[key] = (currentItem as Record<string, unknown>)[key]
+    }
+    merged.push(item as T)
+  }
+
+  return merged
+}
+
 function numericTaskCode(v: string | null | undefined): number | null {
   if (!v || !/^\d+$/.test(v)) return null
   const n = Number(v)

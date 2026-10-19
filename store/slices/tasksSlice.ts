@@ -57,6 +57,19 @@ const tasksSlice = createSlice({
       state.dependencies = action.payload.dependencies
       state.dirtyIds = []
     },
+    rebaseSavedState(state, action: PayloadAction<{
+      tasks: Task[]
+      dependencies: Dependency[]
+      dirtyIds: string[]
+    }>) {
+      state.tasks = action.payload.tasks
+      state.dependencies = action.payload.dependencies
+      state.dirtyIds = action.payload.dirtyIds
+      const pending = new Set(action.payload.dirtyIds)
+      for (const id of Object.keys(state.editDescriptions)) {
+        if (!pending.has(id)) delete state.editDescriptions[id]
+      }
+    },
     addTasks(state, action: PayloadAction<Task[]>) {
       state.tasks.push(...action.payload)
     },
@@ -151,7 +164,7 @@ const tasksSlice = createSlice({
 })
 
 export const {
-  setTasks, addTasks, updateTasks, deleteTasks,
+  setTasks, rebaseSavedState, addTasks, updateTasks, deleteTasks,
   copyTasks, clearClipboard, setSelectedIds,
   markDirty, clearDirty, setEditDescription,
   setComparison, clearComparison,

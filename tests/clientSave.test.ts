@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSaveDiff } from '../lib/clientSave'
+import { buildSaveDiff, mergeSavedRecords } from '../lib/clientSave'
 import type { Dependency, Task } from '../types'
 
 function task(partial: Partial<Task> & Pick<Task, 'id'>): Task {
@@ -62,4 +62,48 @@ test('repairs a fractional legacy duration from task dates before updating', () 
   assert.equal(diff.tasksToUpdate.length, 1)
   assert.equal(diff.tasksToUpdate[0].duration, 11_040)
   assert.equal(Number.isInteger(diff.tasksToUpdate[0].duration), true)
+})
+
+test('server schedule wins when the user did not edit that task while saving', () => {
+  const submitted = [task({ id: 'C', end_date: '2026-06-25T00:00:00' })]
+  const saved = [task({ id: 'C', end_date: '2026-06-26T00:00:00' })]
+
+  const merged = mergeSavedRecords(saved, submitted, submitted)
+
+  assert.equal(merged[0].end_date, '2026-06-26T00:00:00')
+  assert.equal(buildSaveDiff(saved, deps, merged, deps).tasksToUpdate.length, 0)
+})
+
+test('a newer local edit made during save is retained and remains dirty against server baseline', () => {
+  const submitted = [task({ id: 'C', end_date: '2026-06-25T00:00:00' })]
+  const saved = [task({ id: 'C', end_date: '2026-06-26T00:00:00' })]
+  const current = [task({ id: 'C', end_date: '2026-06-27T00:00:00' })]
+
+  const merged = mergeSavedRecords(saved, submitted, current)
+  const diff = buildSaveDiff(saved, deps, merged, deps)
+
+  assert.equal(merged[0].end_date, '2026-06-27T00:00:00')
+  assert.equal(diff.tasksToUpdate.length, 1)
+  assert.equal(diff.tasksToUpdate[0].end_date, '2026-06-27T00:00:00')
+})
+
+test('server schedule and newer local edits to another field are merged field by field', () => {
+  const submitted = [task({ id: 'C', name: 'Before', end_date: '2026-06-25T00:00:00' })]
+  const saved = [task({ id: 'C', name: 'Before', end_date: '2026-06-26T00:00:00' })]
+  const current = [task({ id: 'C', name: 'Renamed while saving', end_date: '2026-06-25T00:00:00' })]
+
+  const merged = mergeSavedRecords(saved, submitted, current)
+
+  assert.equal(merged[0].name, 'Renamed while saving')
+  assert.equal(merged[0].end_date, '2026-06-26T00:00:00')
+})
+
+test('local additions and deletions made during save survive reconciliation', () => {
+  const submitted = [task({ id: 'existing' })]
+  const saved = [task({ id: 'existing' })]
+  const current = [task({ id: 'new-local' })]
+
+  const merged = mergeSavedRecords(saved, submitted, current)
+
+  assert.deepEqual(merged.map(t => t.id), ['new-local'])
 })

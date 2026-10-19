@@ -1,10 +1,12 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useStore } from 'react-redux'
+import type { RootState } from '@/store'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
-  setSelectedIds, setTasks,
+  setSelectedIds, setTasks, rebaseSavedState,
   markDirty, clearDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
@@ -24,7 +26,7 @@ import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 import { runFullCascade, collapseDeletedTaskSuccessors } from '@/lib/clientScheduling'
-import { buildSaveDiff } from '@/lib/clientSave'
+import { buildSaveDiff, mergeSavedRecords } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import type { Dependency } from '@/types'
 
@@ -196,6 +198,7 @@ export default function GanttToolbar({
   onDiscardChanges,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
+  const reduxStore = useStore<RootState>()
   const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const { versions } = useAppSelector(s => s.versions)
@@ -1399,6 +1402,7 @@ export default function GanttToolbar({
     // 2. 与基线 diff，生成批量操作
     const diff = buildSaveDiff(baselineTasks, baselineDeps, finalTasks, dependencies)
     let saveError: string | null = null
+    let serverUpdatedTasks: Task[] | null = null
     try {
       // 删除依赖必须先于删除任务，避免外键级联删除丢失审计
       for (const depId of diff.depsToDelete) {
@@ -1441,7 +1445,9 @@ export default function GanttToolbar({
           method: 'PUT', headers: authFetchHeaders(true),
           body: JSON.stringify(payload),
         })
-        if (!r.ok) throw new Error(`更新任务失败 (${r.status})`)
+        const result = await r.json()
+        if (!r.ok || !result.ok) throw new Error(result.error ?? `更新任务失败 (${r.status})`)
+        if (Array.isArray(result.value)) serverUpdatedTasks = result.value as Task[]
       }
       // 新增依赖
       for (const dep of diff.depsToAdd) {
@@ -1506,14 +1512,32 @@ export default function GanttToolbar({
     setStatusDateSaving(false)
 
     if (snapshotData.ok) {
-      dispatch(clearDirty())
-      const savedTasks: Task[] = Array.isArray(snapshotData.value?.snapshot?.tasks)
+      const snapshotTasks: Task[] | null = Array.isArray(snapshotData.value?.snapshot?.tasks)
         ? snapshotData.value.snapshot.tasks
-        : finalTasks
+        : null
       const savedDeps: Dependency[] = Array.isArray(snapshotData.value?.snapshot?.dependencies)
         ? snapshotData.value.snapshot.dependencies
         : dependencies
-      dispatch(setTasks({ tasks: savedTasks, dependencies: savedDeps }))
+      const serverTaskById = new Map((serverUpdatedTasks ?? []).map(t => [t.id, t]))
+      const savedTasks = snapshotTasks ?? finalTasks
+        .filter(t => !t.is_deleted)
+        .map(t => serverTaskById.get(t.id) ?? t)
+      // Rebase on the server-confirmed version while retaining any edits made
+      // after this save started. Those edits remain dirty for the next save.
+      const latest = reduxStore.getState().tasks
+      const reconciledTasks = mergeSavedRecords(savedTasks, finalTasks, latest.tasks)
+      const reconciledDeps = mergeSavedRecords(savedDeps, dependencies, latest.dependencies)
+      const pendingDiff = buildSaveDiff(savedTasks, savedDeps, reconciledTasks, reconciledDeps)
+      const pendingTaskIds = [...new Set([
+        ...pendingDiff.tasksToAdd.map(t => t.id),
+        ...pendingDiff.tasksToUpdate.map(t => t.id),
+        ...pendingDiff.tasksToDelete,
+      ])]
+      dispatch(rebaseSavedState({
+        tasks: reconciledTasks,
+        dependencies: reconciledDeps,
+        dirtyIds: pendingTaskIds,
+      }))
       // 重置基线为已落库的当前状态
       const livingTasks = savedTasks.filter(t => !t.is_deleted)
       setBaseline(livingTasks.map(t => ({

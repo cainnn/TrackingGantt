@@ -1890,7 +1890,7 @@ export default function GanttChart({
               : `调整了「${draggedTask.name}」的工期`
             dispatch(setEditDescription({ taskId: drag.taskId, description: desc }))
           }
-          // 立即持久化到数据库（服务端自动级联下游）
+          // 本地暂存变更；由工具栏“确认并保存”统一写库并创建版本快照。
         }
       }
 
