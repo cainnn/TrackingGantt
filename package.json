@@ -11,6 +11,7 @@
     "test": "npm run test:unit",
     "test:unit": "tsc -p tsconfig.test.json && node --test .test-dist/tests/*.test.js",
     "test:access": "node scripts/test-project-access.cjs",
+    "test:save": "node scripts/test-save-recovery.cjs",
     "start": "next start",
     "db:init": "node scripts/init-db.js",
     "db:access": "node scripts/migrate-project-access.js",

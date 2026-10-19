@@ -58,36 +58,56 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     if (!isUuid(from_task_id) || !isUuid(to_task_id))
       return NextResponse.json(failure('无效的任务 ID', 400), { status: 400 })
-    const endpoints = await pool.query(
-      'SELECT id FROM tasks WHERE project_id = $1 AND id IN ($2, $3) AND is_deleted = false',
-      [projectId, from_task_id, to_task_id],
-    )
-    if (endpoints.rows.length !== 2)
-      return NextResponse.json(failure('依赖任务必须属于当前项目', 400), { status: 400 })
-
-    const summaryCheck = await pool.query(
-      `SELECT DISTINCT parent_id FROM tasks
-       WHERE project_id = $1 AND parent_id IN ($2, $3) AND is_deleted = false`,
-      [projectId, from_task_id, to_task_id]
-    )
-    const summaryIds = new Set(summaryCheck.rows.map((r: { parent_id: string }) => r.parent_id))
-    if (summaryIds.has(from_task_id))
-      return NextResponse.json(failure('摘要任务不能作为依赖的前置任务', 400), { status: 400 })
-    if (summaryIds.has(to_task_id))
-      return NextResponse.json(failure('摘要任务不能作为依赖的后继任务', 400), { status: 400 })
-
-    const existingDeps = await pool.query(
-      `SELECT from_task_id, to_task_id FROM dependencies WHERE project_id = $1`,
-      [projectId]
-    )
-    if (wouldCreateCycle(from_task_id, to_task_id, existingDeps.rows))
-      return NextResponse.json(failure('创建该依赖会产生循环依赖', 400), { status: 400 })
-
-    const clientId = (typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id)) ? id : null
-
+    const clientId = isUuid(id) ? id : null
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      await client.query('SET LOCAL lock_timeout = \'10s\'')
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [projectId])
+      if (clientId) {
+        const existing = await client.query('SELECT * FROM dependencies WHERE id = $1', [clientId])
+        const saved = existing.rows[0]
+        if (saved) {
+          if (saved.project_id !== projectId || saved.from_task_id !== from_task_id || saved.to_task_id !== to_task_id) {
+            await client.query('ROLLBACK')
+            return NextResponse.json(failure('依赖 ID 已被使用，请重新加载项目', 409), { status: 409 })
+          }
+          await client.query('COMMIT')
+          return NextResponse.json(success({ dependency: saved, updatedTask: null, updatedTasks: [] }), { status: 201 })
+        }
+      }
+      const endpoints = await client.query(
+        'SELECT id FROM tasks WHERE project_id = $1 AND id IN ($2, $3) AND is_deleted = false',
+        [projectId, from_task_id, to_task_id],
+      )
+      if (endpoints.rows.length !== 2) {
+        await client.query('ROLLBACK')
+        return NextResponse.json(failure('依赖任务必须属于当前项目', 400), { status: 400 })
+      }
+
+      const summaryCheck = await client.query(
+        `SELECT DISTINCT parent_id FROM tasks
+         WHERE project_id = $1 AND parent_id IN ($2, $3) AND is_deleted = false`,
+        [projectId, from_task_id, to_task_id]
+      )
+      const summaryIds = new Set(summaryCheck.rows.map((r: { parent_id: string }) => r.parent_id))
+      if (summaryIds.has(from_task_id)) {
+        await client.query('ROLLBACK')
+        return NextResponse.json(failure('摘要任务不能作为依赖的前置任务', 400), { status: 400 })
+      }
+      if (summaryIds.has(to_task_id)) {
+        await client.query('ROLLBACK')
+        return NextResponse.json(failure('摘要任务不能作为依赖的后继任务', 400), { status: 400 })
+      }
+
+      const existingDeps = await client.query(
+        `SELECT from_task_id, to_task_id FROM dependencies WHERE project_id = $1`,
+        [projectId]
+      )
+      if (wouldCreateCycle(from_task_id, to_task_id, existingDeps.rows)) {
+        await client.query('ROLLBACK')
+        return NextResponse.json(failure('创建该依赖会产生循环依赖', 400), { status: 400 })
+      }
       const r = await client.query(
         `INSERT INTO dependencies (id, project_id, from_task_id, to_task_id, type, lag, active)
          VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7) RETURNING *`,

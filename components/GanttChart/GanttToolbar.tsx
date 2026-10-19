@@ -26,7 +26,7 @@ import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 import { runFullCascade, collapseDeletedTaskSuccessors } from '@/lib/clientScheduling'
-import { buildSaveDiff, mergeSavedRecords } from '@/lib/clientSave'
+import { buildSaveDiff, mergeSavedRecords, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import type { Dependency } from '@/types'
 
@@ -150,6 +150,7 @@ async function copyText(text: string): Promise<boolean> {
 // ── Props ─────────────────────────────────────────────────────────────────
 interface GanttToolbarProps {
   projectId: string
+  initialBaseline: SaveBaseline
   readOnly?: boolean
   isMinute?: boolean  // 项目精度：true=分钟级，false=天级
   colW: number
@@ -177,6 +178,7 @@ interface GanttToolbarProps {
 
 export default function GanttToolbar({
   projectId,
+  initialBaseline,
   readOnly,
   isMinute = false,
   colW, onZoomIn, onZoomOut,
@@ -297,39 +299,13 @@ export default function GanttToolbar({
   // ── 变更检测（纯本地，不依赖 API）──────────────────────────────────
   // 基线：首次加载任务时捕获快照，作为"上次入库状态"。所有编辑只改 Redux，
   // "保存版本"时与基线 diff 出增删改，批量落库后基线重置为当前状态。
-  const [baseline, setBaseline] = useState<SnapshotTask[] | null>(null)
-  const [baselineTasks, setBaselineTasks] = useState<Task[]>([])
-  const [baselineDeps, setBaselineDeps] = useState<Dependency[]>([])
+  const [baseline, setBaseline] = useState<SnapshotTask[] | null>(() => initialBaseline.tasks.map(t => ({ ...t })))
+  const [baselineTasks, setBaselineTasks] = useState<Task[]>(() => initialBaseline.tasks.map(t => ({ ...t })))
+  const [baselineDeps, setBaselineDeps] = useState<Dependency[]>(() => initialBaseline.dependencies.map(d => ({ ...d })))
   // 状态日期同样进入"待确认"流程：捕获原始值，确认变更时落库，放弃更改时回滚。
-  const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(null)
-
-  // 任务首次加载完成时，捕获当前状态作为基线
-  const baselineCapturedRef = useRef(false)
-  useEffect(() => {
-    if (tasks.length === 0) {
-      baselineCapturedRef.current = false
-      setBaseline(null)
-      setBaselineTasks([])
-      setBaselineDeps([])
-      setBaselineStatusDate(null)
-      return
-    }
-    if (baselineCapturedRef.current) return
-    baselineCapturedRef.current = true
-    const livingTasks = tasks.filter(t => !t.is_deleted)
-    setBaseline(livingTasks.map(t => ({
-      id: t.id, task_code: t.task_code, name: t.name,
-      start_date: t.start_date, end_date: t.end_date,
-      duration: t.duration, assignee: t.assignee,
-      percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-      auto_schedule: t.auto_schedule, note: t.note,
-      parent_id: t.parent_id,
-    })))
-    setBaselineTasks(livingTasks.map(t => ({ ...t })))
-    setBaselineDeps(dependencies.map(d => ({ ...d })))
-    setBaselineStatusDate(toDateTimeStr(currentProject?.status_date ?? null))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks.length])
+  const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(initialBaseline.statusDate)
+  const [saveIncomplete, setSaveIncomplete] = useState(false)
+  const attemptedSaveIds = useRef({ taskIds: new Set<string>(), dependencyIds: new Set<string>() })
 
   // changeDiffs: 当前任务 vs 基线
   const changeDiffs = React.useMemo(() => {
@@ -419,7 +395,7 @@ export default function GanttToolbar({
   }, [baselineDeps, dependencies, baselineTasks, tasks, isMinute])
 
   const statusDateChanged = toDateTimeStr(currentProject?.status_date ?? null) !== baselineStatusDate
-  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged
+  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged || saveIncomplete
 
   // 变更审核弹窗状态
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -580,7 +556,7 @@ export default function GanttToolbar({
   }, [])
   // 有任意变更（任务/依赖/状态日期）即视为可提交；
   // 任务变更里所有主动项需要填理由，纯状态日期变更不需要理由。
-  const allReasonsFilled = (changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged) &&
+  const allReasonsFilled = hasChanges &&
     changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0) &&
     depDiff.items.every(d => (dependencyReasons[d.id] ?? '').trim().length > 0)
 
@@ -1340,6 +1316,20 @@ export default function GanttToolbar({
 
   // ── Status date: free movement + separate confirm button ────────
   const [statusDateSaving, setStatusDateSaving] = useState(false)
+  const readPersistedState = useCallback(async (): Promise<SaveBaseline> => {
+    const [taskRes, projectRes] = await Promise.all([
+      authFetch(`/api/tasks/${projectId}`), authFetch(`/api/projects/${projectId}`),
+    ])
+    const [taskData, projectData] = await Promise.all([taskRes.json(), projectRes.json()])
+    if (!taskRes.ok || !taskData.ok || !projectRes.ok || !projectData.ok
+        || !Array.isArray(taskData.value?.tasks) || !Array.isArray(taskData.value?.dependencies)) {
+      throw new Error('无法核对上次保存结果，请稍后重试')
+    }
+    return {
+      tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
+      statusDate: toDateTimeStr(projectData.value.status_date ?? null),
+    }
+  }, [projectId])
 
   // 状态日期：进入"待确认"流程，仅改 Redux，不直接落库。
   // 允许任意日期时间以便预览进展；用户点"确认变更"才一并保存并创建版本快照，
@@ -1355,55 +1345,71 @@ export default function GanttToolbar({
     if (!sd || statusDateSaving || !allReasonsFilled) return
 
     setStatusDateSaving(true)
-
-    // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
-    const sdDate = new Date(sd)
-    const prevEndByTaskId = new Map<string, string | null>()
-    const prevVersion = versions[0]
-    if (prevVersion) {
-      try {
-        const r = await authFetch(`/api/versions/${projectId}?id=${prevVersion.id}`)
-        const d = await r.json()
-        if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
-          for (const pt of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
-            prevEndByTaskId.set(pt.id, snapshotEndForBaseline(pt.end_date))
-          }
-        }
-      } catch { /* ignore, 退化为当前 end */ }
-    }
-    const recomputed = tasks
-      .filter(t => t.start_date && t.end_date)
-      .map(t => {
-        const prevEnd = prevEndByTaskId.get(t.id) ?? null
-        const baselineEnd = prevEnd ?? snapshotEndForBaseline(t.end_date)
-        return {
-          ...t,
-          percent_done: calcPercent(t, sdDate),
-          baseline_end_date: baselineEnd,
-        }
-      })
-    if (recomputed.length > 0) dispatch(updateTasks(recomputed))
-    // 用 recomputed 后的状态作为本次保存的快照
-    const finalTasks = tasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
-
-    const reasonMap: Record<string, string> = {}
-    for (const d of changeDiffs) {
-      if (requiredReasonCodes.has(d.task_code)) {
-        const r = (reasons[d.task_code] ?? '').trim()
-        if (r) reasonMap[d.task_code] = r
-      } else if (passiveReasonMap[d.task_code]) {
-        reasonMap[d.task_code] = passiveReasonMap[d.task_code]
-      }
-    }
-    const reasonByTaskId = Object.fromEntries(
-      [...baselineTasks, ...tasks].map(t => [t.id, reasonMap[t.task_code] ?? null]),
-    )
-
-    // 2. 与基线 diff，生成批量操作
-    const diff = buildSaveDiff(baselineTasks, baselineDeps, finalTasks, dependencies)
-    let saveError: string | null = null
-    let serverUpdatedTasks: Task[] | null = null
+    // Freeze this attempt before the first await. Later edits stay in Redux.
+    const submitted = reduxStore.getState().tasks
+    const submittedTasks = submitted.tasks
+    const submittedDeps = submitted.dependencies
     try {
+      let saveBaseTasks = baselineTasks
+      let saveBaseDeps = baselineDeps
+      let saveBaseStatusDate = baselineStatusDate
+      if (saveIncomplete) {
+        // Earlier requests may have committed even when their replies were lost.
+        const persisted = await readPersistedState()
+        saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks, attemptedSaveIds.current.taskIds)
+        saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies, attemptedSaveIds.current.dependencyIds)
+        saveBaseStatusDate = persisted.statusDate
+      }
+
+      // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
+      const sdDate = new Date(sd)
+      const prevEndByTaskId = new Map<string, string | null>()
+      const prevVersion = versions[0]
+      if (prevVersion) {
+        try {
+          const r = await authFetch(`/api/versions/${projectId}?id=${prevVersion.id}`)
+          const d = await r.json()
+          if (d.ok && Array.isArray(d.value?.snapshot?.tasks)) {
+            for (const pt of d.value.snapshot.tasks as { id: string; end_date: string | null }[]) {
+              prevEndByTaskId.set(pt.id, snapshotEndForBaseline(pt.end_date))
+            }
+          }
+        } catch { /* ignore, 退化为当前 end */ }
+      }
+      const recomputed = submittedTasks
+        .filter(t => t.start_date && t.end_date)
+        .map(t => {
+          const prevEnd = prevEndByTaskId.get(t.id) ?? null
+          const baselineEnd = prevEnd ?? snapshotEndForBaseline(t.end_date)
+          return {
+            ...t,
+            percent_done: calcPercent(t, sdDate),
+            baseline_end_date: baselineEnd,
+          }
+        })
+      const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
+
+      const reasonMap: Record<string, string> = {}
+      for (const d of changeDiffs) {
+        if (requiredReasonCodes.has(d.task_code)) {
+          const r = (reasons[d.task_code] ?? '').trim()
+          if (r) reasonMap[d.task_code] = r
+        } else if (passiveReasonMap[d.task_code]) {
+          reasonMap[d.task_code] = passiveReasonMap[d.task_code]
+        }
+      }
+      const reasonByTaskId = Object.fromEntries(
+        [...baselineTasks, ...submittedTasks].map(t => [t.id, reasonMap[t.task_code] ?? null]),
+      )
+
+      // 2. 与基线 diff，生成批量操作
+      const diff = buildSaveDiff(saveBaseTasks, saveBaseDeps, finalTasks, submittedDeps)
+      for (const id of [...diff.tasksToAdd.map(t => t.id), ...diff.tasksToUpdate.map(t => t.id), ...diff.tasksToDelete]) {
+        attemptedSaveIds.current.taskIds.add(id)
+      }
+      for (const id of [...diff.depsToAdd.map(d => d.id), ...diff.depsToUpdate.map(d => d.id), ...diff.depsToDelete]) {
+        attemptedSaveIds.current.dependencyIds.add(id)
+      }
       // 删除依赖必须先于删除任务，避免外键级联删除丢失审计
       for (const depId of diff.depsToDelete) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
@@ -1426,7 +1432,11 @@ export default function GanttToolbar({
           method: 'POST', headers: authFetchHeaders(true),
           body: JSON.stringify(diff.tasksToAdd.map(t => ({ ...t, _reason: reasonByTaskId[t.id] }))),
         })
-        if (!r.ok) throw new Error(`新增任务失败 (${r.status})`)
+        const result = await r.json()
+        if (!r.ok || !result.ok || !Array.isArray(result.value)) throw new Error(result.error ?? `新增任务失败 (${r.status})`)
+        // The recovery read may precede an earlier request's commit. An
+        // idempotent POST can then return that request's older values.
+        diff.tasksToUpdate.push(...buildSaveDiff(result.value, [], diff.tasksToAdd, []).tasksToUpdate)
       }
       // 更新任务
       if (diff.tasksToUpdate.length > 0) {
@@ -1447,7 +1457,6 @@ export default function GanttToolbar({
         })
         const result = await r.json()
         if (!r.ok || !result.ok) throw new Error(result.error ?? `更新任务失败 (${r.status})`)
-        if (Array.isArray(result.value)) serverUpdatedTasks = result.value as Task[]
       }
       // 新增依赖
       for (const dep of diff.depsToAdd) {
@@ -1459,7 +1468,9 @@ export default function GanttToolbar({
             _reason: dependencyReasons[dep.id]?.trim(),
           }),
         })
-        if (!r.ok) throw new Error(`新增依赖失败 (${r.status})`)
+        const result = await r.json()
+        if (!r.ok || !result.ok || !result.value?.dependency) throw new Error(result.error ?? `新增依赖失败 (${r.status})`)
+        diff.depsToUpdate.push(...buildSaveDiff([], [result.value.dependency], [], [dep]).depsToUpdate)
       }
       // 更新依赖
       for (const dep of diff.depsToUpdate) {
@@ -1469,64 +1480,42 @@ export default function GanttToolbar({
         })
         if (!r.ok) throw new Error(`更新依赖失败 (${r.status})`)
       }
-    } catch (err) {
-      saveError = err instanceof Error ? err.message : String(err)
-    }
 
-    if (saveError) {
-      setStatusDateSaving(false)
-      alert(`保存失败：${saveError}`)
-      return
-    }
-
-    // 2.5 状态日期若有变更，先把它持久化到 projects 表
-    //     （版本快照只写 project_versions.status_date，不会同步 projects.status_date）
-    if (statusDateChanged) {
-      try {
+      // 2.5 状态日期若有变更，先把它持久化到 projects 表
+      //     （版本快照只写 project_versions.status_date，不会同步 projects.status_date）
+      if (sd !== saveBaseStatusDate) {
         const r = await authFetch(`/api/projects/${projectId}`, {
           method: 'PUT',
           headers: authFetchHeaders(true),
           body: JSON.stringify({ status_date: sd }),
         })
         if (!r.ok) throw new Error(`保存状态日期失败 (${r.status})`)
-      } catch (err) {
-        setStatusDateSaving(false)
-        alert(`保存状态日期失败：${err instanceof Error ? err.message : String(err)}`)
-        return
       }
-    }
 
-    // 3. 创建版本快照
-    const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
-      method: 'POST',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({
-        use_database_snapshot: true,
-        include_snapshot: true,
-        status_date: sd,
-        reasons: reasonMap,
-      }),
-    })
-    const snapshotData = await snapshotRes.json()
+      // 3. 创建版本快照
+      const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
+        method: 'POST',
+        headers: authFetchHeaders(true),
+        body: JSON.stringify({
+          use_database_snapshot: true,
+          include_snapshot: true,
+          status_date: sd,
+          reasons: reasonMap,
+        }),
+      })
+      const snapshotData = await snapshotRes.json()
 
-    setStatusDateSaving(false)
-
-    if (snapshotData.ok) {
-      const snapshotTasks: Task[] | null = Array.isArray(snapshotData.value?.snapshot?.tasks)
-        ? snapshotData.value.snapshot.tasks
-        : null
-      const savedDeps: Dependency[] = Array.isArray(snapshotData.value?.snapshot?.dependencies)
-        ? snapshotData.value.snapshot.dependencies
-        : dependencies
-      const serverTaskById = new Map((serverUpdatedTasks ?? []).map(t => [t.id, t]))
-      const savedTasks = snapshotTasks ?? finalTasks
-        .filter(t => !t.is_deleted)
-        .map(t => serverTaskById.get(t.id) ?? t)
+      if (!snapshotRes.ok || !snapshotData.ok) throw new Error(snapshotData.error ?? `版本保存失败 (${snapshotRes.status})`)
+      if (!Array.isArray(snapshotData.value?.snapshot?.tasks) || !Array.isArray(snapshotData.value?.snapshot?.dependencies)) {
+        throw new Error('版本响应缺少保存结果，请重试')
+      }
+      const savedTasks: Task[] = snapshotData.value.snapshot.tasks
+      const savedDeps: Dependency[] = snapshotData.value.snapshot.dependencies
       // Rebase on the server-confirmed version while retaining any edits made
       // after this save started. Those edits remain dirty for the next save.
       const latest = reduxStore.getState().tasks
-      const reconciledTasks = mergeSavedRecords(savedTasks, finalTasks, latest.tasks)
-      const reconciledDeps = mergeSavedRecords(savedDeps, dependencies, latest.dependencies)
+      const reconciledTasks = mergeSavedRecords(savedTasks, submittedTasks, latest.tasks)
+      const reconciledDeps = mergeSavedRecords(savedDeps, submittedDeps, latest.dependencies)
       const pendingDiff = buildSaveDiff(savedTasks, savedDeps, reconciledTasks, reconciledDeps)
       const pendingTaskIds = [...new Set([
         ...pendingDiff.tasksToAdd.map(t => t.id),
@@ -1551,33 +1540,58 @@ export default function GanttToolbar({
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
       setBaselineDeps(savedDeps.map(d => ({ ...d })))
       setBaselineStatusDate(sd)
+      setSaveIncomplete(false)
+      attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
 
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
         .catch(() => {})
-    } else {
-      alert(`版本保存失败：${snapshotData.error ?? '未知错误'}`)
+    } catch (err) {
+      setSaveIncomplete(true)
+      console.error('确认变更保存失败:', err)
+      alert(`保存失败：${err instanceof Error ? err.message : String(err)}。请重试，系统会核对已保存的内容。`)
+    } finally {
+      setStatusDateSaving(false)
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
-      baselineTasks, baselineDeps, statusDateChanged,
-      isMinute, snapshotEndForBaseline])
+      baselineTasks, baselineDeps, baselineStatusDate, saveIncomplete, readPersistedState, reduxStore,
+      snapshotEndForBaseline])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
     if (!baseline) return
-    const restoredTasks = baselineTasks.map(t => ({ ...t }))
-    const restoredDeps = baselineDeps.map(d => ({ ...d }))
-    dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
-    dispatch(setStatusDate({ projectId, statusDate: baselineStatusDate }))
-    dispatch(clearDirty())
-    dispatch(clearComparison())
-    dispatch(clearDiffFilter())
-    onDiscardChanges?.()
-    setReviewOpen(false)
-    setReasons({})
-  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId, onDiscardChanges])
+    if (statusDateSaving) return
+    setStatusDateSaving(true)
+    try {
+      const persisted = saveIncomplete ? await readPersistedState() : null
+      const restoredTasks = (persisted?.tasks ?? baselineTasks).map(t => ({ ...t }))
+      const restoredDeps = (persisted?.dependencies ?? baselineDeps).map(d => ({ ...d }))
+      const restoredStatusDate = persisted ? persisted.statusDate : baselineStatusDate
+      if (persisted) {
+        setBaseline(restoredTasks.map(t => ({ ...t })))
+        setBaselineTasks(restoredTasks)
+        setBaselineDeps(restoredDeps)
+        setBaselineStatusDate(restoredStatusDate)
+      }
+      dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
+      dispatch(setStatusDate({ projectId, statusDate: restoredStatusDate }))
+      dispatch(clearDirty())
+      dispatch(clearComparison())
+      dispatch(clearDiffFilter())
+      onDiscardChanges?.()
+      setReviewOpen(false)
+      setReasons({})
+      setSaveIncomplete(false)
+      attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
+    } catch (err) {
+      alert(`放弃更改失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setStatusDateSaving(false)
+    }
+  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId, onDiscardChanges,
+      statusDateSaving, saveIncomplete, readPersistedState])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
@@ -1720,6 +1734,7 @@ export default function GanttToolbar({
               {!readOnly && (
                 <button
                   onClick={handleRefresh}
+                  disabled={statusDateSaving}
                   title="撤销一步本地编辑；栈空后回到数据库的当前状态"
                   className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
                 >
@@ -2173,7 +2188,7 @@ export default function GanttToolbar({
                     <div className="text-xs text-gray-400 mt-1">将以当前任务状态创建一个新版本快照</div>
                   </div>
                 ) : (
-                  <div className="text-center text-gray-400 py-8 text-sm">没有检测到变更</div>
+                  <div className="text-center text-gray-400 py-8 text-sm">{saveIncomplete ? '上次保存未完成，请再次确认以完成保存' : '没有检测到变更'}</div>
                 )
               )}
               {changeDiffs.map((d, i) => (

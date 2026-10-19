@@ -54,6 +54,21 @@ export interface SaveDiff {
   depsToDelete: string[]
 }
 
+export interface SaveBaseline {
+  tasks: Task[]
+  dependencies: Dependency[]
+  statusDate: string | null
+}
+
+/** Use persisted results for records involved in a failed attempt. Other
+ * sessions' newly created records must not become deletions in our retry. */
+export function recoverSaveRecords<T extends { id: string }>(
+  baseline: T[], persisted: T[], attemptedIds: Iterable<string>,
+): T[] {
+  const knownIds = new Set([...baseline.map(item => item.id), ...attemptedIds])
+  return persisted.filter(item => knownIds.has(item.id))
+}
+
 function hasChangedFields<T extends { id: string }>(submitted: T, current: T): boolean {
   const keys = new Set([...Object.keys(submitted), ...Object.keys(current)])
   for (const key of keys) {

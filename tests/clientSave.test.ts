@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSaveDiff, mergeSavedRecords } from '../lib/clientSave'
+import { buildSaveDiff, mergeSavedRecords, recoverSaveRecords } from '../lib/clientSave'
 import type { Dependency, Task } from '../types'
 
 function task(partial: Partial<Task> & Pick<Task, 'id'>): Task {
@@ -106,4 +106,48 @@ test('local additions and deletions made during save survive reconciliation', ()
   const merged = mergeSavedRecords(saved, submitted, current)
 
   assert.deepEqual(merged.map(t => t.id), ['new-local'])
+})
+
+test('retry updates a committed create instead of creating it again, preserving edits made after failure', () => {
+  const committed = task({ id: 'created', name: 'First attempt' })
+  const current = [{ ...committed, name: 'Edited after failure' }]
+  const recovered = recoverSaveRecords([], [committed], ['created'])
+  const diff = buildSaveDiff(recovered, deps, current, deps)
+  assert.equal(diff.tasksToAdd.length, 0)
+  assert.equal(diff.tasksToUpdate[0].name, 'Edited after failure')
+})
+
+test('retry removes a committed local addition deleted after the failed attempt without deleting remote additions', () => {
+  const committed = task({ id: 'created' })
+  const remote = task({ id: 'another-session' })
+  const recovered = recoverSaveRecords([], [committed, remote], ['created'])
+  assert.deepEqual(buildSaveDiff(recovered, deps, [], deps).tasksToDelete, ['created'])
+})
+
+test('retry creates a task if the failed request did not commit', () => {
+  const current = [task({ id: 'not-committed' })]
+  const recovered = recoverSaveRecords([], [], ['not-committed'])
+  assert.equal(buildSaveDiff(recovered, deps, current, deps).tasksToAdd.length, 1)
+})
+
+test('retry updates a dependency whose creation committed with a lost response', () => {
+  const committed: Dependency = {
+    id: 'dependency', project_id: 'project-1', from_task_id: 'A', to_task_id: 'B',
+    type: 2, lag: 0, active: true,
+  }
+  const recovered = recoverSaveRecords([], [committed], ['dependency'])
+  const diff = buildSaveDiff([], recovered, [], [{ ...committed, lag: 1440 }])
+  assert.equal(diff.depsToAdd.length, 0)
+  assert.equal(diff.depsToUpdate[0].lag, 1440)
+})
+
+test('server-computed fields are adopted while a newer edit made during save preparation stays pending', () => {
+  const submitted = [task({ id: 'A', name: 'Submitted', percent_done: 0, baseline_end_date: null })]
+  const saved = [{ ...submitted[0], percent_done: 50, baseline_end_date: '2026-06-02T00:00:00' }]
+  const current = [{ ...submitted[0], name: 'Edited during preparation' }]
+  const merged = mergeSavedRecords(saved, submitted, current)
+  assert.equal(merged[0].name, 'Edited during preparation')
+  assert.equal(merged[0].percent_done, 50)
+  assert.equal(merged[0].baseline_end_date, saved[0].baseline_end_date)
+  assert.equal(buildSaveDiff(saved, deps, merged, deps).tasksToUpdate[0].name, current[0].name)
 })

@@ -34,16 +34,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
   }
 
   if (!isUuid(id)) return NextResponse.json(failure('Project not found', 404), { status: 404 })
-  const access = projectAccessSql(auth.value, 6)
+  const access = projectAccessSql(auth.value, 7)
   const result = await pool.query(
     `UPDATE projects p
      SET name = COALESCE($1, name),
          start_date = COALESCE($2, start_date),
          end_date = COALESCE($3, end_date),
-         status_date = $4
-     WHERE p.id = $5 AND (${access.sql})
+         status_date = CASE WHEN $4::boolean THEN $5::timestamp ELSE status_date END
+     WHERE p.id = $6 AND (${access.sql})
      RETURNING *`,
-    [name ?? null, start_date ?? null, end_date ?? null, status_date ?? null, id, ...access.values]
+    [name ?? null, start_date ?? null, end_date ?? null,
+     Object.hasOwn(body, 'status_date'), status_date ?? null, id, ...access.values]
   )
   if (result.rows.length === 0) {
     return NextResponse.json(failure('Project not found', 404), { status: 404 })

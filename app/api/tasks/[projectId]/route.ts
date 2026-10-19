@@ -318,6 +318,21 @@ export async function POST(req: NextRequest, { params }: Params) {
 
       // 客户端可提供 id / task_code（本地预先生成）。校验客户端 id 不重复。
       const clientId = (typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id)) ? id : null
+      if (clientId) {
+        const existing = await client.query('SELECT * FROM tasks WHERE id = $1', [clientId])
+        const saved = existing.rows[0]
+        if (saved) {
+          if (saved.project_id !== projectId || saved.is_deleted) {
+            await client.query('ROLLBACK')
+            return NextResponse.json(failure('任务 ID 已被使用，请重新加载项目', 409), { status: 409 })
+          }
+          // A committed create whose response was lost is safe to replay.
+          // Updates to that task must still use PUT; do not duplicate its history.
+          inserted.push(saved)
+          insertedIds.add(saved.id)
+          continue
+        }
+      }
       let code: string
       if (typeof task_code === 'string' && task_code.trim()) {
         const requestedCode = task_code.trim()

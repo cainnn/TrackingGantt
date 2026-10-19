@@ -7,6 +7,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setTasks, clearTasks, clearViewSnapshot, clearDirty, markDirty } from '@/store/slices/tasksSlice'
 import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
 import { toDateTimeStr } from '@/lib/clientTime'
+import type { SaveBaseline } from '@/lib/clientSave'
 import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
@@ -51,6 +52,7 @@ export default function ProjectPage() {
   }, [viewSnapshot, versions, currentProject?.status_date])
   const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
   const [discardSignal, setDiscardSignal] = useState(0)
+  const [loadedBaseline, setLoadedBaseline] = useState<(SaveBaseline & { projectId: string }) | null>(null)
   const progressStatusDate = previewStatusDate ?? effectiveStatusDate
   const projectProgressPct = useMemo(() => computeProjectProgressPercent(tasks, progressStatusDate), [tasks, progressStatusDate])
   // 项目精度（创建时固定）
@@ -162,6 +164,7 @@ export default function ProjectPage() {
     dispatch(setCurrentProject(null))
     dispatch(clearTasks())
     dispatch(clearProjectLines())
+    setLoadedBaseline(null)
 
     let cancelled = false
     void (async () => {
@@ -176,6 +179,7 @@ export default function ProjectPage() {
           router.push('/dashboard')
           return
         }
+        if (!tr.ok || !tr.value) throw new Error(tr.error ?? '加载任务失败')
         dispatch(setCurrentProject(pr.value))
         if (tr.ok && tr.value) {
           let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
@@ -216,6 +220,12 @@ export default function ProjectPage() {
           }
           dispatch(setTasks({ tasks: loadedTasks, dependencies: loadedDeps }))
           if (dirtyIds.length > 0) dispatch(markDirty(dirtyIds))
+          setLoadedBaseline({
+            projectId,
+            tasks: tr.value.tasks,
+            dependencies: loadedDeps,
+            statusDate: toDateTimeStr(pr.value.status_date ?? null),
+          })
         }
         if (plr.ok && Array.isArray(plr.value)) {
           dispatch(setProjectLines(plr.value))
@@ -287,7 +297,9 @@ export default function ProjectPage() {
         </div>
       )}
 
-      <GanttToolbar
+      {loadedBaseline?.projectId === projectId && currentProject?.id === projectId && <GanttToolbar
+        key={projectId}
+        initialBaseline={loadedBaseline}
         projectId={projectId}
         readOnly={isViewOnly}
         isMinute={isMinute}
@@ -321,7 +333,7 @@ export default function ProjectPage() {
           setPreviewStatusDate(null)
           setDiscardSignal(n => n + 1)
         }}
-      />
+      />}
 
       {showProjectLines && (
         <ProjectLinesPanel projectId={projectId} onClose={() => setShowProjectLines(false)} />

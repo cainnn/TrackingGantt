@@ -72,6 +72,8 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 运行中的本地服务可执行 `npm run test:access -- --ui`，验证真实数据库与接口权限、重复迁移及浏览器拖动操作。测试创建独立的临时用户和项目，并在结束后清理；可通过 `ACCESS_TEST_URL`、`ACCESS_TEST_ROOT` 和 `ACCESS_TEST_PASSWORD` 指定测试服务和管理员登录信息。
 
+保存流程回归：启动本地服务后执行 `SAVE_TEST_URL=http://localhost:3000 npm run test:save`，验证首个任务及全部删除、重复创建与审计记录、保存断网重试、快照异常恢复、保存期间的新编辑和项目状态日期。测试会清理本轮临时项目；可用 `SAVE_TEST_ROOT`、`SAVE_TEST_PASSWORD` 指定管理员，或加 `-- --api-only` 仅验证接口。
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 ### 任务生命周期与变更原因
