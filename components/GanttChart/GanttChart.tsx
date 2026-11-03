@@ -6,7 +6,6 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   setSelectedIds, setTasks, updateTasks, addTasks, deleteTasks,
   addDependency, removeDependency, updateDependency,
-  copyTasks,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
 import type { Task, Dependency } from '@/types'
@@ -24,6 +23,7 @@ import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
 import { addMinutesStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
+import { buildTaskCopies } from '@/lib/clientTaskCopy'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
 const ROW_H    = 40
@@ -419,7 +419,6 @@ export default function GanttChart({
   const tasks       = viewSnapshot?.tasks ?? realTasks
   const deps        = viewSnapshot?.dependencies ?? realDeps
   const selectedIds = useAppSelector(s => s.tasks.selectedIds)
-  const clipboard   = useAppSelector(s => s.tasks.clipboard)
   const comparison  = useAppSelector(s => s.tasks.comparison)
   const diffFilter  = useAppSelector(s => s.tasks.diffFilter)
   const currentProject = useAppSelector(s => s.project.currentProject)
@@ -1278,8 +1277,24 @@ export default function GanttChart({
     }
   }, [focusSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const barDragJustEndedRef = useRef(false)
+  const handleBarClick = useCallback((e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation()
+    // 拖动完成后的 click 不改变多选；普通单击与左侧勾选共用选中状态。
+    if (barDragJustEndedRef.current) {
+      barDragJustEndedRef.current = false
+      return
+    }
+    setSelectedDep(null)
+    dispatch(setSelectedIds(e.ctrlKey || e.metaKey
+      ? (selectedIds.includes(taskId) ? selectedIds.filter(id => id !== taskId) : [...selectedIds, taskId])
+      : [taskId]))
+  }, [dispatch, selectedIds])
+
   // ── Bar drag: mousedown ─────────────────────────────────────────────────
   const onBarMouseDown = useCallback((e: React.MouseEvent, task: Task) => {
+    if (e.button !== 0) return
+    barDragJustEndedRef.current = false
     if (readOnly) return
     if (!task.start_date || !task.end_date) return
     e.stopPropagation(); e.preventDefault()
@@ -1421,6 +1436,7 @@ export default function GanttChart({
 
         // 只有鼠标移动超过4像素才开始真正拖动
         if (!drag.dragging && Math.abs(dx) > 4) {
+          barDragJustEndedRef.current = true
           setDrag(prev => prev ? { ...prev, dragging: true } : null)
         }
 
@@ -2415,44 +2431,19 @@ export default function GanttChart({
     setEditModalTaskId(taskId)
   }, [])
 
-  const handleCtxCopy = useCallback((taskId: string) => {
+  const handleCtxCopyTo = useCallback((targetId: string, position: 'before' | 'after') => {
     setCtxMenu(null)
-    dispatch(copyTasks([taskId]))
-  }, [dispatch])
-
-  const handleCtxCut = useCallback((taskId: string) => {
-    setCtxMenu(null)
-    dispatch(copyTasks([taskId]))
-    const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
-    const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
-    const remainTasks = tasks.filter(t => t.id !== taskId)
-    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date, { isMinute })
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([taskId]))
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-    }
-  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute])
-
-  const handleCtxPaste = useCallback(() => {
-    setCtxMenu(null)
-    if (!clipboard.length) return
-    const maxCode = tasks.reduce((m, t) => {
-      const n = parseInt(t.task_code, 10)
-      return !isNaN(n) && n > m ? n : m
-    }, 0)
-    const pasted: Task[] = clipboard.map((t, i) => ({
-      ...t,
-      id: uuid(),
-      task_code: String(maxCode + 1 + i),
-      name: `${t.name} (副本)`,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    } as Task))
-    dispatch(addTasks(pasted))
-    dispatch(markDirty(pasted.map(t => t.id)))
-  }, [dispatch, clipboard, tasks])
+    if (readOnly || viewSnapshot) return
+    const { tasksToAdd, tasksToUpdate, dependenciesToAdd } = buildTaskCopies(tasks, deps, selectedIds, targetId, position)
+    if (tasksToAdd.length === 0) return
+    if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
+    dispatch(addTasks(tasksToAdd))
+    for (const dep of dependenciesToAdd) dispatch(addDependency(dep))
+    dispatch(markDirty([...tasksToUpdate, ...tasksToAdd].map(t => t.id)))
+    const updates = new Map(tasksToUpdate.map(t => [t.id, t]))
+    recascade([...deps, ...dependenciesToAdd], [...tasks.map(t => updates.get(t.id) ?? t), ...tasksToAdd])
+    dispatch(setSelectedIds(tasksToAdd.map(t => t.id)))
+  }, [dispatch, tasks, deps, selectedIds, readOnly, viewSnapshot, recascade])
 
   const handleCtxConvertMilestone = useCallback(async (taskId: string) => {
     setCtxMenu(null)
@@ -4120,19 +4111,9 @@ export default function GanttChart({
                    style={{ cursor:'pointer', opacity: (isDragging?0.7:1) * inactiveDim }}
                    onMouseEnter={()=>setHoveredBar(t.id)}
                    onMouseLeave={()=>setHoveredBar(null)}
+                   onClick={e => handleBarClick(e, t.id)}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
-                   onMouseDown={e=>{
-                     if (e.button!==0) return
-                     e.stopPropagation()
-                     setDrag({
-                       taskId:t.id, mode:'move',
-                       startMouseX: getSvgX(e.clientX),
-                       origStart: new Date(t.start_date!),
-                       origEnd: new Date(t.end_date!),
-                       dragging: false,
-                     })
-                     setPreviewMap({ [t.id]: { ...t } })
-                   }}>
+                   onMouseDown={e => onBarMouseDown(e, t)}>
                   <text x={cx-r-4} y={cy+4} fontSize={11} textAnchor="end" fill="#6b7280" style={{ pointerEvents:'none' }}>{t.name}</text>
                   <polygon points={`${cx},${cy-r} ${cx+r},${cy} ${cx},${cy+r} ${cx-r},${cy}`}
                            fill="#fbbf24" stroke="#f59e0b" strokeWidth={1} />
@@ -4141,6 +4122,7 @@ export default function GanttChart({
                     <circle cx={cx+r+6} cy={cy} r={6}
                             fill="#3b82f6" stroke="white" strokeWidth={1.5}
                             style={{ cursor:'crosshair' }}
+                            onClick={e => e.stopPropagation()}
                             onMouseDown={e=>{ e.stopPropagation(); onConnectMouseDown(e,t,i) }} />
                   )}
                   {deadlineMarker}
@@ -4155,6 +4137,7 @@ export default function GanttChart({
               const sDoneW = w * Math.max(0, Math.min(1, sPct / 100))
               return (
                 <g key={t.id}
+                   onClick={e => handleBarClick(e, t.id)}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e=>{ if(e.button!==0)return; onBarMouseDown(e,t) }}
                    style={{ cursor:'grab', opacity: (isDragging?0.7:1) * inactiveDim }}>
@@ -4183,6 +4166,7 @@ export default function GanttChart({
               <g key={t.id} style={{ opacity: (isDragging?0.65:1) * inactiveDim }}
                  onMouseEnter={()=>setHoveredBar(t.id)}
                  onMouseLeave={()=>setHoveredBar(null)}
+                 onClick={e => handleBarClick(e, t.id)}
                  onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                  onMouseMove={(e) => {
                    // 动态更新光标样式
@@ -4230,6 +4214,7 @@ export default function GanttChart({
                   <circle cx={x+w+6} cy={y+BAR_H/2} r={6}
                           fill="#3b82f6" stroke="white" strokeWidth={1.5}
                           style={{ cursor:'crosshair' }}
+                          onClick={e => e.stopPropagation()}
                           onMouseDown={e=>{ e.stopPropagation(); onConnectMouseDown(e,t,i) }} />
                 )}
                 {deadlineMarker}
@@ -4367,6 +4352,7 @@ export default function GanttChart({
         const canIndent  = !!prevSibling
         const canOutdent = !!task.parent_id
         const isSummary = summarySet.has(ctxMenu.taskId)
+        const canCopySelection = !viewSnapshot && tasks.some(t => !t.is_deleted && selectedIds.includes(t.id))
 
         // Smart positioning: clamp to viewport
         const menuH = 520
@@ -4432,8 +4418,6 @@ export default function GanttChart({
         // Icons
         const IcoEdit    = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 2l3 3-8 8H3v-3L11 2z"/></svg>
         const IcoCopy    = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="5" y="5" width="8" height="9" rx="1"/><path d="M3 11V3h8" strokeLinecap="round"/></svg>
-        const IcoCut     = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="4" cy="12" r="2"/><circle cx="4" cy="4" r="2"/><path d="M6 11L14 3M6 5l8 8" strokeLinecap="round"/></svg>
-        const IcoPaste   = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M5 3h6v2H5V3z"/><rect x="3" y="4" width="10" height="10" rx="1"/></svg>
         const IcoAdd     = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 3v10M3 8h10" strokeLinecap="round"/></svg>
         const IcoDiamond = <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor"><path d="M8 2l4 6-4 6-4-6z"/></svg>
         const IcoIndent  = <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M2 4h12M2 8h8M2 12h12M10 6l3 2-3 2" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -4449,11 +4433,10 @@ export default function GanttChart({
             style={{ left, top, minWidth: 220, maxHeight: `calc(100vh - ${pad * 2}px)` }}
             onClick={e => e.stopPropagation()}
           >
-            {/* Group 1: Edit / Copy / Cut / Paste */}
+            {/* Group 1: Edit / Copy selected tasks relative to this task */}
             <Row icon={IcoEdit}  label="编辑"  onClick={() => handleCtxEdit(ctxMenu.taskId)} />
-            <Row icon={IcoCopy}  label="复制"  onClick={() => handleCtxCopy(ctxMenu.taskId)} />
-            <Row icon={IcoCut}   label="剪切"  onClick={() => handleCtxCut(ctxMenu.taskId)} />
-            <Row icon={IcoPaste} label="粘贴"  onClick={handleCtxPaste} disabled={clipboard.length === 0} />
+            <Row icon={IcoCopy} label="复制选中任务到上方" onClick={() => handleCtxCopyTo(ctxMenu.taskId, 'before')} disabled={!canCopySelection} />
+            <Row icon={IcoCopy} label="复制选中任务到下方" onClick={() => handleCtxCopyTo(ctxMenu.taskId, 'after')} disabled={!canCopySelection} />
 
             <Sep />
 

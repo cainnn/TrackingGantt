@@ -4,7 +4,7 @@ import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine } from '@/types'
 import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
-import { formatMinDuration, toDateTimeStr } from '@/lib/clientTime'
+import { formatMinDuration, MIN_PER_DAY, toDateTimeStr } from '@/lib/clientTime'
 
 function diffMinsRaw(a: string, b: string): number {
   return Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60_000)
@@ -126,7 +126,7 @@ const COLUMNS: Partial<ExcelJS.Column>[] = [
   { header: '责任人',   key: 'assignee',  width: 12 },
   { header: '开始日期', key: 'start_date', width: 13 },
   { header: '结束日期', key: 'end_date',  width: 13 },
-  { header: '工期(分钟)', key: 'duration',  width: 11 },
+  { header: '工期(天)', key: 'duration',  width: 11 },
   { header: '里程碑',   key: 'milestone', width: 7 },
   { header: '自动排程', key: 'auto_schedule', width: 9 },
   { header: '前置依赖', key: 'predecessors', width: 22 },
@@ -175,7 +175,7 @@ function buildRowData(
   statusDate: Date | null,
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
-  isMinute: boolean = true,
+  isMinute: boolean = false,
   hasPreviousStatusVersion: boolean = !!prevTaskIds && prevTaskIds.size > 0,
 ) {
   const t = ft.task
@@ -187,7 +187,8 @@ function buildRowData(
     assignee: t.assignee ?? '',
     start_date: fmtCellDt(t.start_date),
     end_date: fmtCellDt(t.end_date),
-    duration: t.duration ?? 0,
+    // 内部统一存分钟，Excel 默认用天；仅分钟级项目保留分钟。
+    duration: (t.duration ?? 0) / (isMinute ? 1 : MIN_PER_DAY),
     milestone: t.is_milestone ? '是' : '否',
     auto_schedule: t.auto_schedule !== false ? '是' : '否',
     predecessors: formatPredecessors(t.id, deps, codeMap, isMinute),
@@ -254,10 +255,12 @@ function populateSheet(
   statusDate: Date | null,
   prevTaskIds?: Set<string>,
   seqMap?: Map<string, number>,
-  isMinute: boolean = true,
+  isMinute: boolean = false,
   hasPreviousStatusVersion: boolean = !!prevTaskIds && prevTaskIds.size > 0,
 ) {
-  ws.columns = COLUMNS as ExcelJS.Column[]
+  ws.columns = COLUMNS.map(column => column.key === 'duration'
+    ? { ...column, header: isMinute ? '工期(分钟)' : '工期(天)' }
+    : { ...column }) as ExcelJS.Column[]
   styleHeaderRow(ws)
 
   for (const ft of flatTasks) {
@@ -307,6 +310,7 @@ export async function exportToExcel(
     isMinute?: boolean
   },
 ) {
+  const isMinute = options?.isMinute === true
   const activeTasks = tasks.filter(t => !t.is_deleted)
   // 用上期快照覆盖 baseline_end_date，保证 computeTaskStatus 的上游检测正确
   const tasksWithBaseline = options?.prevEndMap && options.prevEndMap.size > 0
@@ -358,13 +362,13 @@ export async function exportToExcel(
   const normalizedStatusDate = toDateTimeStr(statusDate ?? null)
   const sdDate = normalizedStatusDate ? new Date(normalizedStatusDate) : null
   const statusDateLabel = normalizedStatusDate
-    ? (options?.isMinute ? normalizedStatusDate.slice(0, 16).replace('T', ' ') : normalizedStatusDate.slice(0, 10))
+    ? (isMinute ? normalizedStatusDate.slice(0, 16).replace('T', ' ') : normalizedStatusDate.slice(0, 10))
     : ''
   const hasPreviousStatusVersion = !!options?.prevEndMap && options.prevEndMap.size > 0
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false, hasPreviousStatusVersion)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
@@ -376,7 +380,7 @@ export async function exportToExcel(
     // Sheet name max 31 chars, no special chars
     const sheetName = assignee.slice(0, 31).replace(/[\\/*?:\[\]]/g, '_')
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, options?.isMinute !== false, hasPreviousStatusVersion)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
   }
 
   // ── Project settings sheet ─────────────────────────────────────────
@@ -395,8 +399,8 @@ export async function exportToExcel(
 
     if (hasStatusDate) {
       ws2.addRow({
-        type: options?.isMinute ? '状态时间' : '状态日期',
-        name: options?.isMinute ? '状态时间' : '状态日期',
+        type: isMinute ? '状态时间' : '状态日期',
+        name: isMinute ? '状态时间' : '状态日期',
         date: statusDateLabel,
         color: '',
         visible: '',

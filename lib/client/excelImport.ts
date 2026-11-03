@@ -1,6 +1,7 @@
 'use client'
 
 import * as XLSX from 'xlsx'
+import { MIN_PER_DAY } from '../clientTime'
 
 const DEP_TYPE_MAP: Record<string, number> = { SS: 0, SF: 1, FS: 2, FF: 3 }
 
@@ -80,6 +81,16 @@ function parseDateCell(v: unknown): string | null {
   const d = new Date(s)
   if (!isNaN(d.getTime())) return fmtDt(d)
   return null
+}
+
+// 表头单位优先于项目粒度；旧版“工期(分钟)”继续按分钟读取，无单位默认天。
+function parseDurationCell(row: Record<string, unknown>): number | null {
+  const minuteValue = row['工期(分钟)'] ?? row['工期（分钟）']
+  const raw = minuteValue ?? row['工期(天)'] ?? row['工期（天）'] ?? row['工期']
+  if (raw == null || String(raw).trim() === '') return null
+  const value = Number(raw)
+  if (!Number.isFinite(value)) return 0
+  return Math.round(value * (minuteValue != null ? 1 : MIN_PER_DAY))
 }
 
 // Parse predecessor strings like "3FS+2d,5SS-1d" or "!T-003FS+2d,T-005SS-1d"
@@ -303,11 +314,13 @@ export function validateImportData(
 }
 
 export async function parseExcelFile(file: File, options: { isMinute?: boolean } = {}): Promise<ParseResult> {
-  const isMinute = options.isMinute !== false
   const buf = await file.arrayBuffer()
   const wb = XLSX.read(buf, { cellDates: true })
   const ws = wb.Sheets[wb.SheetNames[0]]
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws)
+  // 未指定项目粒度时，延迟列沿用文件的分钟标注，否则默认天。
+  const isMinute = options.isMinute ?? rows.some(row =>
+    row['工期(分钟)'] != null || row['工期（分钟）'] != null)
 
   const tasks: ImportTask[] = []
   const dependencies: ImportDep[] = []
@@ -320,7 +333,6 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
     if (!taskCode) continue
 
     const rawParentCode = String(row['父任务编码'] ?? '').trim()
-    const rawDuration = row['工期(分钟)'] ?? row['工期']
     const task: ImportTask = {
       task_code: taskCode,
       level: Number(row['层级']) || 1,
@@ -330,7 +342,7 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
       assignee: String(row['责任人'] ?? '').trim() || null,
       start_date: parseDateCell(row['开始日期']),
       end_date: parseDateCell(row['结束日期']),
-      duration: rawDuration != null ? Number(rawDuration) || 0 : null,
+      duration: parseDurationCell(row),
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,

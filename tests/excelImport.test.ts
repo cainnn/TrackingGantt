@@ -73,3 +73,42 @@ test('imports predecessor lag using project granularity at Excel boundary', asyn
   assert.equal(dayParsed.dependencies[0].lag, 2880)
   assert.equal(minuteParsed.dependencies[0].lag, 2880)
 })
+
+for (const isMinute of [false, true]) {
+  test(`imports duration by column unit regardless of project granularity (minute=${isMinute})`, async () => {
+    const values: [string, unknown, number | null][] = [
+      ['工期(天)', 3, 4320],
+      ['工期（天）', 1.5, 2160],
+      ['工期', 2, 2880],
+      ['工期(分钟)', 75, 75],
+      ['工期（分钟）', 30, 30],
+      ['工期(天)', 0, 0],
+      ['工期(分钟)', 0, 0],
+      ['工期(天)', '', null],
+      ['工期(分钟)', '', null],
+    ]
+    const wb = XLSX.utils.book_new()
+    const sheet = XLSX.utils.json_to_sheet(values.map(([header, duration], i) => ({
+      '任务编码': String(i + 1),
+      '任务名称': `任务${i + 1}`,
+      [header]: duration,
+    })))
+    XLSX.utils.book_append_sheet(wb, sheet, '任务')
+    const data = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+    const parsed = await parseExcelFile(new File([data], 'units.xlsx'), { isMinute })
+
+    assert.deepEqual(parsed.tasks.map(t => t.duration), values.map(([, , expected]) => expected))
+  })
+}
+
+test('imports a unitless duration as days by default', async () => {
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    { '任务编码': '1', '任务名称': '准备', '工期': 3 },
+    { '任务编码': '2', '任务名称': '未填写工期' },
+  ]), '任务')
+  const data = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer
+  const parsed = await parseExcelFile(new File([data], 'default-days.xlsx'))
+
+  assert.deepEqual(parsed.tasks.map(t => t.duration), [4320, null])
+})
