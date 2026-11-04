@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev --webpack",
     "build": "next build --webpack",
+    "postbuild": "node scripts/precompress-static.mjs",
     "build:turbo": "next build",
+    "postbuild:turbo": "node scripts/precompress-static.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run test",
     "test": "npm run test:unit",

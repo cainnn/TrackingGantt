@@ -144,6 +144,32 @@ What it does:
 - runs `npm i && npm run build`
 - restarts PM2 app (`gantt-app`)
 
+### Static assets behind Nginx
+
+`npm run build` and `npm run build:turbo` now generate `.gz` copies of the
+JavaScript and CSS files in `.next/static`. This also runs for local-build VPS
+deployments. The original files are retained; no application data is modified.
+
+For Nginx deployments, render `deploy/nginx-static.conf.template` with the
+actual application directory and include the result in the application's
+`server {}` block. For example, on the VPS:
+
+```bash
+export APP_DIR=/opt/gantt-app
+envsubst '${APP_DIR}' < deploy/nginx-static.conf.template > /etc/nginx/snippets/gantt-static.conf
+```
+
+Add `include /etc/nginx/snippets/gantt-static.conf;` to the existing application
+server block, replacing any existing `/_next/static/` location. Back up the site
+configuration first, run `nginx -t`, then use `systemctl reload nginx` to apply it
+without stopping the application. Nginx must support `http_gzip_static_module`.
+
+This serves precompressed files with a complete `Content-Length` response. It
+avoids streaming compression on the static-resource path, where truncated
+responses were causing `ChunkLoadError` in the browser. Verify a full gzip
+download and its decompressed checksum, not just an HTTP 200 response, after
+changing this configuration. See the [Nginx gzip_static documentation](https://nginx.org/en/docs/http/ngx_http_gzip_static_module.html).
+
 ### Backup / Restore
 
 Backup (manual):

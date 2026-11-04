@@ -1,0 +1,10 @@
+# Render APP_DIR before including this snippet inside the application's server {}.
+# Requires nginx's http_gzip_static_module. Original files remain available.
+location ^~ /_next/static/ {
+    alias ${APP_DIR}/.next/static/;
+    gzip_static on;
+    gzip_vary on;
+    gzip off;
+    sendfile off;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+}
