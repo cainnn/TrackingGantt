@@ -24,7 +24,8 @@
     "deploy:vps:minute": "bash scripts/deploy-vps-minute.sh",
     "deploy:fast:minute": "SKIP_BACKUP=1 SKIP_MIGRATE=1 bash scripts/deploy-vps-minute.sh",
     "deploy:local:minute": "LOCAL_BUILD=1 bash scripts/deploy-vps-minute.sh",
-    "dev:minute": "PORT=3001 next dev --webpack"
+    "dev:minute": "PORT=3001 next dev --webpack",
+    "test:interactions": "node scripts/test-gantt-interactions.cjs"
   },
   "dependencies": {
     "@reduxjs/toolkit": "^2.11.2",

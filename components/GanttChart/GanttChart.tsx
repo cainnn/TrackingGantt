@@ -21,9 +21,13 @@ import {
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
-import { addMinutesStr } from '@/lib/clientTime'
+import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
+import { labelDraftStep } from '@/store/draftHistory'
+import { buildBulkEdit } from '@/lib/clientBulkEdit'
+import { applyGridPaste, gridCellEditable } from '@/lib/clientGridEdit'
+import type { ChartViewState } from '@/lib/clientViewState'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
 const ROW_H    = 40
@@ -392,6 +396,10 @@ interface Props {
   showComparison?: boolean
   onStatusDatePreviewChange?: (statusDate: string | null) => void
   discardSignal?: number
+  timelineRequest?: { kind: 'all' | 'selection' | 'status'; id: number }
+  onColWChange?: (width: number) => void
+  viewRestore?: { state: ChartViewState; id: number }
+  onCaptureReady?: (capture: (() => ChartViewState) | null) => void
 }
 
 export default function GanttChart({
@@ -411,6 +419,7 @@ export default function GanttChart({
   showComparison = true,
   onStatusDatePreviewChange,
   discardSignal = 0,
+  timelineRequest, onColWChange, viewRestore, onCaptureReady,
 }: Props) {
   const dispatch    = useAppDispatch()
   const realTasks   = useAppSelector(s => s.tasks.tasks)
@@ -422,7 +431,8 @@ export default function GanttChart({
   const comparison  = useAppSelector(s => s.tasks.comparison)
   const diffFilter  = useAppSelector(s => s.tasks.diffFilter)
   const currentProject = useAppSelector(s => s.project.currentProject)
-  const projectLines   = useAppSelector(s => s.projectLines.lines)
+  const liveProjectLines = useAppSelector(s => s.projectLines.lines)
+  const projectLines = viewSnapshot?.lines ?? liveProjectLines
   const versions       = useAppSelector(s => s.versions.versions)
 
   // ── 当期延期原因（task_code → reason） ─────────────────────────────────
@@ -445,9 +455,9 @@ export default function GanttChart({
 
   // 点击状态列时显示填报原因的 popover
   const [reasonPopup, setReasonPopup] = useState<{ x: number; y: number; reason: string; taskName: string } | null>(null)
-  const [statusDateDrag, setStatusDateDrag] = useState<{ startX: number; dragging: boolean } | null>(null)
+  const [statusDateDrag, setStatusDateDrag] = useState<{ startX: number; originX: number; dragging: boolean } | null>(null)
   const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
-  const effectiveChartStatusDate = previewStatusDate ?? statusDate ?? null
+  const effectiveChartStatusDate = toDateTimeStr(previewStatusDate ?? statusDate ?? null)
   useEffect(() => {
     if (!reasonPopup) return
     const close = () => setReasonPopup(null)
@@ -534,6 +544,7 @@ export default function GanttChart({
 
   const colW = colWProp ?? DEF_COLW
   const prevColWRef = useRef(colW)
+  const pendingTimelineCenter = useRef<number | null>(null)
 
   // ── Expand/collapse ────────────────────────────────────────────────────
   const [expanded, setExpanded] = useState<Record<string,boolean>>({})
@@ -541,7 +552,7 @@ export default function GanttChart({
     if (!tasks.length) return
     const m: Record<string,boolean> = {}
     tasks.forEach(t => { m[t.id] = true })
-    setExpanded(m)
+    setExpanded(prev => ({ ...m, ...prev }))
   }, [tasks.length])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Expand / Collapse all signals ──────────────────────────────────────
@@ -596,7 +607,15 @@ export default function GanttChart({
 
   // ── Dependency connect ─────────────────────────────────────────────────
   const [connect, setConnect]     = useState<ConnectState|null>(null)
+  const [hoverPoint, setHoverPoint] = useState({ x: 0, y: 0 })
+  const [tooltipTask, setTooltipTask] = useState<string | null>(null)
   const [hoveredBar, setHoveredBar] = useState<string|null>(null)
+  useEffect(() => {
+    setTooltipTask(null)
+    if (!hoveredBar) return
+    const timer = setTimeout(() => setTooltipTask(hoveredBar), 450)
+    return () => clearTimeout(timer)
+  }, [hoveredBar])
   const [selectedDep, setSelectedDep] = useState<string|null>(null)
 
   // ── Dependency line drag (调整 lag) ────────────────────────────────────
@@ -626,6 +645,10 @@ export default function GanttChart({
   // ── Cell editing ────────────────────────────────────────────────────────
   interface CellEdit { taskId: string; field: 'assignee' | 'duration' | 'start_date' | 'end_date'; value: string }
   const [cellEdit, setCellEdit] = useState<CellEdit | null>(null)
+  const cellCommittedRef = useRef(false)
+  const cancelEditorRef = useRef(false)
+  useEffect(() => { cellCommittedRef.current = false }, [cellEdit?.taskId, cellEdit?.field])
+  const [gridError, setGridError] = useState('')
 
   // ── Panel resize / collapse ─────────────────────────────────────────────
   const [panelW, setPanelW]           = useState(INIT_LEFT_W)
@@ -860,22 +883,29 @@ export default function GanttChart({
     })
     if (currentProject?.start_date) { const d=new Date(currentProject.start_date); if(d<mn)mn=d }
     if (currentProject?.end_date)   { const d=new Date(currentProject.end_date);   if(d>mx)mx=d }
+    if (statusDate) { const d = new Date(statusDate); if (d < mn) mn = d; if (d > mx) mx = d }
+    if (mn.getFullYear() === 9999) mn = sod(new Date())
+    if (mx < mn) mx = addDays(mn, 7)
     if (isMinute) {
-      return { origin: sod(mn), totalDays: MINUTE_TIMELINE_DAYS }
+      return { origin: sod(mn), totalDays: Math.max(MINUTE_TIMELINE_DAYS, Math.ceil(diffDays(sod(mn), mx)) + 1) }
     }
     const o=sod(mn); o.setDate(o.getDate()-o.getDay()-60)
     return { origin:o, totalDays:diffDays(o, addDays(sod(mx),21)) }
-  }, [tasks, currentProject?.start_date, currentProject?.end_date, isMinute])
+  }, [tasks, currentProject?.start_date, currentProject?.end_date, isMinute, statusDate])
 
   // 像素/分钟：colW 是像素/天，1440 分钟/天。分钟级精度由此派生。
   const pxPerMin = colW / 1440
-  const dateToX = useCallback((d:Date)=>diffMins(origin,d)*pxPerMin, [origin, pxPerMin])
+  const dateToX = useCallback((d: Date) => {
+    if (isMinute) return diffMins(origin, d) * pxPerMin
+    const days = (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - Date.UTC(origin.getFullYear(), origin.getMonth(), origin.getDate())) / 86400000
+    return (days + (d.getHours() * 60 + d.getMinutes()) / 1440) * colW
+  }, [origin, pxPerMin, colW, isMinute])
   const xToStatusDate = useCallback((x: number) => {
     const rawMins = x / pxPerMin
     const snap = isMinute ? SNAP_MIN : 1440
     const mins = Math.round(rawMins / snap) * snap
     const d = addMins(origin, mins)
-    return isMinute ? fmtDt(d) : fmtDate(d)
+    return fmtDt(isMinute ? d : sod(d))
   }, [origin, pxPerMin, isMinute])
   const taskRangeCenterX = useCallback((): number | null => {
     let minTs = Infinity
@@ -920,11 +950,16 @@ export default function GanttChart({
     const el = rightRef.current
     if (!el) return
     const viewW = el.clientWidth
-    // 分钟级优先以状态时间居中；没有状态时间时回退到任务范围中心。
-    const target = statusDate ? new Date(statusDate) : sod(new Date())
-    const targetX = isMinute && !statusDate ? (taskRangeCenterX() ?? dateToX(target)) : dateToX(target)
-    syncTimelineScrollLeft(Math.max(0, targetX - viewW / 2))
-  }, [colW, syncTimelineScrollLeft, statusDate, isMinute, taskRangeCenterX, dateToX])
+    if (pendingTimelineCenter.current != null) {
+      const center = pendingTimelineCenter.current
+      pendingTimelineCenter.current = null
+      syncTimelineScrollLeft(Math.max(0, dateToX(new Date(center)) - viewW / 2))
+      return
+    }
+    // Keep the date under the viewport center fixed while zooming.
+    const centerDay = (el.scrollLeft + viewW / 2) / prev
+    syncTimelineScrollLeft(Math.max(0, centerDay * colW - viewW / 2))
+  }, [colW, dateToX, syncTimelineScrollLeft])
 
   // ── Initial scroll: center on status date or today ─────────────────────
   const scrolledForProject = useRef<string>('')
@@ -1277,6 +1312,39 @@ export default function GanttChart({
     }
   }, [focusSignal]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const selectionAnchor = useRef<string | null>(null)
+  const selectTask = useCallback((taskId: string, e: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }, checkbox = false) => {
+    const order = displayRows.map(r => r.task.id)
+    const anchor = selectionAnchor.current ?? selectedIds[0] ?? taskId
+    if (e.shiftKey && order.includes(anchor)) {
+      const a = order.indexOf(anchor), b = order.indexOf(taskId)
+      const range = order.slice(Math.min(a, b), Math.max(a, b) + 1)
+      dispatch(setSelectedIds(e.ctrlKey || e.metaKey ? [...new Set([...selectedIds, ...range])] : range))
+    } else {
+      dispatch(setSelectedIds(checkbox || e.ctrlKey || e.metaKey
+        ? (selectedIds.includes(taskId) ? selectedIds.filter(id => id !== taskId) : [...selectedIds, taskId]) : [taskId]))
+      selectionAnchor.current = taskId
+    }
+  }, [displayRows, selectedIds, dispatch])
+
+  const startStatusDateDrag = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    e.preventDefault(); e.stopPropagation()
+    setSelectedDep(null)
+    setStatusDateDrag({ startX: getSvgX(e.clientX), originX: dateToX(new Date(effectiveChartStatusDate!)), dragging: false })
+    setPreviewStatusDate(effectiveChartStatusDate)
+    onStatusDatePreviewChange?.(effectiveChartStatusDate)
+  }, [getSvgX, dateToX, effectiveChartStatusDate, onStatusDatePreviewChange])
+  const handleStatusDateKey = useCallback((e: React.KeyboardEvent) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(e.key) || !effectiveChartStatusDate) return
+    e.preventDefault(); e.stopPropagation()
+    const minutes = (isMinute ? (e.shiftKey ? 60 : SNAP_MIN) : (e.shiftKey ? 7 : 1) * 1440) * (e.key === 'ArrowRight' ? 1 : -1)
+    const date = addMinutesStr(effectiveChartStatusDate, minutes)
+    if (!date) return
+    if (readOnly || viewSnapshot) { setPreviewStatusDate(date); onStatusDatePreviewChange?.(date) }
+    else { dispatch(labelDraftStep('移动状态日期线')); dispatch(setStatusDate({ projectId, statusDate: date })) }
+  }, [isMinute, effectiveChartStatusDate, readOnly, viewSnapshot, dispatch, projectId, onStatusDatePreviewChange])
+
   const barDragJustEndedRef = useRef(false)
   const handleBarClick = useCallback((e: React.MouseEvent, taskId: string) => {
     e.stopPropagation()
@@ -1286,14 +1354,13 @@ export default function GanttChart({
       return
     }
     setSelectedDep(null)
-    dispatch(setSelectedIds(e.ctrlKey || e.metaKey
-      ? (selectedIds.includes(taskId) ? selectedIds.filter(id => id !== taskId) : [...selectedIds, taskId])
-      : [taskId]))
-  }, [dispatch, selectedIds])
+    setSelectedCell(null)
+    selectTask(taskId, e)
+  }, [selectTask])
 
   // ── Bar drag: mousedown ─────────────────────────────────────────────────
   const onBarMouseDown = useCallback((e: React.MouseEvent, task: Task) => {
-    if (e.button !== 0) return
+    if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return
     barDragJustEndedRef.current = false
     if (readOnly) return
     if (!task.start_date || !task.end_date) return
@@ -1364,22 +1431,6 @@ export default function GanttChart({
     setRowDrag({ taskId, startY: e.clientY, dragging: false })
   }, [readOnly])
 
-  // ── Escape 取消拖拽 ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && (drag || connect || statusDateDrag)) {
-        setDrag(null)
-        setPreviewMap({})
-        setConnect(null)
-        setStatusDateDrag(null)
-        setPreviewStatusDate(null)
-        onStatusDatePreviewChange?.(null)
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [drag, connect, statusDateDrag, onStatusDatePreviewChange])
-
   // ── 节流函数：限制setState频率，trailing 确保最后一帧一定生效 ──────────
   const throttleTimer = useRef<NodeJS.Timeout | null>(null)
   const pendingPreview = useRef<Record<string, Task> | null>(null)
@@ -1427,7 +1478,7 @@ export default function GanttChart({
           setStatusDateDrag(prev => prev ? { ...prev, dragging: true } : null)
         }
         if (statusDateDrag.dragging || Math.abs(dx) > 2) {
-          throttledSetStatusPreview(xToStatusDate(svgX))
+          throttledSetStatusPreview(xToStatusDate(statusDateDrag.originX + dx))
         }
       }
 
@@ -1441,7 +1492,8 @@ export default function GanttChart({
         }
 
         // 只有在真正拖动时才更新日期（分钟级精度，吸附到 15 分钟）
-        if (drag.dragging) {
+        if (drag.dragging || Math.abs(dx) > 4) {
+          setHoverPoint({ x: e.clientX, y: e.clientY })
           const minsRaw = Math.round(dx * 1440 / colW)
           // 天级项目吸附 1 天 (1440 min)，分钟级吸附 15 分钟。
           const snap = isMinute ? SNAP_MIN : 1440
@@ -1450,6 +1502,11 @@ export default function GanttChart({
           const orig = tasks.find(t => t.id === drag.taskId)
           if (!orig) return
 
+          if (drag.mode === 'move' && selectedIds.includes(drag.taskId) && selectedIds.length > 1) {
+            const updated = buildBulkEdit(tasks, deps, selectedIds, { shiftMinutes: mins }, isMinute, statusDate ?? fmtDt(new Date()))
+            throttledSetPreview(Object.fromEntries(updated.map(t => [t.id, t])))
+            return
+          }
           const isSummaryDrag = summarySet.has(drag.taskId)
 
           // ── 摘要任务拖动：整体平移所有后代 ──
@@ -1742,7 +1799,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1758,6 +1815,7 @@ export default function GanttChart({
         setStatusDateDrag(null)
         if (latest && latest !== committedStatusDate) {
           if (!readOnly && !viewSnapshot) {
+            dispatch(labelDraftStep('移动状态日期线'))
             dispatch(setStatusDate({ projectId, statusDate: latest }))
           }
           setPreviewStatusDate(null)
@@ -1894,7 +1952,8 @@ export default function GanttChart({
             if (!ok) return
           }
 
-          // 乐观更新UI：包含级联下游 + 摘要任务，界面立即反映关联变更
+          // All linked changes from this gesture form one undo step.
+          dispatch(labelDraftStep(drag.mode === 'move' ? '移动任务' : '调整任务工期'))
           dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
           // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
           dispatch(markDirty(dirtyList.map(t => t.id)))
@@ -2045,7 +2104,8 @@ export default function GanttChart({
 
   // ── Commit inline cell edit ─────────────────────────────────────────────
   const commitCellEdit = useCallback(async () => {
-    if (!cellEdit) return
+    if (!cellEdit || cellCommittedRef.current || readOnly) return
+    cellCommittedRef.current = true
     const orig = tasks.find(t => t.id === cellEdit.taskId)
     if (!orig) { setCellEdit(null); return }
 
@@ -2069,10 +2129,11 @@ export default function GanttChart({
     const fieldLabels: Record<string, string> = { assignee: '责任人', duration: '工期', start_date: '开始日期', end_date: '结束日期' }
     dispatch(setEditDescription({ taskId: orig.id, description: `修改了「${orig.name}」的${fieldLabels[cellEdit.field] ?? cellEdit.field}` }))
     setCellEdit(null)
-  }, [cellEdit, tasks, deps, dispatch, isMinute])
+  }, [cellEdit, tasks, deps, dispatch, isMinute, readOnly])
 
   // ── 通用字段修改（限制类型/日期/状态等） ─────────────────────────
   const handleTaskFieldChange = useCallback((taskId: string, patch: Partial<Task>) => {
+    if (readOnly) return
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
 
@@ -2091,7 +2152,7 @@ export default function GanttChart({
     const fieldLabels: Record<string, string> = { constraint_type: '限制类型', constraint_date: '限制日期', status: '状态', deadline: '截止日期' }
     const label = fields.map(f => fieldLabels[f] ?? f).join('、')
     dispatch(setEditDescription({ taskId, description: `修改了「${t.name}」的${label}` }))
-  }, [tasks, deps, dispatch, isMinute])
+  }, [tasks, deps, dispatch, isMinute, readOnly])
 
   const normalizeAnchor = useCallback((value: string | Date | null | undefined): string | null => {
     if (!value) return null
@@ -2436,6 +2497,7 @@ export default function GanttChart({
     if (readOnly || viewSnapshot) return
     const { tasksToAdd, tasksToUpdate, dependenciesToAdd } = buildTaskCopies(tasks, deps, selectedIds, targetId, position)
     if (tasksToAdd.length === 0) return
+    dispatch(labelDraftStep(position === 'before' ? '复制任务到上方' : '复制任务到下方'))
     if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
     dispatch(addTasks(tasksToAdd))
     for (const dep of dependenciesToAdd) dispatch(addDependency(dep))
@@ -2811,11 +2873,198 @@ export default function GanttChart({
     )
   }
 
+  const gridColumns = useMemo(() => ['name', ...visibleCols] as (OptionalCol | 'name')[], [visibleCols])
+  const beginCellEditing = useCallback((cell: { taskId: string; col: OptionalCol | 'name' }) => {
+    if (readOnly) return
+    const task = tasks.find(t => t.id === cell.taskId)
+    if (!task || !gridCellEditable(task, cell.col, tasks, deps)) return
+    cancelEditorRef.current = false
+    cellCommittedRef.current = false
+    if (cell.col === 'name') { nameCommittedRef.current = false; setEditId(task.id); setEditName(task.name) }
+    else if (['assignee', 'duration', 'start', 'end'].includes(cell.col)) {
+      const field = cell.col === 'start' ? 'start_date' : cell.col === 'end' ? 'end_date' : cell.col as 'assignee' | 'duration'
+      setCellEdit({ taskId: task.id, field, value: field === 'duration' ? durationInputValue(task.duration, isMinute) : field === 'assignee' ? task.assignee ?? '' : (task[field] ?? '').slice(0, isMinute ? 16 : 10) })
+    } else if (cell.col === 'pred' || cell.col === 'succ') {
+      const el = leftRef.current?.querySelector<HTMLElement>(`[data-task-cell="${cell.taskId}"][data-col="${cell.col}"]`)
+      const rect = el?.getBoundingClientRect()
+      if (rect) {
+        const popup = { taskId: task.id, x: rect.left, y: Math.min(rect.bottom, window.innerHeight - 330) }
+        if (cell.col === 'pred') { setPredFilter(''); setPredPopup(popup) }
+        else { setSuccFilter(''); setSuccPopup(popup) }
+      }
+    } else if (cell.col === 'inactive') handleTaskFieldChange(task.id, { inactive: !task.inactive })
+    else setActiveEditor({ taskId: task.id, col: cell.col })
+  }, [tasks, deps, isMinute, readOnly, handleTaskFieldChange])
+
+  const handleGridKey = (e: React.KeyboardEvent) => {
+    if (!selectedCell || e.nativeEvent.isComposing) return
+    const editing = !!(editId || cellEdit || activeEditor)
+    if (drag || connect || statusDateDrag || depDrag || rowDrag) return
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation()
+      cancelEditorRef.current = true; cellCommittedRef.current = true; nameCommittedRef.current = true
+      setEditId(null); setCellEdit(null); setActiveEditor(null); setGridError('')
+      requestAnimationFrame(() => leftRef.current?.focus({ preventScroll: true }))
+      return
+    }
+    if ((e.key === 'Enter' || e.key === 'F2') && !editing) { e.preventDefault(); e.stopPropagation(); beginCellEditing(selectedCell); return }
+    const tab = e.key === 'Tab'
+    const enter = e.key === 'Enter'
+    const arrow = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)
+    if ((!tab && !enter && !arrow) || (editing && arrow) || e.ctrlKey || e.metaKey || e.altKey) return
+    e.preventDefault(); e.stopPropagation()
+    if (editId) void commitName()
+    if (cellEdit) void commitCellEdit()
+    if (activeEditor) { (e.target as HTMLElement).blur(); setActiveEditor(null) }
+    let row = displayRows.findIndex(r => r.task.id === selectedCell.taskId)
+    let col = gridColumns.indexOf(selectedCell.col)
+    const direction = e.shiftKey ? -1 : 1
+    const total = displayRows.length * gridColumns.length
+    for (let tries = 0; tries < total; tries++) {
+      if (enter || e.key === 'ArrowDown' || e.key === 'ArrowUp') row += enter ? direction : e.key === 'ArrowDown' ? 1 : -1
+      else col += tab ? direction : e.key === 'ArrowRight' ? 1 : -1
+      if (col >= gridColumns.length) { col = 0; row++ }
+      if (col < 0) { col = gridColumns.length - 1; row-- }
+      if (row < 0 || row >= displayRows.length) { leftRef.current?.focus({ preventScroll: true }); return }
+      const task = displayRows[row].task
+      if (tab && !gridCellEditable(task, gridColumns[col], tasks, deps)) continue
+      const next = { taskId: task.id, col: gridColumns[col] }
+      setSelectedCell(next)
+      dispatch(setSelectedIds([task.id])); selectionAnchor.current = task.id
+      requestAnimationFrame(() => {
+        leftRef.current?.focus({ preventScroll: true })
+        leftRef.current?.querySelector(`[data-task-cell="${next.taskId}"][data-col="${next.col}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      })
+      return
+    }
+  }
+  const handleGridPaste = (e: React.ClipboardEvent) => {
+    if (readOnly || !selectedCell || (e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')) return
+    const text = e.clipboardData.getData('text/plain')
+    if (!text) return
+    e.preventDefault(); e.stopPropagation()
+    try {
+      const next = applyGridPaste(tasks, deps, displayRows.map(r => r.task.id), gridColumns, selectedCell, text, isMinute)
+      dispatch(labelDraftStep('粘贴单元格区域'))
+      dispatch(setTasks(next))
+      dispatch(markDirty(next.editedIds))
+      for (const taskId of next.editedIds) dispatch(setEditDescription({ taskId, description: '粘贴表格数据' }))
+      setGridError('')
+    } catch (err) { setGridError(err instanceof Error ? err.message : String(err)) }
+  }
+
+  useEffect(() => {
+    if (!timelineRequest || !rightRef.current) return
+    const { kind } = timelineRequest
+    if (kind === 'status') {
+      const target = statusDate ? new Date(statusDate) : new Date()
+      syncTimelineScrollLeft(Math.max(0, dateToX(target) - rightRef.current.clientWidth / 2))
+      return
+    }
+    const candidates = tasks.filter(t => !t.is_deleted && (kind === 'all' || selectedIds.includes(t.id)))
+    const starts = candidates.flatMap(t => t.start_date ? [new Date(t.start_date).getTime()] : []).filter(Number.isFinite)
+    const ends = candidates.flatMap(t => t.end_date ? [new Date(t.end_date).getTime()] : []).filter(Number.isFinite)
+    if (!starts.length || !ends.length) return
+    const min = Math.min(...starts), max = Math.max(...ends)
+    const width = Math.max(160, rightRef.current.clientWidth - 80)
+    const days = Math.max(isMinute ? 30 / 1440 : 1, (max - min) / 86400000)
+    const scale = Math.max(0.1, Math.min(isMinute ? 2880 : 56, width / days))
+    const center = (min + max) / 2
+    if (kind === 'selection') {
+      setExpanded(prev => ({ ...prev, ...Object.fromEntries(tasks.filter(t => selectedIds.some(id => getDescendantIds(t.id, tasks).includes(id))).map(t => [t.id, true])) }))
+    }
+    // Center only after the new scale has committed. Otherwise the generic
+    // zoom effect could rescale an already-centered scroll position twice.
+    if (scale !== colW && onColWChange) {
+      pendingTimelineCenter.current = center
+      onColWChange(scale)
+      return
+    }
+    const frame = requestAnimationFrame(() => {
+      syncTimelineScrollLeft(Math.max(0, dateToX(new Date(center)) - (rightRef.current?.clientWidth ?? 600) / 2))
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [timelineRequest]) // explicit navigation only; editing does not move the viewport
+
+  useEffect(() => {
+    onCaptureReady?.(() => ({
+      expanded, filters: Object.fromEntries(Object.entries(colFilters).map(([key, values]) => [key, [...values!]])),
+      sortCol, sortDir, widths: colWidthOverrides, nameWidth: nameW, panelWidth: panelW,
+      panelCollapsed, rightCollapsed,
+      centerTime: isMinute
+        ? origin.getTime() + ((rightRef.current?.scrollLeft ?? 0) + (rightRef.current?.clientWidth ?? 0) / 2) / colW * 86400000
+        : addMins(origin, ((rightRef.current?.scrollLeft ?? 0) + (rightRef.current?.clientWidth ?? 0) / 2) / colW * 1440).getTime(),
+      scrollTop: leftRef.current?.scrollTop ?? 0,
+    }))
+    return () => onCaptureReady?.(null)
+  }, [onCaptureReady, expanded, colFilters, sortCol, sortDir, colWidthOverrides, nameW, panelW, panelCollapsed, rightCollapsed, origin, colW, isMinute])
+
+  useEffect(() => {
+    if (!viewRestore) return
+    const view = viewRestore.state
+    setExpanded(view.expanded)
+    const validKeys = new Set(OPTIONAL_COL_META.map(c => c.key))
+    setColFilters(Object.fromEntries(Object.entries(view.filters).filter(([k]) => validKeys.has(k as OptionalCol)).map(([k, v]) => [k, new Set(v)])))
+    setSortCol(validKeys.has(view.sortCol as OptionalCol) ? view.sortCol as OptionalCol : null)
+    setSortDir(view.sortDir)
+    setColWidthOverrides(Object.fromEntries(Object.entries(view.widths).filter(([k]) => validKeys.has(k as OptionalCol))))
+    setNameW(Math.max(MIN_NAME_W, view.nameWidth))
+    setPanelW(Math.max(200, Math.min(1200, view.panelWidth)))
+    setPanelCollapsed(view.panelCollapsed); setRightCollapsed(view.rightCollapsed)
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        syncTimelineScrollLeft(Math.max(0, dateToX(new Date(view.centerTime)) - (rightRef.current?.clientWidth ?? 0) / 2))
+        if (leftRef.current) leftRef.current.scrollTop = view.scrollTop
+        if (rightRef.current) rightRef.current.scrollTop = view.scrollTop
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [viewRestore])
+
+  useEffect(() => {
+    const cancelGesture = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setDrag(null); setConnect(null); setDepDrag(null); setRowDrag(null); setDropIdx(null)
+      setStatusDateDrag(null); setPreviewMap({}); setPreviewStatusDate(null)
+      pendingPreview.current = null; pendingStatusPreview.current = null
+      if (throttleTimer.current) { clearTimeout(throttleTimer.current); throttleTimer.current = null }
+      if (statusPreviewRaf.current != null) { cancelAnimationFrame(statusPreviewRaf.current); statusPreviewRaf.current = null }
+      onStatusDatePreviewChange?.(null)
+    }
+    window.addEventListener('keydown', cancelGesture)
+    return () => window.removeEventListener('keydown', cancelGesture)
+  }, [onStatusDatePreviewChange])
+
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="flex h-full overflow-hidden select-none"
          style={{ fontFamily:'system-ui,sans-serif', fontSize:13,
                   cursor: (splitterDrag || nameDrag) ? 'col-resize' : undefined }}>
+
+      {(drag?.dragging || (tooltipTask && !drag && !connect && !ctxMenu)) && (() => {
+        const task = tasks.find(t => t.id === (drag?.taskId ?? tooltipTask))
+        if (!task) return null
+        const preview = previewMap[task.id] ?? task
+        const date = (v: string | null | undefined) => v ? (isMinute ? v.slice(0, 16).replace('T', ' ') : v.slice(0, 10)) : '未设置'
+        const changed = Object.values(previewMap).filter(p => {
+          const old = tasks.find(t => t.id === p.id)
+          return old && (old.start_date !== p.start_date || old.end_date !== p.end_date)
+        }).length
+        const delta = drag && preview.start_date ? diffMins(drag.origStart, new Date(preview.start_date)) : 0
+        return ReactDOM.createPortal(<div role="tooltip" className="fixed z-[9500] pointer-events-none rounded-lg bg-slate-800 text-white shadow-xl p-3 text-xs space-y-1 max-w-[320px]"
+          style={{ left: Math.max(8, Math.min(hoverPoint.x + 16, window.innerWidth - 330)), top: Math.max(8, Math.min(hoverPoint.y + 20, window.innerHeight - 230)) }}>
+          <div className="font-semibold">{task.name}</div>
+          <div>责任人：{task.assignee || '未分配'} · {task.auto_schedule === false ? '手动排程' : '自动排程'}</div>
+          <div>开始：{date(preview.start_date)}</div><div>结束：{date(preview.end_date)}</div>
+          <div>工期：{fmtMinDur(preview.duration ?? 0, { dayOnly: !isMinute })} · 完成：{summaryProgressMap.get(task.id) ?? timeBasedPercent(preview, statusDateObj)}%</div>
+          {task.constraint_type && <div>限制：{CONSTRAINT_TYPES.find(c => c.value === task.constraint_type)?.label ?? task.constraint_type} {date(task.constraint_date)}</div>}
+          {task.deadline && <div>截止：{date(task.deadline)}</div>}
+          {drag?.dragging && <><div className="text-blue-200">{drag.mode === 'move' ? `移动 ${fmtMinDur(delta, { signed: true, dayOnly: !isMinute })}` : '调整工期'} · 影响 {changed} 个任务</div>
+            {drag.mode === 'move' && task.auto_schedule !== false && !summarySet.has(task.id) && <div className="text-amber-200">松开后切换为手动排程</div>}
+            <div className="text-gray-300">Esc 取消；松开后可撤销，确认前不保存</div></>}
+          {!drag && <div className="text-gray-300">双击编辑 · Shift 连选 · Ctrl/⌘ 多选</div>}
+        </div>, document.body)
+      })()}
 
       {/* ── Left panel ───────────────────────────────────────────────── */}
       <div className={`${rightCollapsed ? 'flex-1' : 'flex-none'} bg-white`}
@@ -2867,7 +3116,10 @@ export default function GanttChart({
         </div>
 
         {/* Rows */}
-        <div ref={leftRef} className="overflow-y-scroll flex-1 scrollbar-hide"
+        {gridError && <div role="alert" className="bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
+        <div ref={leftRef} data-gantt-grid tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
+             onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
+             className="overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
              style={{ cursor: rowDrag?.dragging ? 'grabbing' : undefined }}>
           {displayRows.map((row, i) => {
@@ -2893,7 +3145,7 @@ export default function GanttChart({
             }
             const cellRing = (col: OptionalCol | 'name') =>
               selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
-            const pickCell = (col: OptionalCol | 'name') => () => setSelectedCell({ taskId: t.id, col })
+            const pickCell = (col: OptionalCol | 'name') => () => { setSelectedCell({ taskId: t.id, col }); leftRef.current?.focus({ preventScroll: true }) }
             return (
               <React.Fragment key={t.id}>
                 {rowDrag?.dragging && dropIdx === i && (
@@ -2903,13 +3155,15 @@ export default function GanttChart({
                   className={`flex border-b border-gray-100 cursor-pointer
                     ${sel ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   style={{ height: ROW_H, opacity: isDraggingThis ? 0.35 : 1 }}
+                  data-task-row={t.id}
+                  onClickCapture={e => {
+                    if (rowDrag?.dragging || (e.target as HTMLElement).closest('input,button,select,textarea')) return
+                    selectTask(t.id, e)
+                    leftRef.current?.focus({ preventScroll: true })
+                  }}
                   onClick={e => {
                     if (rowDrag?.dragging) return
                     if (isEditing || cellEdit?.taskId === t.id) return
-                    // 单击单元格不再选中整行；仅 Ctrl/Meta+click 切换行选中（用于多选操作）
-                    if (e.ctrlKey || e.metaKey) {
-                      dispatch(setSelectedIds(sel ? selectedIds.filter(x => x !== t.id) : [...selectedIds, t.id]))
-                    }
                     // Center right panel on clicked task
                     if (!e.ctrlKey && !e.metaKey && t.start_date && t.end_date && rightRef.current) {
                       const x1 = dateToX(new Date(t.start_date))
@@ -2949,20 +3203,15 @@ export default function GanttChart({
                     <input type="checkbox"
                            className="w-3.5 h-3.5 accent-blue-500 cursor-pointer"
                            checked={sel}
-                           onChange={e => {
-                             e.stopPropagation()
-                             dispatch(setSelectedIds(e.target.checked
-                               ? [...selectedIds, t.id]
-                               : selectedIds.filter(x => x !== t.id)
-                             ))
-                           }}
-                           onClick={e => e.stopPropagation()} />
+                           onChange={() => {}}
+                           onClick={e => { e.stopPropagation(); selectTask(t.id, e, true) }} />
                   </div>
 
                   {/* ── Name cell ─────────────────────────────────── */}
                   <div style={{ width: nameColW, minWidth: MIN_NAME_W, paddingLeft: 4 + row.level * 16 }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none overflow-hidden ${isEditing ? '' : cellRing('name')}`}
-                       onClick={pickCell('name')}
+                       data-task-cell={t.id}
+                       data-col="name" onClick={pickCell('name')}
                        onDoubleClick={() => { if (!readOnly) { setEditId(t.id); setEditName(t.name) } }}>
                     {row.hasChildren
                       ? <button onClick={e => { e.stopPropagation(); toggle(t.id) }}
@@ -2995,7 +3244,8 @@ export default function GanttChart({
                   {colAssignW > 0 && (
                   <div style={{ width: colAssignW, order: colOrderOf('assignee') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('assignee')}`}
-                       onClick={pickCell('assignee')}
+                       data-task-cell={t.id}
+                       data-col="assignee" onClick={pickCell('assignee')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -3056,7 +3306,7 @@ export default function GanttChart({
                     if (filledReason) tooltipParts.push(`填报原因: ${filledReason}`)
                     const tooltip = tooltipParts.length > 1 || statusReason || filledReason ? tooltipParts.join('\n') : ''
                     return (
-                      <div style={{ width: colStatusW, order: colOrderOf('status') }}
+                      <div data-task-cell={t.id} data-col="status" style={{ width: colStatusW, order: colOrderOf('status') }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('status')} ${filledReason ? 'cursor-pointer' : ''}`}
                            onClick={e => {
                              pickCell('status')()
@@ -3086,7 +3336,8 @@ export default function GanttChart({
                   {colDurW > 0 && (
                   <div style={{ width: colDurW, order: colOrderOf('duration') }}
                        className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('duration')}`}
-                       onClick={pickCell('duration')}
+                       data-task-cell={t.id}
+                       data-col="duration" onClick={pickCell('duration')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -3122,7 +3373,8 @@ export default function GanttChart({
                   {colStartW > 0 && (
                   <div style={{ width: colStartW, order: colOrderOf('start') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('start')}`}
-                       onClick={pickCell('start')}
+                       data-task-cell={t.id}
+                       data-col="start" onClick={pickCell('start')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -3155,7 +3407,8 @@ export default function GanttChart({
                   {colEndW > 0 && (
                   <div style={{ width: colEndW, order: colOrderOf('end') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('end')}`}
-                       onClick={pickCell('end')}
+                       data-task-cell={t.id}
+                       data-col="end" onClick={pickCell('end')}
                        onDoubleClick={e => {
                          e.stopPropagation()
                          if (readOnly) return
@@ -3187,7 +3440,7 @@ export default function GanttChart({
 
                   {/* ── Predecessors cell (clickable popup) ───────── */}
                   {colPredW > 0 && (
-                  <div style={{ width: colPredW, order: colOrderOf('pred') }}
+                  <div data-task-cell={t.id} data-col="pred" style={{ width: colPredW, order: colOrderOf('pred') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('pred')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'pred' }) }}
                        onDoubleClick={e => {
@@ -3207,7 +3460,7 @@ export default function GanttChart({
 
                   {/* ── Successors cell (clickable popup) ────── */}
                   {colSuccW > 0 && (
-                  <div style={{ width: colSuccW, order: colOrderOf('succ') }}
+                  <div data-task-cell={t.id} data-col="succ" style={{ width: colSuccW, order: colOrderOf('succ') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden relative group ${cellRing('succ')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'succ' }) }}
                        onDoubleClick={e => {
@@ -3227,7 +3480,7 @@ export default function GanttChart({
 
                   {/* ── 延迟 cell ── */}
                   {colLagW > 0 && (
-                  <div style={{ width: colLagW, order: colOrderOf('lag') }}
+                  <div data-task-cell={t.id} data-col="lag" style={{ width: colLagW, order: colOrderOf('lag') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('lag')}`}
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'lag' }) }}
                        onDoubleClick={e => {
@@ -3243,6 +3496,7 @@ export default function GanttChart({
                         defaultValue={depLagToInput(incomingDeps[0].lag)}
                         onClick={e => e.stopPropagation()}
                         onBlur={e => {
+                          if (cancelEditorRef.current) { setActiveEditor(null); return }
                           const v = depLagFromInput(parseInt(e.target.value, 10) || 0)
                           if (v !== (incomingDeps[0].lag ?? 0)) handleDepLagChange(incomingDeps[0].id, v)
                           setActiveEditor(null)
@@ -3261,7 +3515,8 @@ export default function GanttChart({
                   {colTaskTypeW > 0 && (
                   <div style={{ width: colTaskTypeW, order: colOrderOf('taskType') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('taskType')}`}
-                       onClick={pickCell('taskType')}
+                       data-task-cell={t.id}
+                       data-col="taskType" onClick={pickCell('taskType')}
                        onDoubleClick={e => { e.stopPropagation(); if (!readOnly && !row.hasChildren) setActiveEditor({ taskId: t.id, col: 'taskType' }) }}>
                     {row.hasChildren ? (
                       <span className="text-[11px] text-gray-300 w-full text-center">—</span>
@@ -3290,7 +3545,8 @@ export default function GanttChart({
                   {colCtypeW > 0 && (
                   <div style={{ width: colCtypeW, order: colOrderOf('ctype') }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ctype')}`}
-                       onClick={pickCell('ctype')}
+                       data-task-cell={t.id}
+                       data-col="ctype" onClick={pickCell('ctype')}
                        onDoubleClick={e => { e.stopPropagation(); if (!readOnly && !row.hasChildren && t.auto_schedule !== false) setActiveEditor({ taskId: t.id, col: 'ctype' }) }}>
                     {row.hasChildren || t.auto_schedule === false ? (
                       <span className="text-[11px] text-gray-300 w-full text-center">—</span>
@@ -3320,10 +3576,10 @@ export default function GanttChart({
                     const dv = (t.constraint_date ?? '').split('T')[0]
                     const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'cdate'
                     return (
-                      <div style={{ width: colCdateW, order: colOrderOf('cdate') }}
+                      <div data-task-cell={t.id} data-col="cdate" style={{ width: colCdateW, order: colOrderOf('cdate') }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('cdate')}`}
                            onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'cdate' }) }}
-                           onDoubleClick={e => { e.stopPropagation(); if (needsDate) setActiveEditor({ taskId: t.id, col: 'cdate' }) }}>
+                           onDoubleClick={e => { e.stopPropagation(); if (!readOnly && needsDate) setActiveEditor({ taskId: t.id, col: 'cdate' }) }}>
                         {!needsDate ? (
                           <span className="text-[11px] text-gray-300 w-full text-center">—</span>
                         ) : editing ? (
@@ -3332,6 +3588,7 @@ export default function GanttChart({
                             defaultValue={dv}
                             onClick={e => e.stopPropagation()}
                             onBlur={e => {
+                              if (cancelEditorRef.current) { setActiveEditor(null); return }
                               handleTaskFieldChange(t.id, { constraint_date: e.target.value || null })
                               setActiveEditor(null)
                             }}
@@ -3346,7 +3603,7 @@ export default function GanttChart({
                   {colDDateW > 0 && (() => {
                     if (row.hasChildren) {
                       return (
-                        <div style={{ width: colDDateW, order: colOrderOf('ddate') }}
+                        <div data-task-cell={t.id} data-col="ddate" style={{ width: colDDateW, order: colOrderOf('ddate') }}
                              className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
                              onClick={pickCell('ddate')}>
                           <span className="text-[11px] text-gray-300 w-full text-center">—</span>
@@ -3358,10 +3615,10 @@ export default function GanttChart({
                     const overdue = !!(dv && ev && ev > dv)
                     const editing = activeEditor?.taskId === t.id && activeEditor?.col === 'ddate'
                     return (
-                      <div style={{ width: colDDateW, order: colOrderOf('ddate') }}
+                      <div data-task-cell={t.id} data-col="ddate" style={{ width: colDDateW, order: colOrderOf('ddate') }}
                            className={`flex items-center border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('ddate')}`}
                            onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'ddate' }) }}
-                           onDoubleClick={e => { e.stopPropagation(); setActiveEditor({ taskId: t.id, col: 'ddate' }) }}
+                           onDoubleClick={e => { e.stopPropagation(); if (!readOnly) setActiveEditor({ taskId: t.id, col: 'ddate' }) }}
                            title={overdue ? `计划结束 ${ev} 已超过截止日期 ${dv}` : ''}>
                         {editing ? (
                           <input autoFocus type="date"
@@ -3369,6 +3626,7 @@ export default function GanttChart({
                             defaultValue={dv}
                             onClick={e => e.stopPropagation()}
                             onBlur={e => {
+                              if (cancelEditorRef.current) { setActiveEditor(null); return }
                               handleTaskFieldChange(t.id, { deadline: e.target.value || null })
                               setActiveEditor(null)
                             }}
@@ -3387,7 +3645,8 @@ export default function GanttChart({
                   {colPctW > 0 && (
                   <div style={{ width: colPctW, order: colOrderOf('pct') }}
                        className={`flex items-center justify-end border-r border-gray-100 h-full flex-none px-1 overflow-hidden ${cellRing('pct')}`}
-                       onClick={pickCell('pct')}>
+                       data-task-cell={t.id}
+                       data-col="pct" onClick={pickCell('pct')}>
                     <span className="text-[11px] text-gray-600">
                       {t.is_milestone ? 100 : row.hasChildren ? (summaryProgressMap.get(t.id) ?? 0) : timeBasedPercent(t, statusDateObj)}%
                     </span>
@@ -3397,8 +3656,9 @@ export default function GanttChart({
                   {colInactiveW > 0 && (
                   <div style={{ width: colInactiveW, order: colOrderOf('inactive') }}
                        className={`flex items-center justify-center h-full flex-none px-1 overflow-hidden ${cellRing('inactive')}`}
-                       onClick={pickCell('inactive')}>
-                    <input type="checkbox"
+                       data-task-cell={t.id}
+                       data-col="inactive" onClick={pickCell('inactive')}>
+                    <input type="checkbox" disabled={readOnly}
                       checked={t.inactive ?? false}
                       onClick={e => e.stopPropagation()}
                       onChange={e => handleTaskFieldChange(t.id, { inactive: e.target.checked })}
@@ -3740,7 +4000,7 @@ export default function GanttChart({
               if (effectiveChartStatusDate) {
                 const x = dateToX(new Date(effectiveChartStatusDate))
                 nodes.push(
-                  <text key="lbl-sd" x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
+                  <text key="lbl-sd" data-status-date-handle="label" onMouseDown={startStatusDateDrag} style={{ cursor: 'col-resize' }} x={x-3} y={LBL_Y} fontSize={10} textAnchor="end"
                         fill="#ef4444" fontWeight={600}>{isMinute ? '状态时间' : '状态日期'}</text>
                 )
               }
@@ -3767,6 +4027,7 @@ export default function GanttChart({
         </div>
         <div
           ref={rightRef}
+          data-timeline-scroll data-col-width={colW} data-origin={fmtDt(origin)}
           onScroll={onRightBodyScroll}
           className="flex-1 overflow-auto min-h-0"
           style={{ cursor: statusDateDrag ? 'col-resize' : drag ? 'ew-resize' : connect ? 'crosshair' : 'default' }}
@@ -4109,9 +4370,11 @@ export default function GanttChart({
               return (
                 <g key={t.id}
                    style={{ cursor:'pointer', opacity: (isDragging?0.7:1) * inactiveDim }}
-                   onMouseEnter={()=>setHoveredBar(t.id)}
+                   onMouseEnter={e => { setHoveredBar(t.id); setHoverPoint({ x: e.clientX, y: e.clientY }) }}
                    onMouseLeave={()=>setHoveredBar(null)}
-                   onClick={e => handleBarClick(e, t.id)}
+                   data-task-bar={t.id}
+                   onDoubleClick={e => { e.stopPropagation(); if (!readOnly) setEditModalTaskId(t.id) }}
+                 onClick={e => handleBarClick(e, t.id)}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e => onBarMouseDown(e, t)}>
                   <text x={cx-r-4} y={cy+4} fontSize={11} textAnchor="end" fill="#6b7280" style={{ pointerEvents:'none' }}>{t.name}</text>
@@ -4137,7 +4400,11 @@ export default function GanttChart({
               const sDoneW = w * Math.max(0, Math.min(1, sPct / 100))
               return (
                 <g key={t.id}
-                   onClick={e => handleBarClick(e, t.id)}
+                   onMouseEnter={e => { setHoveredBar(t.id); setHoverPoint({ x: e.clientX, y: e.clientY }) }}
+                   onMouseLeave={() => setHoveredBar(null)}
+                   data-task-bar={t.id}
+                   onDoubleClick={e => { e.stopPropagation(); if (!readOnly) setEditModalTaskId(t.id) }}
+                 onClick={e => handleBarClick(e, t.id)}
                    onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                    onMouseDown={e=>{ if(e.button!==0)return; onBarMouseDown(e,t) }}
                    style={{ cursor:'grab', opacity: (isDragging?0.7:1) * inactiveDim }}>
@@ -4164,8 +4431,10 @@ export default function GanttChart({
 
             return (
               <g key={t.id} style={{ opacity: (isDragging?0.65:1) * inactiveDim }}
-                 onMouseEnter={()=>setHoveredBar(t.id)}
+                 onMouseEnter={e => { setHoveredBar(t.id); setHoverPoint({ x: e.clientX, y: e.clientY }) }}
                  onMouseLeave={()=>setHoveredBar(null)}
+                 data-task-bar={t.id}
+                 onDoubleClick={e => { e.stopPropagation(); if (!readOnly) setEditModalTaskId(t.id) }}
                  onClick={e => handleBarClick(e, t.id)}
                  onContextMenu={e=>{ e.preventDefault(); e.stopPropagation(); if (!readOnly) setCtxMenu({ x: e.clientX, y: e.clientY, taskId: t.id, submenu: null }) }}
                  onMouseMove={(e) => {
@@ -4260,14 +4529,10 @@ export default function GanttChart({
                   x1={sx} y1={0} x2={sx} y2={totalH}
                   stroke="transparent" strokeWidth={14}
                   style={{ cursor: viewSnapshot ? 'ew-resize' : 'col-resize' }}
-                  onMouseDown={e => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    setSelectedDep(null)
-                    setStatusDateDrag({ startX: getSvgX(e.clientX), dragging: false })
-                    setPreviewStatusDate(effectiveChartStatusDate)
-                    onStatusDatePreviewChange?.(effectiveChartStatusDate)
-                  }}
+                  data-status-date-handle="body"
+                  role="slider" tabIndex={0} aria-label={isMinute ? '状态时间线' : '状态日期线'} aria-valuetext={label}
+                  onKeyDown={handleStatusDateKey}
+                  onMouseDown={startStatusDateDrag}
                 />
                 <line x1={sx} y1={0} x2={sx} y2={totalH}
                       stroke="#ef4444" strokeWidth={statusDateDrag ? 3 : 2} strokeDasharray="5 3"

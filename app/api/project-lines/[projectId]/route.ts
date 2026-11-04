@@ -30,16 +30,22 @@ export async function POST(req: NextRequest, { params }: Params) {
   if (!(await hasProjectAccess(projectId, auth.value)))
     return NextResponse.json(failure('Not found', 404), { status: 404 })
 
-  const { name, line_date, color = '#f59e0b', visible = true } = await req.json()
+  const { id = null, name, line_date, color = '#f59e0b', visible = true } = await req.json()
   if (!name || !line_date)
     return NextResponse.json(failure('name and line_date required', 400), { status: 400 })
+  if (id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))
+    return NextResponse.json(failure('Invalid id', 400), { status: 400 })
 
   const r = await pool.query(
-    `INSERT INTO project_lines (project_id, name, line_date, color, visible)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO project_lines (id, project_id, name, line_date, color, visible)
+     VALUES (COALESCE($6::uuid, gen_random_uuid()), $1, $2, $3, $4, $5)
+     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, line_date = EXCLUDED.line_date,
+       color = EXCLUDED.color, visible = EXCLUDED.visible
+     WHERE project_lines.project_id = EXCLUDED.project_id
      RETURNING id, project_id, name, line_date, color, visible`,
-    [projectId, name, line_date, color, visible],
+    [projectId, name, line_date, color, visible, id],
   )
+  if (!r.rows[0]) return NextResponse.json(failure('Not found', 404), { status: 404 })
   return NextResponse.json(success(r.rows[0]), { status: 201 })
 }
 

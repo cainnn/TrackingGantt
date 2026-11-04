@@ -1,18 +1,9 @@
 import { configureStore } from '@reduxjs/toolkit'
-import authReducer from './slices/authSlice'
-import projectReducer from './slices/projectSlice'
-import tasksReducer from './slices/tasksSlice'
-import projectLinesReducer from './slices/projectLinesSlice'
-import versionsReducer from './slices/versionsSlice'
+import { rootReducer, createDraftMiddleware } from './draftHistory'
 
 export const store = configureStore({
-  reducer: {
-    auth: authReducer,
-    project: projectReducer,
-    tasks: tasksReducer,
-    projectLines: projectLinesReducer,
-    versions: versionsReducer,
-  },
+  reducer: rootReducer,
+  middleware: getDefault => getDefault().concat(createDraftMiddleware()),
 })
 
 export type RootState = ReturnType<typeof store.getState>

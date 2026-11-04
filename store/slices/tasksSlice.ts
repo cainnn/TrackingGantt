@@ -1,5 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
-import type { Task, Dependency } from '@/types'
+import type { Task, Dependency, ProjectLine } from '@/types'
 
 interface Comparison {
   tasks: Task[]
@@ -16,6 +16,7 @@ interface ViewSnapshot {
   dependencies: Dependency[]
   versionId: string
   versionName: string
+  lines?: ProjectLine[]
 }
 
 interface TasksState {
@@ -85,6 +86,16 @@ const tasksSlice = createSlice({
     },
     copyTasks(state, action: PayloadAction<string[]>) {
       const ids = new Set(action.payload)
+      let grew = true
+      while (grew) {
+        grew = false
+        for (const task of state.tasks) {
+          if (!task.is_deleted && task.parent_id && ids.has(task.parent_id) && !ids.has(task.id)) {
+            ids.add(task.id)
+            grew = true
+          }
+        }
+      }
       state.clipboard = state.tasks.filter(t => ids.has(t.id))
       // 同时复制剪贴板内任务之间的依赖
       state.clipboardDeps = state.dependencies.filter(

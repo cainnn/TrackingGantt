@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
-import { setTasks, clearTasks, clearViewSnapshot, clearDirty, markDirty } from '@/store/slices/tasksSlice'
+import { initializeDraft, resetDraft, hasDraftChanges, beginDraftSave, failDraftSave } from '@/store/draftHistory'
+import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slices/tasksSlice'
 import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
 import { toDateTimeStr } from '@/lib/clientTime'
 import type { SaveBaseline } from '@/lib/clientSave'
@@ -15,6 +16,8 @@ import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesS
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
 import AIChatPanel from '@/components/GanttChart/AIChatPanel'
 import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
+import SavedViewsMenu from '@/components/GanttChart/SavedViewsMenu'
+import type { ChartViewState } from '@/lib/clientViewState'
 import Link from 'next/link'
 import { authFetch } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
@@ -29,9 +32,9 @@ const GanttChart = dynamic(() => import('@/components/GanttChart/GanttChart'), {
   ),
 })
 
-// colW = 像素 / 天。分钟级最小保持 1px/分钟，避免缩小后退化成小时/天视图。
+// colW = 像素 / 天。分钟项目可缩小查看全局，编辑和吸附仍保留分钟精度。
 const ZOOM_LEVELS_DAY    = [3, 5, 7, 14, 21, 28, 35, 42, 49, 56]
-const ZOOM_LEVELS_MINUTE = [1440, 2880]
+const ZOOM_LEVELS_MINUTE = [24, 60, 120, 240, 480, 720, 1440, 2880]
 
 export default function ProjectPage() {
   const params    = useParams()
@@ -41,14 +44,19 @@ export default function ProjectPage() {
   const { user, token }    = useAppSelector(s => s.auth)
   const { currentProject } = useAppSelector(s => s.project)
   const { versions } = useAppSelector(s => s.versions)
-  const { tasks, dirtyIds, viewSnapshot } = useAppSelector(s => s.tasks)
+  const draftChanged = useAppSelector(hasDraftChanges)
+  const draftHistory = useAppSelector(s => s.draft)
+  const [restoreReview, setRestoreReview] = useState(false)
+  const [restoring, setRestoring] = useState(false)
+  const [baselineRevision, setBaselineRevision] = useState(0)
+  const { tasks, viewSnapshot } = useAppSelector(s => s.tasks)
   // 浏览历史版本时强制只读，防止误操作
   const isViewOnly = user?.role === 'view' || !!viewSnapshot
   // 浏览历史版本时，状态日期跟随被浏览版本（影响延期检测、当前线、进度计算）
   const effectiveStatusDate = useMemo(() => {
-    if (!viewSnapshot) return currentProject?.status_date ?? null
+    if (!viewSnapshot) return toDateTimeStr(currentProject?.status_date ?? null)
     const v = versions.find(x => x.id === viewSnapshot.versionId)
-    return v?.status_date ?? currentProject?.status_date ?? null
+    return toDateTimeStr(v?.status_date ?? currentProject?.status_date ?? null)
   }, [viewSnapshot, versions, currentProject?.status_date])
   const [previewStatusDate, setPreviewStatusDate] = useState<string | null>(null)
   const [discardSignal, setDiscardSignal] = useState(0)
@@ -74,6 +82,9 @@ export default function ProjectPage() {
   const [searchQuery,       setSearchQuery]       = useState('')
   const [expandAllSignal,   setExpandAllSignal]   = useState(0)
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
+  const chartCapture = useRef<(() => ChartViewState) | null>(null)
+  const [viewRestore, setViewRestore] = useState<{ state: ChartViewState; id: number } | undefined>()
+  const [timelineRequest, setTimelineRequest] = useState<{ kind: 'all' | 'selection' | 'status'; id: number } | undefined>()
   const [focusSignal,       setFocusSignal]       = useState(0)
   const [showAI,            setShowAI]            = useState(false)
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
@@ -124,11 +135,9 @@ export default function ProjectPage() {
 
   const handleRestoreViewedSnapshot = useCallback(async () => {
     if (!viewSnapshot) return
-    const ok = confirm(
-      `将历史版本「${viewSnapshot.versionName}」恢复为当前版本？\n\n` +
-      '恢复会立即写入数据库，并删除该版本之后的所有版本。',
-    )
-    if (!ok) return
+    if (!restoreReview || restoring || draftChanged) return
+    setRestoring(true)
+    dispatch(beginDraftSave())
     try {
       const restoreRes = await authFetch(`/api/versions/${projectId}/restore`, {
         method: 'POST',
@@ -140,23 +149,29 @@ export default function ProjectPage() {
         throw new Error(restoreData.error ?? `恢复失败 (${restoreRes.status})`)
       }
 
-      const snapshot = restoreData.value?.snapshot
-      if (Array.isArray(snapshot?.tasks) && Array.isArray(snapshot?.dependencies)) {
-        dispatch(setTasks({ tasks: snapshot.tasks, dependencies: snapshot.dependencies }))
-      }
-      dispatch(clearDirty())
-      dispatch(clearViewSnapshot())
-
-      const [projectData, versionsData] = await Promise.all([
-        authFetch(`/api/projects/${projectId}`).then(r => r.json()).catch(() => null),
-        authFetch(`/api/versions/${projectId}?list=1`).then(r => r.json()).catch(() => null),
+      const [projectData, taskData, versionsData, linesData] = await Promise.all([
+        authFetch(`/api/projects/${projectId}`).then(r => r.json()),
+        authFetch(`/api/tasks/${projectId}`).then(r => r.json()),
+        authFetch(`/api/versions/${projectId}?list=1`).then(r => r.json()),
+        authFetch(`/api/project-lines/${projectId}`).then(r => r.json()),
       ])
-      if (projectData?.ok) dispatch(setCurrentProject(projectData.value))
-      if (versionsData?.ok && Array.isArray(versionsData.value)) dispatch(setVersions(versionsData.value))
+      if (!projectData.ok || !taskData.ok || !versionsData.ok || !linesData.ok) throw new Error('恢复已提交，但重新加载失败，请刷新核对')
+      const baseline = {
+        tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
+        statusDate: toDateTimeStr(projectData.value.status_date), lines: linesData.value,
+      }
+      dispatch(setCurrentProject(projectData.value))
+      dispatch(resetDraft({ ...baseline, descriptions: {} }))
+      dispatch(clearViewSnapshot())
+      dispatch(setVersions(versionsData.value))
+      setLoadedBaseline({ ...baseline, projectId })
+      setBaselineRevision(n => n + 1)
+      setRestoreReview(false)
     } catch (err) {
-      alert(`恢复失败：${err instanceof Error ? err.message : String(err)}`)
-    }
-  }, [dispatch, projectId, viewSnapshot])
+      dispatch(failDraftSave())
+      alert(`恢复失败：${err instanceof Error ? err.message : String(err)}。请重新加载核对后台状态。`)
+    } finally { setRestoring(false) }
+  }, [dispatch, projectId, viewSnapshot, restoreReview, restoring, draftChanged])
 
   useEffect(() => {
     if (!user) { router.push('/login'); return }
@@ -179,7 +194,7 @@ export default function ProjectPage() {
           router.push('/dashboard')
           return
         }
-        if (!tr.ok || !tr.value) throw new Error(tr.error ?? '加载任务失败')
+        if (!tr.ok || !tr.value || !plr.ok || !Array.isArray(plr.value)) throw new Error(tr.error ?? '加载项目数据失败')
         dispatch(setCurrentProject(pr.value))
         if (tr.ok && tr.value) {
           let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
@@ -224,11 +239,15 @@ export default function ProjectPage() {
             projectId,
             tasks: tr.value.tasks,
             dependencies: loadedDeps,
-            statusDate: toDateTimeStr(pr.value.status_date ?? null),
+            statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value,
           })
         }
         if (plr.ok && Array.isArray(plr.value)) {
           dispatch(setProjectLines(plr.value))
+          dispatch(initializeDraft({ projectId, baseline: {
+            tasks: tr.value.tasks, dependencies: tr.value.dependencies,
+            statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value, descriptions: {},
+          } }))
         }
       } catch {
         if (!cancelled) router.push('/dashboard')
@@ -243,20 +262,24 @@ export default function ProjectPage() {
   // ── 未保存提醒 ──────────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
-      if (dirtyIds.length > 0) {
+      if (draftChanged || draftHistory.uncertain || draftHistory.saving) {
         e.preventDefault()
       }
     }
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
-  }, [dirtyIds])
+  }, [draftChanged, draftHistory.uncertain, draftHistory.saving])
+
+  const handleCaptureReady = useCallback((capture: (() => ChartViewState) | null) => { chartCapture.current = capture }, [])
 
   if (!user) return null
 
   return (
     <div className="flex flex-col h-screen bg-white">
       <header className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-4">
-        <Link href="/dashboard" className="text-sm text-gray-500 hover:text-gray-700">
+        <Link href="/dashboard" onClick={e => {
+          if ((draftChanged || draftHistory.uncertain || draftHistory.saving) && !confirm('有未保存的草稿或待核对的保存结果，离开后草稿将丢失。确认离开？')) e.preventDefault()
+        }} className="text-sm text-gray-500 hover:text-gray-700">
           ← 返回项目列表
         </Link>
         <h1 className="text-lg font-semibold text-gray-900">
@@ -281,10 +304,12 @@ export default function ProjectPage() {
           <div className="flex items-center gap-2">
             {user?.role !== 'view' && (
               <button
-                onClick={handleRestoreViewedSnapshot}
+                onClick={() => setRestoreReview(true)}
+                disabled={draftChanged || draftHistory.saving || draftHistory.uncertain}
+                title={draftChanged ? "请先保存或放弃当前草稿" : "预览恢复影响，再确认更改"}
                 className="px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 cursor-pointer"
               >
-                恢复为当前
+                恢复预览
               </button>
             )}
             <button
@@ -297,8 +322,19 @@ export default function ProjectPage() {
         </div>
       )}
 
+      {restoreReview && viewSnapshot && <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/40" role="dialog" aria-modal="true" aria-label="恢复历史版本确认">
+        <div className="bg-white rounded-lg p-6 w-[480px] space-y-4">
+          <h2 className="font-semibold">恢复历史版本：{viewSnapshot.versionName}</h2>
+          <p className="text-sm">当前 {tasks.filter(t => !t.is_deleted).length} 个任务将恢复为 {viewSnapshot.tasks.filter(t => !t.is_deleted).length} 个任务。状态日期也将恢复。</p>
+          <p className="text-sm text-amber-800">确认后会写入数据库，并按现有规则删除该版本之后的版本。此操作不属于前端逐步撤销。</p>
+          <div className="flex justify-end gap-3">
+            <button disabled={restoring} onClick={() => setRestoreReview(false)}>取消</button>
+            <button disabled={restoring || draftChanged} className="rounded bg-amber-600 text-white px-3 py-2" onClick={handleRestoreViewedSnapshot}>{restoring ? '恢复中…' : '确认更改并恢复'}</button>
+          </div>
+        </div>
+      </div>}
       {loadedBaseline?.projectId === projectId && currentProject?.id === projectId && <GanttToolbar
-        key={projectId}
+        key={`${projectId}-${baselineRevision}`}
         initialBaseline={loadedBaseline}
         projectId={projectId}
         readOnly={isViewOnly}
@@ -306,15 +342,27 @@ export default function ProjectPage() {
         colW={colW}
         onZoomIn={() => setColW(w => {
           const idx = zoomLevels.indexOf(w)
-          return idx < 0 ? Math.min(zoomMax, w + 7) : zoomLevels[Math.min(idx + 1, zoomLevels.length - 1)]
+          return idx < 0 ? (zoomLevels.find(x => x > w) ?? zoomMax) : zoomLevels[Math.min(idx + 1, zoomLevels.length - 1)]
         })}
         onZoomOut={() => setColW(w => {
           const idx = zoomLevels.indexOf(w)
-          return idx < 0 ? Math.max(zoomLevels[0], w - 7) : zoomLevels[Math.max(idx - 1, 0)]
+          return idx < 0 ? ([...zoomLevels].reverse().find(x => x < w) ?? zoomLevels[0]) : zoomLevels[Math.max(idx - 1, 0)]
         })}
         onExpandAll={() => setExpandAllSignal(n => n + 1)}
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
         onFocusTask={() => setFocusSignal(n => n + 1)}
+        onTimelineNavigate={kind => setTimelineRequest(prev => ({ kind, id: (prev?.id ?? 0) + 1 }))}
+        viewControls={<SavedViewsMenu projectId={projectId} capture={() => {
+          const chart = chartCapture.current?.()
+          return chart ? { search: searchQuery, columns: visibleCols, indicators, colW, critical: showCriticalPath, chart } : null
+        }} apply={view => {
+          setSearchQuery(view.search)
+          handleVisibleColsChange(view.columns.filter(c => OPTIONAL_COL_META.some(m => m.key === c)) as OptionalCol[])
+          handleIndicatorsChange(view.indicators)
+          setColW(Math.max(0.1, Math.min(zoomMax, view.colW)))
+          setShowCriticalPath(view.critical)
+          setViewRestore(prev => ({ state: view.chart, id: (prev?.id ?? 0) + 1 }))
+        }} />}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         onToggleAI={() => setShowAI(v => !v)}
@@ -336,7 +384,7 @@ export default function ProjectPage() {
       />}
 
       {showProjectLines && (
-        <ProjectLinesPanel projectId={projectId} onClose={() => setShowProjectLines(false)} />
+        <ProjectLinesPanel readOnly={isViewOnly} projectId={projectId} onClose={() => setShowProjectLines(false)} />
       )}
 
       <div className="flex-1 overflow-hidden flex">
@@ -350,6 +398,10 @@ export default function ProjectPage() {
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             focusSignal={focusSignal}
+            timelineRequest={timelineRequest}
+            onColWChange={setColW}
+            viewRestore={viewRestore}
+            onCaptureReady={handleCaptureReady}
             showCriticalPath={showCriticalPath}
             visibleCols={visibleCols}
             onVisibleColsChange={handleVisibleColsChange}

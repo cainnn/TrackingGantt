@@ -7,6 +7,7 @@ const rootPassword = process.env.SAVE_TEST_PASSWORD || 'root123';
 const prefix = `保存回归-${randomUUID().slice(0, 8)}-`;
 const projects = [];
 let token, browser;
+const domEvents = process.env.SAVE_TEST_DOM_EVENTS === '1';
 
 async function api(path, method = 'GET', body, expected = 200) {
   const response = await fetch(`${base}/api${path}`, {
@@ -49,7 +50,8 @@ async function button(page, text) {
   const handle = await page.evaluateHandle(text => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === text), text);
   assert.ok(handle.asElement(), `button ${text}`);
   assert.equal(await handle.evaluate(b => b.disabled), false, `${text} must be enabled`);
-  await handle.asElement().click();
+  if (domEvents) await handle.evaluate(b => b.click());
+  else await handle.asElement().click();
   await handle.dispose();
 }
 async function reviewAndSave(page) {
@@ -77,8 +79,20 @@ async function navigateProject(page, p) {
 async function renameTask(page, oldName, newName) {
   const handle = await page.evaluateHandle(name => [...document.querySelectorAll('span')].find(e => e.textContent.trim() === name), oldName);
   assert.ok(handle.asElement(), `task ${oldName}`);
-  await handle.asElement().click({ clickCount: 2 });
+  if (domEvents) await handle.evaluate(e => e.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+  else await handle.asElement().click({ clickCount: 2 });
   await page.waitForFunction(() => document.activeElement?.tagName === 'INPUT');
+  if (domEvents) {
+    await page.evaluate(async name => {
+      const input = document.activeElement;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, name);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      input.blur();
+    }, newName);
+    await handle.dispose();
+    return;
+  }
   await page.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
   await page.keyboard.press('KeyA');
   await page.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
@@ -114,7 +128,17 @@ async function main() {
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { name: `${p.name}-renamed` })).status_date, p.status_date);
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { start_date: '2026-10-02' })).status_date, p.status_date);
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { status_date: null })).status_date, null);
+  const line = { id: randomUUID(), name: '确认后项目线', line_date: '2026-10-20', color: '#3b82f6', visible: true };
+  await Promise.all([api(`/project-lines/${p.id}`, 'POST', line, 201), api(`/project-lines/${p.id}`, 'POST', line, 201)]);
+  assert.equal((await api(`/project-lines/${p.id}`)).filter(l => l.id === line.id).length, 1);
+  await api(`/project-lines/${foreign.id}`, 'POST', line, 404);
+  const lineVersion = await api(`/versions/${p.id}`, 'POST', { use_database_snapshot: true, include_snapshot: true, status_date: '2026-10-19' }, 201);
+  assert.equal(lineVersion.snapshot.lines.find(l => l.id === line.id).name, line.name);
+  await api(`/project-lines/${p.id}`, 'PUT', { ...line, name: '后续改名' });
+  await api(`/versions/${p.id}/restore`, 'POST', { id: lineVersion.id });
+  assert.equal((await api(`/project-lines/${p.id}`)).find(l => l.id === line.id).name, line.name);
   console.log('PASS API: replay/concurrent create, single lifecycle event, project ID isolation, and status date preservation/explicit clearing');
+  console.log('PASS API: project-line IDs are idempotent and project-isolated; confirmed snapshots restore project lines');
   if (process.argv.includes('--api-only')) return;
 
   const empty = await project('空项目');
@@ -134,6 +158,11 @@ async function main() {
   const page = await browser.newPage();
   page.setDefaultTimeout(45000);
   await page.setViewport({ width: 1500, height: 1050 });
+  if (domEvents) {
+    // DOM activation still runs the actual React handlers and real backend.
+    // Optional for macOS environments that drop native CDP input events.
+    page.click = selector => page.$eval(selector, e => e.click());
+  }
   const dialogs = [], errors = [], interceptionErrors = [];
   page.on('dialog', async d => { dialogs.push(d.message()); await d.accept(); });
   page.on('pageerror', error => errors.push(error.message));
@@ -222,6 +251,19 @@ async function main() {
   await page.click('a[href="/dashboard"]');
   await navigateProject(page, snapshot);
   await renameTask(page, 'Snapshot-before', 'Snapshot-renamed');
+  assert.equal((await taskState(snapshot)).tasks.find(t => t.id === snapshotTask.id).name, 'Snapshot-before');
+  assert.equal((await api(`/versions/${snapshot.id}?list=1`)).length, 1);
+  const auditBefore = (await api(`/tasks/${snapshot.id}/${snapshotTask.id}`)).lifecycle.length;
+  await page.$eval('input[type=date]', e => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, '2026-10-20');
+    e.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction(() => document.querySelector('input[placeholder=YYYY-MM-DD]').value === '2026-10-20');
+  assert.ok(String((await api(`/projects/${snapshot.id}`)).status_date).startsWith('2026-10-19'));
+  assert.equal((await api(`/tasks/${snapshot.id}/${snapshotTask.id}`)).lifecycle.length, auditBefore);
+  await page.click('button[title^="撤销"]');
+  await page.waitForFunction(() => document.querySelector('input[placeholder=YYYY-MM-DD]').value === '2026-10-19');
+  console.log('PASS database boundary: editing and status-date changes leave tasks, status date, versions and audit unchanged before confirmation');
   for (const failure of ['snapshot-offline', 'snapshot-invalid-json']) {
     mode = failure; dialogCount = dialogs.length;
     await reviewAndSave(page);
@@ -249,6 +291,11 @@ async function main() {
   assert.equal((await taskState(editing)).tasks.find(t => t.id === editingTask.id).name, 'Concurrent-submitted');
   assert.ok(await page.evaluate(() => [...document.querySelectorAll('span')].some(e => e.textContent.trim() === 'Concurrent-newer-local')));
   assert.equal(await saveButtonEnabled(page), true);
+  await page.click('button[title^="撤销"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-col=name]')].some(e => e.textContent.includes('Concurrent-submitted')));
+  assert.equal(await saveButtonEnabled(page), false);
+  await page.click('button[title^="重做"]');
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-col=name]')].some(e => e.textContent.includes('Concurrent-newer-local')));
   const finalSnapshot = await finishSave(page, editing);
   assert.equal((await taskState(editing)).tasks.find(t => t.id === editingTask.id).name, 'Concurrent-newer-local');
   assert.equal(finalSnapshot.snapshot.tasks.find(t => t.id === editingTask.id).name, 'Concurrent-newer-local');

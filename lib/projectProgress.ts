@@ -1,10 +1,12 @@
 import type { Task } from '@/types'
+import { parseLocal } from './clientTime'
 
 /** 计算单个任务基于状态日期的完成比例（0~1 精确小数，不取整）。分钟级精度。 */
 function timeBasedRatio(task: Task, sd: Date | null): number {
   if (!sd || !task.start_date || !task.end_date) return (task.percent_done ?? 0) / 100
-  const start = new Date(task.start_date)
-  const end   = new Date(task.end_date)
+  const start = parseLocal(task.start_date)!
+  const end   = parseLocal(task.end_date)!
+  if (!start || !end) return (task.percent_done ?? 0) / 100
   if (sd >= end)   return 1
   if (sd <= start) return 0
   return (sd.getTime() - start.getTime()) / (end.getTime() - start.getTime())
@@ -12,14 +14,14 @@ function timeBasedRatio(task: Task, sd: Date | null): number {
 
 /** 计算单个任务基于状态日期的完成百分比 (0-100 整数) */
 export function computeTimeBasedPercent(task: Task, statusDate?: string | null): number {
-  const sd = statusDate ? new Date(statusDate) : null
+  const sd = parseLocal(statusDate)
   return Math.round(timeBasedRatio(task, sd) * 100)
 }
 
 /** 摘要任务进度：所有后代叶子任务按工期加权的完成度。 */
 export function computeSummaryProgressMap(tasks: Task[], statusDate?: string | null): Map<string, number> {
   const result = new Map<string, number>()
-  const sd = statusDate ? new Date(statusDate) : null
+  const sd = parseLocal(statusDate)
   const activeTasks = tasks.filter(t => !t.is_deleted)
   const taskById = new Map(activeTasks.map(t => [t.id, t]))
   const childrenByParent = new Map<string, Task[]>()
@@ -71,7 +73,7 @@ export function computeSummaryProgressMap(tasks: Task[], statusDate?: string | n
 /** SUM(工期×完成比例) / SUM(工期)，仅统计叶子任务，与后端 SQL 保持一致 */
 export function computeProjectProgressPercent(tasks: Task[], statusDate?: string | null): number {
   if (tasks.length === 0) return 0
-  const sd = statusDate ? new Date(statusDate) : null
+  const sd = parseLocal(statusDate)
   const parentIds = new Set<string>()
   for (const t of tasks) { if (t.parent_id) parentIds.add(t.parent_id) }
   let totalWork = 0

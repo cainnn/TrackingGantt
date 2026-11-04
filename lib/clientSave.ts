@@ -3,7 +3,7 @@
  *
  * 用于 "保存版本" 流程：先将所有本地编辑落库，然后创建版本快照。
  */
-import type { Task, Dependency } from '@/types'
+import type { Task, Dependency, ProjectLine } from '@/types'
 import { toDateTimeStr } from './clientTime'
 import { normalizeDurationMinutes } from './taskNumbers'
 
@@ -58,6 +58,7 @@ export interface SaveBaseline {
   tasks: Task[]
   dependencies: Dependency[]
   statusDate: string | null
+  lines?: ProjectLine[]
 }
 
 /** Use persisted results for records involved in a failed attempt. Other

@@ -520,7 +520,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+    <div role="dialog" aria-modal="true" aria-label="编辑任务" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
          onClick={onClose}>
       <div className="bg-white rounded-lg shadow-xl w-[540px] max-h-[90vh] flex flex-col"
            onClick={e => e.stopPropagation()}>

@@ -4,6 +4,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
 import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter, setViewSnapshot } from '@/store/slices/tasksSlice'
+import { setStatusDate } from '@/store/slices/projectSlice'
+import { setProjectLines } from '@/store/slices/projectLinesSlice'
+import { labelDraftStep, hasDraftChanges } from '@/store/draftHistory'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 import type { ProjectVersion, TaskLifecycleEvent } from '@/types'
@@ -71,6 +74,9 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
 
   const panelRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
+  const draftChanged = useAppSelector(hasDraftChanges)
+  const historyBusy = useAppSelector(s => s.draft.saving || s.draft.uncertain)
+  const [managementReview, setManagementReview] = useState<{ kind: 'rename' | 'delete' | 'create'; version?: ProjectVersion } | null>(null)
   const [saving, setSaving] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
@@ -130,7 +136,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
 
   // 创建快照
   const handleCreate = useCallback(async () => {
-    if (saving) return
+    if (saving || readOnly || draftChanged || historyBusy) return false
     setSaving(true)
     try {
       const res = await authFetch(`/api/versions/${projectId}`, {
@@ -139,7 +145,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         body: JSON.stringify({
           name: newName || undefined,
           description: newDesc || undefined,
-          tasks, dependencies,
+          use_database_snapshot: true,
           status_date: currentProject?.status_date ?? null,
         }),
       })
@@ -149,17 +155,20 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         setNewName('')
         setNewDesc('')
         setShowCreate(false)
+        return true
       } else {
         alert(data.error ?? '创建失败')
       }
     } catch {
       alert('网络错误')
-    }
-    setSaving(false)
-  }, [projectId, tasks, dependencies, currentProject, newName, newDesc, saving, dispatch])
+    } finally { setSaving(false) }
+    return false
+  }, [projectId, currentProject, newName, newDesc, saving, readOnly, draftChanged, historyBusy, dispatch])
 
   // 重命名
   const handleRename = useCallback(async (v: ProjectVersion) => {
+    if (saving || readOnly || historyBusy) return false
+    setSaving(true)
     try {
       const res = await authFetch(`/api/versions/${projectId}`, {
         method: 'PUT',
@@ -167,16 +176,21 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         body: JSON.stringify({ id: v.id, name: editName, description: editDesc }),
       })
       const data = await res.json()
-      if (data.ok) {
+      if (res.ok && data.ok) {
         dispatch(updateVersion({ id: v.id, name: editName, description: editDesc }))
         setEditingId(null)
+        return true
       }
-    } catch { /* ignore */ }
-  }, [projectId, editName, editDesc, dispatch])
+      alert(data.error ?? '修改版本失败')
+    } catch { alert('网络错误，修改版本失败') }
+    finally { setSaving(false) }
+    return false
+  }, [projectId, editName, editDesc, saving, readOnly, historyBusy, dispatch])
 
   // 删除
   const handleDelete = useCallback(async (v: ProjectVersion) => {
-    if (!confirm(`确定删除「${v.name}」？此操作不可恢复。`)) return
+    if (saving || readOnly || historyBusy) return false
+    setSaving(true)
     try {
       const res = await authFetch(`/api/versions/${projectId}`, {
         method: 'DELETE',
@@ -184,9 +198,12 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         body: JSON.stringify({ id: v.id }),
       })
       const data = await res.json()
-      if (data.ok) dispatch(removeVersion(v.id))
-    } catch { /* ignore */ }
-  }, [projectId, dispatch])
+      if (res.ok && data.ok) { dispatch(removeVersion(v.id)); return true }
+      alert(data.error ?? '删除版本失败')
+    } catch { alert('网络错误，删除版本失败') }
+    finally { setSaving(false) }
+    return false
+  }, [projectId, saving, readOnly, historyBusy, dispatch])
 
   // 查看：临时切换图表显示该版本快照，不影响当前工作状态，全局只读
   const handleView = useCallback(async (v: ProjectVersion) => {
@@ -202,6 +219,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       dispatch(setViewSnapshot({
         tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
+        lines: snap.lines,
         versionId: v.id,
         versionName,
       }))
@@ -210,9 +228,9 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
     }
   }, [projectId, dispatch])
 
-  // 回退：仅本地预览，"保存版本"后才入库
+  // 回退：仅本地预览，"确认变更 → 确认并保存"后才入库
   const handleRollback = useCallback(async (v: ProjectVersion) => {
-    if (!confirm(`回退到「${v.name}」（本地预览）？\n\n当前所有未保存编辑会被覆盖。\n回退后需点"保存版本"才会真正入库；保存后自动生成新版本（递增 version_number），原有历史版本保留。`)) return
+    if (!confirm(`回退到「${v.name}」（本地预览）？\n\n当前所有未保存编辑会被覆盖。\n回退后需点"确认变更 → 确认并保存"才会真正入库；保存后自动生成新版本（递增 version_number），原有历史版本保留。`)) return
     try {
       const res = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
       const data = await res.json()
@@ -221,11 +239,14 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         return
       }
       const snap = data.value.snapshot
+      dispatch(labelDraftStep('载入历史版本到草稿'))
       dispatch(setTasks({
         tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
       }))
-      alert(`已加载「${v.name}」到本地。点"保存版本"后入库。`)
+      dispatch(setStatusDate({ projectId, statusDate: v.status_date }))
+      if (Array.isArray(snap.lines)) dispatch(setProjectLines(snap.lines))
+      alert(`已加载「${v.name}」到本地。点"确认变更 → 确认并保存"后入库。`)
     } catch {
       alert('网络错误')
     }
@@ -399,12 +420,13 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                 />
                 显示自动保存
               </label>
-              <button
+              {!readOnly && <button
+                disabled={saving || historyBusy}
                 onClick={() => setShowCreate(v => !v)}
                 className="text-[12px] text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
               >
                 + 创建快照
-              </button>
+              </button>}
             </div>
           )}
         </div>
@@ -430,6 +452,20 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         </div>
       </div>
 
+      {managementReview && <div className="fixed inset-0 z-[10000] bg-black/40 flex items-center justify-center" role="dialog" aria-modal="true" aria-label="历史版本管理确认更改">
+        <div className="bg-white rounded-lg p-5 shadow-xl w-96 space-y-4">
+          <h3 className="font-semibold">确认更改历史版本</h3>
+          <p className="text-sm">{managementReview.kind === 'delete' ? `删除「${managementReview.version?.name}」？此操作不可恢复。` : managementReview.kind === 'rename' ? `名称改为「${editName}」，描述改为「${editDesc || '空'}」。` : '为已保存的数据创建快照。'}</p>
+          <p className="text-xs text-gray-500">这是后端历史版本管理，不属于前端草稿撤销。</p>
+          <div className="flex justify-end gap-3"><button disabled={saving} onClick={() => setManagementReview(null)}>取消</button><button disabled={saving || historyBusy} className="bg-blue-600 text-white rounded px-3 py-2" onClick={async () => {
+            const action = managementReview
+            const done = action.kind === 'create' ? await handleCreate()
+              : action.version ? await (action.kind === 'rename' ? handleRename(action.version) : handleDelete(action.version)) : false
+            if (done) setManagementReview(null)
+          }}>确认更改</button></div>
+        </div>
+      </div>}
+
       {/* ═══ Tab: 快照 ═══ */}
       {activeTab === 'versions' && (
         <>
@@ -452,7 +488,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
               />
               <div className="flex gap-2">
                 <button
-                  onClick={handleCreate}
+                  onClick={() => { if (draftChanged) { alert('当前有未保存草稿，请先通过工具栏确认变更'); return }; setManagementReview({ kind: 'create' }) }}
                   disabled={saving}
                   className="px-3 py-1 text-[12px] bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
                 >
@@ -486,7 +522,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                       onChange={e => setEditName(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2.5 py-1 text-[12px] mb-1.5 focus:outline-none focus:border-blue-400"
                       autoFocus
-                      onKeyDown={e => { if (e.key === 'Enter') handleRename(v); if (e.key === 'Escape') setEditingId(null) }}
+                      onKeyDown={e => { if (e.key === 'Enter') setManagementReview({ kind: 'rename', version: v }); if (e.key === 'Escape') setEditingId(null) }}
                     />
                     <input
                       type="text"
@@ -494,10 +530,10 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                       onChange={e => setEditDesc(e.target.value)}
                       placeholder="描述"
                       className="w-full border border-gray-300 rounded px-2.5 py-1 text-[12px] mb-2 focus:outline-none focus:border-blue-400"
-                      onKeyDown={e => { if (e.key === 'Enter') handleRename(v); if (e.key === 'Escape') setEditingId(null) }}
+                      onKeyDown={e => { if (e.key === 'Enter') setManagementReview({ kind: 'rename', version: v }); if (e.key === 'Escape') setEditingId(null) }}
                     />
                     <div className="flex gap-2">
-                      <button onClick={() => handleRename(v)} className="px-2.5 py-0.5 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer">保存</button>
+                      <button onClick={() => setManagementReview({ kind: 'rename', version: v })} className="px-2.5 py-0.5 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700 cursor-pointer">保存</button>
                       <button onClick={() => setEditingId(null)} className="px-2.5 py-0.5 text-[11px] text-gray-500 hover:text-gray-700 cursor-pointer">取消</button>
                     </div>
                   </div>
@@ -559,7 +595,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                         {!readOnly && (
                         <button
                           onClick={() => handleRollback(v)}
-                          title="回退到此版本（本地预览，保存版本后入库）"
+                          title="回退到此版本（本地预览，确认变更 → 确认并保存后入库）"
                           className="px-1.5 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded cursor-pointer"
                         >
                           回退
@@ -576,7 +612,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                         )}
                         {!readOnly && (
                         <button
-                          onClick={() => handleDelete(v)}
+                          onClick={() => setManagementReview({ kind: 'delete', version: v })}
                           title="删除"
                           className="px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-red-50 rounded cursor-pointer"
                         >

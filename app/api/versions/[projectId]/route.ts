@@ -104,7 +104,8 @@ export async function POST(req: NextRequest, { params }: Params) {
       snapshotDeps = dRes.rows
     }
 
-    const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps }
+    const linesResult = await client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId])
+    const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: linesResult.rows }
 
     // 计算与上一版本的差异
     let changes = null

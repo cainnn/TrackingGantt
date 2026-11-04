@@ -31,6 +31,21 @@ test('computes time based task percent from status date', () => {
   assert.equal(computeTimeBasedPercent(task({ id: 'task-1' }), '2026-06-02T00:00:00'), 50)
 })
 
+test('date-only status lines use the same local midnight as task dates in western time zones', () => {
+  const previous = process.env.TZ
+  try {
+    process.env.TZ = 'America/Los_Angeles'
+    const t = task({ id: 'local', start_date: '2026-11-02T00:00:00', end_date: '2026-11-03T00:00:00', duration: 1440 })
+    assert.equal(computeTimeBasedPercent(t, '2026-11-02'), 0)
+    assert.equal(computeTimeBasedPercent(t, '2026-11-03'), 100)
+    assert.equal(computeProjectProgressPercent([t], '2026-11-03'), 100)
+    assert.equal(computeTimeBasedPercent({ ...t, start_date: '2026-11-02', end_date: '2026-11-03' }, '2026-11-02T12:00:00'), 50)
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
+})
+
 test('computes project progress from leaf tasks only', () => {
   const tasks = [
     task({ id: 'summary', duration: 10000 }),

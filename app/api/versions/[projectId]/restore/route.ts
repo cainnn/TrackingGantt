@@ -179,6 +179,17 @@ export async function POST(req: NextRequest, { params }: Params) {
       )
     }
 
+    // Old versions predate project-line snapshots. Preserve their current lines.
+    if (Array.isArray(version.snapshot?.lines)) {
+      await client.query('DELETE FROM project_lines WHERE project_id = $1', [projectId])
+      for (const line of version.snapshot.lines) {
+        await client.query(
+          `INSERT INTO project_lines (id, project_id, name, line_date, color, visible)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [line.id, projectId, line.name, line.line_date, line.color, line.visible ?? true],
+        )
+      }
+    }
     await client.query(
       `DELETE FROM project_versions
        WHERE project_id = $1 AND version_number > $2`,

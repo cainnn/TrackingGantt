@@ -6,14 +6,16 @@ export function buildTaskCopies(
   tasks: Task[],
   dependencies: Dependency[],
   selectedIds: string[],
-  targetId: string,
+  targetId: string | null,
   position: 'before' | 'after',
+  source?: { tasks: Task[]; dependencies: Dependency[] },
 ): { tasksToAdd: Task[]; tasksToUpdate: Task[]; dependenciesToAdd: Dependency[] } {
   const empty = { tasksToAdd: [], tasksToUpdate: [], dependenciesToAdd: [] }
-  const target = tasks.find(t => t.id === targetId && !t.is_deleted)
+  const target = targetId ? tasks.find(t => t.id === targetId && !t.is_deleted)
+    : { id: '', parent_id: null, project_id: source?.tasks[0]?.project_id ?? tasks[0]?.project_id }
   if (!target) return empty
 
-  const activeTasks = tasks.filter(t => !t.is_deleted && t.project_id === target.project_id)
+  const activeTasks = (source?.tasks ?? tasks).filter(t => !t.is_deleted && t.project_id === target.project_id)
   const taskMap = new Map(activeTasks.map(t => [t.id, t]))
   const children = new Map<string | null, Task[]>()
   for (const t of activeTasks) {
@@ -45,8 +47,9 @@ export function buildTaskCopies(
   for (const t of activeTasks) visit(t)
 
   const roots = sourceTasks.filter(t => !t.parent_id || !copyIds.has(t.parent_id))
-  const siblings = children.get(target.parent_id ?? null) ?? []
-  const insertIndex = siblings.findIndex(t => t.id === targetId) + (position === 'after' ? 1 : 0)
+  const siblings = tasks.filter(t => !t.is_deleted && (t.parent_id ?? null) === (target.parent_id ?? null))
+    .sort((a, b) => a.order_index - b.order_index)
+  const insertIndex = targetId ? siblings.findIndex(t => t.id === targetId) + (position === 'after' ? 1 : 0) : siblings.length
   const idMap = new Map(sourceTasks.map(t => [t.id, uuid()]))
   const siblingIds = siblings.map(t => t.id)
   siblingIds.splice(insertIndex, 0, ...roots.map(t => idMap.get(t.id)!))
@@ -78,7 +81,7 @@ export function buildTaskCopies(
       updated_at: now,
     }
   })
-  const dependenciesToAdd = dependencies
+  const dependenciesToAdd = (source?.dependencies ?? dependencies)
     .filter(d => idMap.has(d.from_task_id) && idMap.has(d.to_task_id))
     .map(d => ({
       ...d,

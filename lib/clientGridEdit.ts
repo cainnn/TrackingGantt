@@ -1,0 +1,102 @@
+import type { Task, Dependency } from '../types'
+import { buildTaskScheduleEdit, normalizeScheduleDate, scheduleDurationMinutes } from './clientTaskEdit'
+import { runFullCascade } from './clientScheduling'
+import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from '../components/GanttChart/constants'
+
+function validDate(value: string): boolean {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/)
+  if (!m) return false
+  const [, year, month, day, hour = '0', minute = '0', second = '0'] = m
+  const d = new Date(Date.UTC(+year, +month - 1, +day))
+  return d.getUTCFullYear() === +year && d.getUTCMonth() === +month - 1 && d.getUTCDate() === +day
+    && +hour < 24 && +minute < 60 && +second < 60
+}
+
+/** Excel/Sheets plain-text clipboard, including quoted tabs and newlines. */
+export function parseClipboardGrid(text: string): string[][] {
+  const rows: string[][] = []
+  let row: string[] = [], cell = '', quoted = false
+  const input = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i]
+    if (c === '"' && (quoted || cell === '')) {
+      if (quoted && input[i + 1] === '"') { cell += '"'; i++ }
+      else quoted = !quoted
+    } else if (!quoted && (c === '\t' || c === '\n')) {
+      row.push(cell); cell = ''
+      if (c === '\n') { rows.push(row); row = [] }
+    } else cell += c
+  }
+  if (quoted) throw new Error('粘贴内容的引号不完整')
+  if (cell !== '' || row.length || !rows.length) { row.push(cell); rows.push(row) }
+  return rows
+}
+
+export function gridCellEditable(task: Task, col: string, tasks: Task[], deps: Dependency[]): boolean {
+  if (['name', 'assignee'].includes(col)) return true
+  if (tasks.some(t => !t.is_deleted && t.parent_id === task.id)) return false
+  const type = deps.find(d => d.active !== false && d.to_task_id === task.id)?.type ?? -1
+  if (col === 'start') return task.auto_schedule === false || type === 1 || type === 3
+  if (col === 'end') return task.auto_schedule === false || [-1, 1, 3].includes(type)
+  if (col === 'duration') return !task.is_milestone
+  if (col === 'ctype') return task.auto_schedule !== false
+  if (col === 'cdate') return task.auto_schedule !== false && CONSTRAINT_NEEDS_DATE.has(task.constraint_type ?? '')
+  if (col === 'lag') return deps.some(d => d.to_task_id === task.id)
+  return ['taskType', 'ddate', 'inactive', 'pred', 'succ'].includes(col)
+}
+
+export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string[], columns: string[], anchor: { taskId: string; col: string }, text: string, isMinute: boolean): { tasks: Task[]; dependencies: Dependency[]; editedIds: string[] } {
+  const grid = parseClipboardGrid(text)
+  if (grid.reduce((n, r) => n + r.length, 0) > 5000) throw new Error('一次最多粘贴 5000 个单元格，请分批粘贴或使用 Excel 导入')
+  const startRow = rowIds.indexOf(anchor.taskId), startCol = columns.indexOf(anchor.col)
+  if (startRow < 0 || startCol < 0) throw new Error('请先选中可见的目标单元格')
+  if (grid.length + startRow > rowIds.length || grid.some(r => r.length + startCol > columns.length)) throw new Error('粘贴范围超出可见任务或列，请调整目标位置')
+  const byId = new Map(tasks.map(t => [t.id, { ...t }]))
+  const nextDeps = deps.map(d => ({ ...d }))
+  const editedIds: string[] = []
+  for (let r = 0; r < grid.length; r++) {
+    const task = byId.get(rowIds[startRow + r])!
+    for (let c = 0; c < grid[r].length; c++) {
+      const col = columns[startCol + c], value = grid[r][c].trim()
+      const fail = (message: string): never => { throw new Error(`第 ${r + 1} 行、第 ${c + 1} 列：${message}`) }
+      if (!gridCellEditable(task, col, tasks, nextDeps)) fail('目标为只读或自动计算字段')
+      if (col === 'name') { if (!value) fail('任务名称不能为空'); task.name = value }
+      else if (col === 'assignee') task.assignee = value || null
+      else if (['duration', 'start', 'end'].includes(col)) {
+        const field = col === 'start' ? 'start_date' : col === 'end' ? 'end_date' : 'duration'
+        if (field === 'duration' && (!/^\d+$/.test(value) || Number(value) <= 0)) fail('工期应为正整数')
+        if (field !== 'duration' && !validDate(value)) fail('日期无效，应为 YYYY-MM-DD，可附带 HH:mm')
+        const patch = buildTaskScheduleEdit(task, nextDeps, field, value.replace(' ', 'T'), isMinute)
+        if (!Object.keys(patch).length) fail('日期或工期无效，请检查排程方式')
+        Object.assign(task, patch)
+      } else if (col === 'taskType') {
+        if (!['自动', '手动', 'auto', 'manual'].includes(value)) fail('任务类型应为“自动”或“手动”')
+        task.auto_schedule = value === '自动' || value === 'auto'
+      } else if (col === 'ctype') {
+        const type = CONSTRAINT_TYPES.find(t => t.value === value || t.label === value)
+        if (!type) fail('未知限制类型')
+        task.constraint_type = type!.value
+        if (!type!.needsDate) task.constraint_date = null
+      } else if (col === 'cdate' || col === 'ddate') {
+        const date = value ? normalizeScheduleDate(value.replace(' ', 'T'), isMinute) : null
+        if (value && (!date || !validDate(value))) fail('日期无效')
+        if (col === 'cdate') task.constraint_date = date
+        else task.deadline = date
+      } else if (col === 'inactive') {
+        if (!['是', '否', 'true', 'false', '1', '0', ''].includes(value)) fail('无效标记应为“是”或“否”')
+        task.inactive = ['是', 'true', '1'].includes(value)
+      } else if (col === 'lag') {
+        const n = Number(value)
+        if (!Number.isInteger(n)) fail('延迟应为整数')
+        nextDeps.find(d => d.to_task_id === task.id)!.lag = n * (isMinute ? 1 : 1440)
+      } else fail('此列请使用任务编辑窗口修改')
+    }
+    const span = scheduleDurationMinutes(task.start_date, task.end_date, isMinute)
+    if (span != null && span < (task.is_milestone ? 0 : 1)) throw new Error(`第 ${r + 1} 行：结束时间必须晚于开始时间`)
+    if (CONSTRAINT_NEEDS_DATE.has(task.constraint_type ?? '') && !task.constraint_date) throw new Error(`第 ${r + 1} 行：请同时填写限制日期`)
+    editedIds.push(task.id)
+  }
+  const next = tasks.map(t => byId.get(t.id)!)
+  for (const task of runFullCascade(next, nextDeps, { isMinute })) byId.set(task.id, task)
+  return { tasks: tasks.map(t => byId.get(t.id)!), dependencies: nextDeps, editedIds }
+}

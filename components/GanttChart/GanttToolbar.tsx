@@ -1,18 +1,20 @@
 'use client'
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { useStore } from 'react-redux'
 import type { RootState } from '@/store'
+import { undoDraft, redoDraft, beginDraftSave, finishDraftSave, failDraftSave, resetDraft, labelDraftStep, linesEqual, hasDraftChanges } from '@/store/draftHistory'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
-  setSelectedIds, setTasks, rebaseSavedState,
-  markDirty, clearDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
+  setSelectedIds, setTasks,
+  markDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
+import BulkEditPanel from './BulkEditPanel'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { scheduleDurationMinutes } from '@/lib/clientTaskEdit'
@@ -26,8 +28,9 @@ import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 import { runFullCascade, collapseDeletedTaskSuccessors } from '@/lib/clientScheduling'
-import { buildSaveDiff, mergeSavedRecords, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
+import { buildSaveDiff, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
+import { buildTaskCopies } from '@/lib/clientTaskCopy'
 import type { Dependency } from '@/types'
 
 // ── Flat tree order ───────────────────────────────────────────────────────
@@ -159,6 +162,8 @@ interface GanttToolbarProps {
   onExpandAll: () => void
   onCollapseAll: () => void
   onFocusTask: () => void
+  onTimelineNavigate?: (kind: 'all' | 'selection' | 'status') => void
+  viewControls?: React.ReactNode
   searchQuery: string
   onSearchChange: (q: string) => void
   onToggleAI?: () => void
@@ -198,11 +203,15 @@ export default function GanttToolbar({
   indicators,
   onIndicatorsChange,
   onDiscardChanges,
+  onTimelineNavigate, viewControls,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
   const reduxStore = useStore<RootState>()
   const { selectedIds, clipboard, clipboardDeps, tasks, dependencies, dirtyIds, comparison, viewSnapshot, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
+  const history = useAppSelector(s => s.draft)
+  const draftChanged = useAppSelector(hasDraftChanges)
+  const projectLines = useAppSelector(s => s.projectLines.lines)
   const { versions } = useAppSelector(s => s.versions)
   const formatStatusDate = useCallback((value?: string | Date | null) => {
     const dt = toDateTimeStr(value ?? null)
@@ -261,11 +270,12 @@ export default function GanttToolbar({
   const hasSelection = selectedIds.length > 0
 
 
+  const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [retroLogOpen, setRetroLogOpen] = useState(false)
   const [viewVersionOpen, setViewVersionOpen] = useState(false)
-  const zoomMin = isMinute ? 1440 : 3
+  const zoomMin = isMinute ? 24 : 3
   const zoomMax = isMinute ? 2880 : 56
   const viewVersionRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -288,6 +298,7 @@ export default function GanttToolbar({
         dispatch(setViewSnapshot({
           tasks: Array.isArray(d.value.snapshot.tasks) ? d.value.snapshot.tasks : [],
           dependencies: Array.isArray(d.value.snapshot.dependencies) ? d.value.snapshot.dependencies : [],
+          lines: d.value.snapshot.lines,
           versionId: v.id,
           versionName: versionLabel(v),
         }))
@@ -304,6 +315,8 @@ export default function GanttToolbar({
   const [baselineDeps, setBaselineDeps] = useState<Dependency[]>(() => initialBaseline.dependencies.map(d => ({ ...d })))
   // 状态日期同样进入"待确认"流程：捕获原始值，确认变更时落库，放弃更改时回滚。
   const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(initialBaseline.statusDate)
+  const [baselineLines, setBaselineLines] = useState(initialBaseline.lines ?? [])
+  const attemptedLineIds = useRef(new Set<string>())
   const [saveIncomplete, setSaveIncomplete] = useState(false)
   const attemptedSaveIds = useRef({ taskIds: new Set<string>(), dependencyIds: new Set<string>() })
 
@@ -395,7 +408,16 @@ export default function GanttToolbar({
   }, [baselineDeps, dependencies, baselineTasks, tasks, isMinute])
 
   const statusDateChanged = toDateTimeStr(currentProject?.status_date ?? null) !== baselineStatusDate
-  const hasChanges = changeDiffs.length > 0 || depDiff.total > 0 || statusDateChanged || saveIncomplete
+  const linesChanged = !linesEqual(baselineLines, projectLines)
+  const lineDiffs = useMemo(() => {
+    const old = new Map(baselineLines.map(line => [line.id, line]))
+    const current = new Map(projectLines.map(line => [line.id, line]))
+    return [...new Set([...old.keys(), ...current.keys()])].flatMap(id => {
+      const before = old.get(id), after = current.get(id)
+      return before && after && linesEqual([before], [after]) ? [] : [{ id, before, after }]
+    })
+  }, [baselineLines, projectLines])
+  const hasChanges = draftChanged || saveIncomplete
 
   // 变更审核弹窗状态
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -560,58 +582,15 @@ export default function GanttToolbar({
     changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0) &&
     depDiff.items.every(d => (dependencyReasons[d.id] ?? '').trim().length > 0)
 
-  // 初始加载时，拉取版本列表；若无任何版本则自动建一个"初始版本"快照
-  const initVersionRef = useRef(false)
+  // Opening a project only reads versions; the first version is created by confirmation.
   useEffect(() => {
-    authFetch(`/api/versions/${projectId}?list=1`)
-      .then(r => r.json())
-      .then(async d => {
-        if (!d.ok || !Array.isArray(d.value)) return
-        dispatch(setVersions(d.value))
-        if (initVersionRef.current) return
-        initVersionRef.current = true
-        if (readOnly) return
-        // 只在没有任何版本（含 autosave）且当前有任务时创建初始版本
-        const hasAny = d.value.length > 0
-        if (hasAny) return
-        const hasTasks = currentStateRef.current.tasks.some(t => !t.is_deleted)
-        if (!hasTasks) return
-        const now = new Date()
-        const pad = (n: number) => String(n).padStart(2, '0')
-        const sd = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}` +
-                   `T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
-        try {
-          const r = await authFetch(`/api/versions/${projectId}`, {
-            method: 'POST',
-            headers: authFetchHeaders(true),
-            body: JSON.stringify({
-              tasks: currentStateRef.current.tasks,
-              dependencies: currentStateRef.current.dependencies,
-              status_date: sd,
-              name: '初始版本',
-              description: '项目首次进入时自动创建的基线快照',
-              is_autosave: false,
-            }),
-          })
-          if (r.ok) {
-            const r2 = await authFetch(`/api/versions/${projectId}?list=1`)
-            const d2 = await r2.json()
-            if (d2.ok && Array.isArray(d2.value)) dispatch(setVersions(d2.value))
-          }
-        } catch { /* silent */ }
-      })
-      .catch(() => {})
-  }, [projectId, dispatch, readOnly])
+    let cancelled = false
+    authFetch(`/api/versions/${projectId}?list=1`).then(r => r.json()).then(d => {
+      if (!cancelled && d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value))
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, dispatch])
 
-  // ── 当前编辑态快照 ───────────────────────────────────────────────────
-  // 仅供初始化版本快照使用。任务/依赖编辑不能自动落库，必须由"确认变更"统一持久化。
-  const currentStateRef = useRef({ tasks, dependencies, dirtyIds, baselineTasks, baselineDeps })
-  useEffect(() => {
-    currentStateRef.current = { tasks, dependencies, dirtyIds, baselineTasks, baselineDeps }
-  }, [tasks, dependencies, dirtyIds, baselineTasks, baselineDeps])
-
-  // ── Export ─────────────────────────────────────────────────────────────
-  const projectLines = useAppSelector(s => s.projectLines.lines)
   const [exportDropdown, setExportDropdown] = useState(false)
   const exportDropdownRef = useRef<HTMLDivElement>(null)
   const [importDropdown, setImportDropdown] = useState(false)
@@ -802,7 +781,7 @@ export default function GanttToolbar({
 
       const mode = choice === '1' ? 'replace' : 'merge'
       if (mode === 'replace') {
-        const ok = confirm('⚠️ 替换导入将删除当前项目所有任务数据，此操作不可撤销。\n\n确认继续？')
+        const ok = confirm('⚠️ 替换导入将替换当前草稿，可以撤销；确认并保存后才会写入数据库。\n\n确认继续？')
         if (!ok) return
       }
 
@@ -890,6 +869,7 @@ export default function GanttToolbar({
         nextDeps = [...dependencies, ...importedDeps]
       }
 
+      dispatch(labelDraftStep(`${sourceLabel} ${mode === 'replace' ? '替换' : '合并'}导入`))
       dispatch(setTasks({ tasks: nextTasks, dependencies: nextDeps }))
       dispatch(markDirty(nextTasks.map(t => t.id)))
 
@@ -907,7 +887,7 @@ export default function GanttToolbar({
         }))
         dispatch(setProjectLines(lines))
       }
-      alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，"保存版本"时入库。`)
+      alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，“确认变更 → 确认并保存”后入库。`)
   }, [dispatch, projectId, tasks, dependencies])
 
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1205,129 +1185,40 @@ export default function GanttToolbar({
     dispatch(copyTasks(selectedIds))
   }, [dispatch, selectedIds, hasSelection])
 
-  const handlePaste = useCallback(async () => {
-    if (clipboard.length === 0) return
-
-
-    // ── 确定插入位置：选中任务的正下方 ────────────────────────────────
-    const flat = getFlatOrder(tasks)
-    // 找到最后一个选中任务在 flat 中的位置
-    let insertAfterIdx = -1
-    for (let i = flat.length - 1; i >= 0; i--) {
-      if (selectedIds.includes(flat[i].id)) { insertAfterIdx = i; break }
-    }
-    // 插入点的 parent_id 和 order_index
-    const anchorTask = insertAfterIdx >= 0 ? flat[insertAfterIdx] : null
-    const insertParentId = anchorTask?.parent_id ?? null
-    // 同级兄弟列表，用于计算 order_index
-    const siblings = tasks
-      .filter(t => (t.parent_id ?? null) === insertParentId)
-      .sort((a, b) => a.order_index - b.order_index)
-    let insertOrderBase: number
-    if (anchorTask) {
-      const anchorIdx = siblings.findIndex(s => s.id === anchorTask.id)
-      const anchorOrder = anchorTask.order_index
-      const nextSibling = siblings[anchorIdx + 1]
-      if (nextSibling) {
-        // 在锚点和下一个兄弟之间插入
-        insertOrderBase = anchorOrder + 1
-        // 把后续兄弟的 order_index 往后推，腾出空间
-        const shiftTasks = siblings.slice(anchorIdx + 1)
-        const shiftPayload = shiftTasks.map((s, i) => ({
-          id: s.id, order_index: anchorOrder + 1 + clipboard.length + i,
-        }))
-        if (shiftPayload.length > 0) {
-          const shiftedTasks = shiftPayload.map(p => {
-            const orig = tasks.find(t => t.id === p.id)!
-            return { ...orig, order_index: p.order_index }
-          })
-          dispatch(updateTasks(shiftedTasks))
-          dispatch(markDirty(shiftPayload.map(p => p.id)))
-        }
-      } else {
-        insertOrderBase = anchorOrder + 1
-      }
-    } else {
-      // 没有选中任务，追加到末尾
-      insertOrderBase = siblings.length > 0
-        ? Math.max(...siblings.map(s => s.order_index)) + 1 : 0
-    }
-
-    // 清理 parent_id：如果 parent 不在剪贴板中，则使用插入点的 parent_id
-    const clipIds = new Set(clipboard.map(t => t.id))
-    const idMap = new Map<string, string>()
-    const maxCode = tasks.reduce((m, t) => {
-      const n = parseInt(t.task_code, 10)
-      return !isNaN(n) && n > m ? n : m
-    }, 0)
-    const pastedTasks: Task[] = clipboard.map((t, i) => {
-      const newId = uuid()
-      idMap.set(t.id, newId)
-      return {
-        ...t,
-        id: newId,
-        task_code: String(maxCode + 1 + i),
-        name: `${t.name} (copy)`,
-        parent_id: t.parent_id && clipIds.has(t.parent_id) ? t.parent_id : insertParentId,
-        order_index: insertOrderBase + i,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      } as Task
+  const handlePaste = useCallback(() => {
+    if (clipboard.length === 0 || readOnly) return
+    const target = getFlatOrder(tasks).filter(t => selectedIds.includes(t.id)).at(-1)
+    const result = buildTaskCopies(tasks, dependencies, clipboard.map(t => t.id), target?.id ?? null, 'after', {
+      tasks: clipboard, dependencies: clipboardDeps,
     })
-    // 将引用旧 ID 的 parent_id 替换为新 ID
-    for (const pt of pastedTasks) {
-      if (pt.parent_id && idMap.has(pt.parent_id)) pt.parent_id = idMap.get(pt.parent_id)!
-    }
-    dispatch(addTasks(pastedTasks))
-    dispatch(markDirty(pastedTasks.map(t => t.id)))
-    dispatch(setSelectedIds(pastedTasks.map(t => t.id)))
-
-    // 复制依赖
-    if (clipboardDeps.length > 0) {
-      const newDeps: Dependency[] = []
-      for (const dep of clipboardDeps) {
-        const newFrom = idMap.get(dep.from_task_id)
-        const newTo = idMap.get(dep.to_task_id)
-        if (!newFrom || !newTo) continue
-        const newDep: Dependency = {
-          id: uuid(),
-          project_id: projectId,
-          from_task_id: newFrom,
-          to_task_id: newTo,
-          type: dep.type,
-          lag: dep.lag,
-          active: dep.active ?? true,
-        }
-        newDeps.push(newDep)
-        dispatch(addDependency(newDep))
-      }
-      const cascaded = runFullCascade(
-        [...tasks, ...pastedTasks],
-        [...dependencies, ...newDeps],
-        { isMinute },
-      )
-      if (cascaded.length > 0) {
-        dispatch(updateTasks(cascaded))
-        dispatch(markDirty(cascaded.map(t => t.id)))
-      }
-    }
+    if (!result.tasksToAdd.length) return
+    dispatch(labelDraftStep('粘贴任务'))
+    dispatch(updateTasks(result.tasksToUpdate))
+    dispatch(addTasks(result.tasksToAdd))
+    result.dependenciesToAdd.forEach(d => dispatch(addDependency(d)))
+    const updated = new Map(result.tasksToUpdate.map(t => [t.id, t]))
+    const nextTasks = [...tasks.map(t => updated.get(t.id) ?? t), ...result.tasksToAdd]
+    const cascaded = runFullCascade(nextTasks, [...dependencies, ...result.dependenciesToAdd], { isMinute })
+    if (cascaded.length) dispatch(updateTasks(cascaded))
+    dispatch(markDirty([...result.tasksToAdd, ...result.tasksToUpdate, ...cascaded].map(t => t.id)))
+    dispatch(setSelectedIds(result.tasksToAdd.map(t => t.id)))
     requestAnimationFrame(() => onFocusTask())
-  }, [dispatch, projectId, clipboard, clipboardDeps, onFocusTask, tasks, dependencies])
+  }, [dispatch, tasks, dependencies, clipboard, clipboardDeps, selectedIds, isMinute, readOnly, onFocusTask])
 
   // ── Status date: free movement + separate confirm button ────────
   const [statusDateSaving, setStatusDateSaving] = useState(false)
   const readPersistedState = useCallback(async (): Promise<SaveBaseline> => {
-    const [taskRes, projectRes] = await Promise.all([
-      authFetch(`/api/tasks/${projectId}`), authFetch(`/api/projects/${projectId}`),
+    const [taskRes, projectRes, lineRes] = await Promise.all([
+      authFetch(`/api/tasks/${projectId}`), authFetch(`/api/projects/${projectId}`), authFetch(`/api/project-lines/${projectId}`),
     ])
-    const [taskData, projectData] = await Promise.all([taskRes.json(), projectRes.json()])
-    if (!taskRes.ok || !taskData.ok || !projectRes.ok || !projectData.ok
+    const [taskData, projectData, lineData] = await Promise.all([taskRes.json(), projectRes.json(), lineRes.json()])
+    if (!taskRes.ok || !taskData.ok || !projectRes.ok || !projectData.ok || !lineRes.ok || !lineData.ok || !Array.isArray(lineData.value)
         || !Array.isArray(taskData.value?.tasks) || !Array.isArray(taskData.value?.dependencies)) {
       throw new Error('无法核对上次保存结果，请稍后重试')
     }
     return {
       tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
-      statusDate: toDateTimeStr(projectData.value.status_date ?? null),
+      statusDate: toDateTimeStr(projectData.value.status_date ?? null), lines: lineData.value,
     }
   }, [projectId])
 
@@ -1336,6 +1227,7 @@ export default function GanttToolbar({
   // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
   const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = normalizeStatusDate(e.target.value || null)
+    dispatch(labelDraftStep('修改状态日期'))
     dispatch(setStatusDate({ projectId, statusDate: val }))
   }, [dispatch, projectId, normalizeStatusDate])
 
@@ -1345,6 +1237,8 @@ export default function GanttToolbar({
     if (!sd || statusDateSaving || !allReasonsFilled) return
 
     setStatusDateSaving(true)
+    dispatch(beginDraftSave())
+    const submittedLines = reduxStore.getState().projectLines.lines
     // Freeze this attempt before the first await. Later edits stay in Redux.
     const submitted = reduxStore.getState().tasks
     const submittedTasks = submitted.tasks
@@ -1353,12 +1247,14 @@ export default function GanttToolbar({
       let saveBaseTasks = baselineTasks
       let saveBaseDeps = baselineDeps
       let saveBaseStatusDate = baselineStatusDate
+      let saveBaseLines = baselineLines
       if (saveIncomplete) {
         // Earlier requests may have committed even when their replies were lost.
         const persisted = await readPersistedState()
         saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks, attemptedSaveIds.current.taskIds)
         saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies, attemptedSaveIds.current.dependencyIds)
         saveBaseStatusDate = persisted.statusDate
+        saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [], attemptedLineIds.current)
       }
 
       // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
@@ -1492,6 +1388,29 @@ export default function GanttToolbar({
         if (!r.ok) throw new Error(`保存状态日期失败 (${r.status})`)
       }
 
+      // Project lines use client IDs so a lost reply can be retried safely.
+      for (const line of saveBaseLines) {
+        if (submittedLines.some(l => l.id === line.id)) continue
+        attemptedLineIds.current.add(line.id)
+        const r = await authFetch(`/api/project-lines/${projectId}`, {
+          method: 'DELETE', headers: authFetchHeaders(true), body: JSON.stringify({ id: line.id }),
+        })
+        if (!r.ok) throw new Error(`删除项目线失败 (${r.status})`)
+      }
+      const savedLineMap = new Map(submittedLines.map(l => [l.id, l]))
+      for (const line of submittedLines) {
+        const old = saveBaseLines.find(l => l.id === line.id)
+        if (old && linesEqual([old], [line])) continue
+        attemptedLineIds.current.add(line.id)
+        const r = await authFetch(`/api/project-lines/${projectId}`, {
+          method: old ? 'PUT' : 'POST', headers: authFetchHeaders(true), body: JSON.stringify(line),
+        })
+        const d = await r.json()
+        if (!r.ok || !d.ok || !d.value?.id) throw new Error(d.error ?? `保存项目线失败 (${r.status})`)
+        savedLineMap.set(line.id, d.value)
+      }
+      const savedLines = [...savedLineMap.values()]
+
       // 3. 创建版本快照
       const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
         method: 'POST',
@@ -1513,20 +1432,11 @@ export default function GanttToolbar({
       const savedDeps: Dependency[] = snapshotData.value.snapshot.dependencies
       // Rebase on the server-confirmed version while retaining any edits made
       // after this save started. Those edits remain dirty for the next save.
-      const latest = reduxStore.getState().tasks
-      const reconciledTasks = mergeSavedRecords(savedTasks, submittedTasks, latest.tasks)
-      const reconciledDeps = mergeSavedRecords(savedDeps, submittedDeps, latest.dependencies)
-      const pendingDiff = buildSaveDiff(savedTasks, savedDeps, reconciledTasks, reconciledDeps)
-      const pendingTaskIds = [...new Set([
-        ...pendingDiff.tasksToAdd.map(t => t.id),
-        ...pendingDiff.tasksToUpdate.map(t => t.id),
-        ...pendingDiff.tasksToDelete,
-      ])]
-      dispatch(rebaseSavedState({
-        tasks: reconciledTasks,
-        dependencies: reconciledDeps,
-        dirtyIds: pendingTaskIds,
-      }))
+      const confirmedLines = Array.isArray(snapshotData.value.snapshot.lines) ? snapshotData.value.snapshot.lines : savedLines
+      dispatch(finishDraftSave({ tasks: savedTasks, dependencies: savedDeps, statusDate: sd, lines: confirmedLines, descriptions: {} }))
+      setBaselineLines(confirmedLines)
+      attemptedLineIds.current.clear()
+      setReviewOpen(false)
       // 重置基线为已落库的当前状态
       const livingTasks = savedTasks.filter(t => !t.is_deleted)
       setBaseline(livingTasks.map(t => ({
@@ -1548,6 +1458,7 @@ export default function GanttToolbar({
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
         .catch(() => {})
     } catch (err) {
+      dispatch(failDraftSave())
       setSaveIncomplete(true)
       console.error('确认变更保存失败:', err)
       alert(`保存失败：${err instanceof Error ? err.message : String(err)}。请重试，系统会核对已保存的内容。`)
@@ -1557,7 +1468,7 @@ export default function GanttToolbar({
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, baselineStatusDate, saveIncomplete, readPersistedState, reduxStore,
-      snapshotEndForBaseline])
+      snapshotEndForBaseline, baselineLines])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -1565,7 +1476,7 @@ export default function GanttToolbar({
     if (statusDateSaving) return
     setStatusDateSaving(true)
     try {
-      const persisted = saveIncomplete ? await readPersistedState() : null
+      const persisted = saveIncomplete || history.uncertain ? await readPersistedState() : null
       const restoredTasks = (persisted?.tasks ?? baselineTasks).map(t => ({ ...t }))
       const restoredDeps = (persisted?.dependencies ?? baselineDeps).map(d => ({ ...d }))
       const restoredStatusDate = persisted ? persisted.statusDate : baselineStatusDate
@@ -1575,9 +1486,10 @@ export default function GanttToolbar({
         setBaselineDeps(restoredDeps)
         setBaselineStatusDate(restoredStatusDate)
       }
-      dispatch(setTasks({ tasks: restoredTasks, dependencies: restoredDeps }))
-      dispatch(setStatusDate({ projectId, statusDate: restoredStatusDate }))
-      dispatch(clearDirty())
+      const restoredLines = persisted?.lines ?? baselineLines
+      setBaselineLines(restoredLines)
+      dispatch(resetDraft({ tasks: restoredTasks, dependencies: restoredDeps, statusDate: restoredStatusDate, lines: restoredLines, descriptions: {} }))
+      attemptedLineIds.current.clear()
       dispatch(clearComparison())
       dispatch(clearDiffFilter())
       onDiscardChanges?.()
@@ -1591,15 +1503,17 @@ export default function GanttToolbar({
       setStatusDateSaving(false)
     }
   }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId, onDiscardChanges,
-      statusDateSaving, saveIncomplete, readPersistedState])
+      statusDateSaving, saveIncomplete, readPersistedState, baselineLines, history.uncertain])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return
+      if ((document.activeElement as HTMLElement)?.closest('input, textarea, select, [contenteditable=true], [role=dialog]')) return
       if (readOnly) return
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); dispatch(e.shiftKey ? redoDraft() : undoDraft()); return }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); dispatch(redoDraft()); return }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') handleCopy()
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') handlePaste()
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !(document.activeElement as HTMLElement)?.closest('[data-gantt-grid]')) handlePaste()
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault() }
     }
     window.addEventListener('keydown', handler)
@@ -1620,6 +1534,8 @@ export default function GanttToolbar({
 
         {!readOnly && (
           <>
+            <Ic title={`撤销${history.past.at(-1) ? '：' + history.past.at(-1)!.label : ''} (Ctrl+Z)`} disabled={!history.past.length || history.saving || history.uncertain} onClick={() => dispatch(undoDraft())}><IcoUndo /></Ic>
+            <Ic title="重做 (Ctrl+Shift+Z / Ctrl+Y)" disabled={!history.future.length || history.saving || history.uncertain} onClick={() => dispatch(redoDraft())}><IcoRedo /></Ic>
             {/* Group 1: Create + Edit */}
             <Ic title="创建任务" onClick={handleAddTask}><IcoPlus /></Ic>
             <Ic title="编辑任务" disabled={selectedIds.length !== 1}
@@ -1642,12 +1558,19 @@ export default function GanttToolbar({
         {/* Group 4: Zoom + Focus + Indent/Outdent */}
         <Ic title={`放大 (当前: ${colW}px)`} disabled={colW >= zoomMax} onClick={onZoomIn}><IcoZoomIn /></Ic>
         <Ic title={`缩小 (当前: ${colW}px)`} disabled={colW <= zoomMin} onClick={onZoomOut}><IcoZoomOut /></Ic>
+        <button className="border border-gray-300 rounded px-2 h-8 text-xs" onClick={() => onTimelineNavigate?.('all')}>显示全部</button>
+        <button className="border border-gray-300 rounded px-2 h-8 text-xs disabled:opacity-40" disabled={!hasSelection} onClick={() => onTimelineNavigate?.('selection')}>适配所选</button>
+        <button className="border border-gray-300 rounded px-2 h-8 text-xs" onClick={() => onTimelineNavigate?.('status')}>回到状态日期</button>
         <Ic title="聚焦到选中任务" disabled={!hasSelection} onClick={onFocusTask}><IcoFocus /></Ic>
         {!readOnly && <Ic title="升级 (Outdent)" disabled={!hasSelection} onClick={handlePromote}><IcoPrev /></Ic>}
         {!readOnly && <Ic title="降级 (Indent)"  disabled={!hasSelection} onClick={handleDemote}><IcoNext /></Ic>}
 
         {sep}
 
+        <span className="text-xs text-gray-500 whitespace-nowrap">已选 {selectedIds.length} 项</span>
+        {selectedIds.length > 0 && <button className="text-xs text-blue-600" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>}
+        {history.uncertain && <span className="text-xs text-amber-700">上次保存结果待核对，请重试保存或放弃全部更改</span>}
+        {viewControls}
         {/* Search */}
         <div className="flex items-center gap-1 border border-gray-300 rounded px-2 h-8 bg-white">
           <IcoSearch />
@@ -1667,6 +1590,7 @@ export default function GanttToolbar({
           <>
             {sep}
 
+            <button disabled={!hasSelection} onClick={() => setBulkEditOpen(true)} className="border border-gray-300 rounded px-2 h-8 text-[13px] disabled:opacity-40">批量修改</button>
             {/* Secondary: Copy / Paste / Delete */}
             <Ic title="复制 (Ctrl+C)" disabled={!hasSelection} onClick={handleCopy}>
               <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -1735,11 +1659,11 @@ export default function GanttToolbar({
                 <button
                   onClick={handleRefresh}
                   disabled={statusDateSaving}
-                  title="撤销一步本地编辑；栈空后回到数据库的当前状态"
+                  title="放弃全部未确认的草稿，回到最近一次保存状态"
                   className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
                 >
                   <IcoRefresh />
-                  放弃更改
+                  放弃全部更改
                 </button>
               )}
               <button
@@ -2126,6 +2050,7 @@ export default function GanttToolbar({
         <RetroLogPanel projectId={projectId} onClose={() => setRetroLogOpen(false)} />
       )}
 
+      {bulkEditOpen && !readOnly && <BulkEditPanel onClose={() => setBulkEditOpen(false)} />}
       {/* Edit Task Modal */}
       {editModalOpen && selectedIds.length === 1 && (
         <EditTaskModal
@@ -2166,7 +2091,9 @@ export default function GanttToolbar({
                         依赖 {depDiff.added > 0 ? `+${depDiff.added} ` : ''}{depDiff.updated > 0 ? `~${depDiff.updated} ` : ''}{depDiff.removed > 0 ? `-${depDiff.removed}` : ''}
                       </span>
                     )}
-                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total} 项变更</span>
+                    {linesChanged && <span className="text-blue-600">项目线 {lineDiffs.length}</span>}
+                    {statusDateChanged && <span className="text-orange-600">{isMinute ? '状态时间' : '状态日期'}</span>}
+                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total + lineDiffs.length + Number(statusDateChanged)} 项变更</span>
                   </>
                 )
               })()}
@@ -2174,10 +2101,8 @@ export default function GanttToolbar({
 
             {/* Diff list */}
             <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 min-h-0">
-              {changeDiffs.length === 0 && depDiff.total === 0 && (
-                statusDateChanged ? (
-                  <div className="text-center text-gray-600 py-6 text-sm">
-                    仅状态日期变化：
+              {statusDateChanged && <div className="rounded border border-orange-200 bg-orange-50 p-3 text-sm">
+                    {isMinute ? '状态时间' : '状态日期'}：
                     <span className="font-medium text-gray-800">
                       {formatStatusDate(baselineStatusDate) || '(空)'}
                     </span>
@@ -2185,11 +2110,14 @@ export default function GanttToolbar({
                     <span className="font-medium text-blue-700">
                       {formatStatusDate(currentProject?.status_date) || '(空)'}
                     </span>
-                    <div className="text-xs text-gray-400 mt-1">将以当前任务状态创建一个新版本快照</div>
-                  </div>
-                ) : (
+                  </div>}
+              {lineDiffs.map(({ id, before, after }) => <div key={id} className="rounded border border-blue-200 bg-blue-50 p-3 text-sm space-y-1">
+                <div className="font-medium">{before ? after ? '修改' : '删除' : '新增'}项目线：{after?.name ?? before?.name}</div>
+                {before && <div className="text-gray-500">原值：{before.name} · {before.line_date.slice(0, 10)} · {before.color} · {before.visible ? '显示' : '隐藏'}</div>}
+                {after && <div>新值：{after.name} · {after.line_date.slice(0, 10)} · {after.color} · {after.visible ? '显示' : '隐藏'}</div>}
+              </div>)}
+              {changeDiffs.length === 0 && depDiff.total === 0 && !linesChanged && !statusDateChanged && (
                   <div className="text-center text-gray-400 py-8 text-sm">{saveIncomplete ? '上次保存未完成，请再次确认以完成保存' : '没有检测到变更'}</div>
-                )
               )}
               {changeDiffs.map((d, i) => (
                 <div key={`task-${i}`} className={`rounded border px-3 py-2 text-[13px] ${

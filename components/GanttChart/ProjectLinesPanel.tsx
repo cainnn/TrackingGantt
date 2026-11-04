@@ -5,7 +5,8 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   addProjectLine, updateProjectLine, removeProjectLine,
 } from '@/store/slices/projectLinesSlice'
-import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
+import { uuid } from '@/lib/uuid'
+import { labelDraftStep } from '@/store/draftHistory'
 import type { ProjectLine } from '@/types'
 
 const PRESET_COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280']
@@ -13,9 +14,10 @@ const PRESET_COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#
 interface Props {
   projectId: string
   onClose: () => void
+  readOnly?: boolean
 }
 
-export default function ProjectLinesPanel({ projectId, onClose }: Props) {
+export default function ProjectLinesPanel({ projectId, onClose, readOnly = false }: Props) {
   const dispatch = useAppDispatch()
   const lines = useAppSelector(s => s.projectLines.lines)
 
@@ -27,39 +29,26 @@ export default function ProjectLinesPanel({ projectId, onClose }: Props) {
   const [editDate, setEditDate] = useState('')
   const [editColor, setEditColor] = useState('#f59e0b')
 
-  const handleAdd = async () => {
-    if (!newName.trim() || !newDate) return
-    const res = await authFetch(`/api/project-lines/${projectId}`, {
-      method: 'POST',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ name: newName.trim(), line_date: newDate, color: newColor }),
-    })
-    const data = await res.json()
-    if (data.ok) {
-      dispatch(addProjectLine(data.value))
+  const handleAdd = () => {
+    if (readOnly || !newName.trim() || !newDate) return
+      dispatch(labelDraftStep('添加项目线'))
+      dispatch(addProjectLine({ id: uuid(), project_id: projectId, name: newName.trim(), line_date: newDate, color: newColor, visible: true }))
       setNewName('')
       setNewDate('')
       setNewColor('#f59e0b')
-    }
   }
 
   const handleToggleVisible = async (line: ProjectLine) => {
+    if (readOnly) return
+    dispatch(labelDraftStep('切换项目线显示'))
     const newVisible = !line.visible
     dispatch(updateProjectLine({ ...line, visible: newVisible }))
-    await authFetch(`/api/project-lines/${projectId}`, {
-      method: 'PUT',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ id: line.id, visible: newVisible }),
-    })
   }
 
   const handleDelete = async (id: string) => {
+    if (readOnly) return
+    dispatch(labelDraftStep('删除项目线'))
     dispatch(removeProjectLine(id))
-    await authFetch(`/api/project-lines/${projectId}`, {
-      method: 'DELETE',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ id }),
-    })
   }
 
   const startEdit = (line: ProjectLine) => {
@@ -70,17 +59,11 @@ export default function ProjectLinesPanel({ projectId, onClose }: Props) {
   }
 
   const handleSaveEdit = async () => {
-    if (!editId || !editName.trim() || !editDate) return
-    const res = await authFetch(`/api/project-lines/${projectId}`, {
-      method: 'PUT',
-      headers: authFetchHeaders(true),
-      body: JSON.stringify({ id: editId, name: editName.trim(), line_date: editDate, color: editColor }),
-    })
-    const data = await res.json()
-    if (data.ok) {
-      dispatch(updateProjectLine(data.value))
+    const line = lines.find(l => l.id === editId)
+    if (readOnly || !line || !editName.trim() || !editDate) return
+      dispatch(labelDraftStep('编辑项目线'))
+      dispatch(updateProjectLine({ ...line, name: editName.trim(), line_date: editDate, color: editColor }))
       setEditId(null)
-    }
   }
 
   return (
@@ -90,6 +73,8 @@ export default function ProjectLinesPanel({ projectId, onClose }: Props) {
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
       </div>
 
+      <p className="text-xs text-gray-500 mb-2">项目线修改在“确认变更 → 确认并保存”后生效。</p>
+      <fieldset disabled={readOnly}>
       {/* Add new line */}
       <div className="flex items-center gap-2 mb-3">
         <input
@@ -187,6 +172,7 @@ export default function ProjectLinesPanel({ projectId, onClose }: Props) {
           ))}
         </div>
       )}
+      </fieldset>
     </div>
   )
 }
