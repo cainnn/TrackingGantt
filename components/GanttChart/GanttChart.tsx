@@ -26,6 +26,7 @@ import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
 import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
+import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
 import { applyGridPaste, gridCellEditable } from '@/lib/clientGridEdit'
 import type { ChartViewState } from '@/lib/clientViewState'
 
@@ -639,7 +640,7 @@ export default function GanttChart({
   const [dropIdx, setDropIdx] = useState<number|null>(null)
 
   // ── Context menu ────────────────────────────────────────────────────────
-  interface CtxMenu { x: number; y: number; taskId: string; submenu: 'add' | 'delete-dep' | null; subX?: number; subY?: number }
+  interface CtxMenu { x: number; y: number; taskId: string; submenu: 'add' | 'delete-dep' | null }
   const [ctxMenu, setCtxMenu] = useState<CtxMenu|null>(null)
 
   // ── Cell editing ────────────────────────────────────────────────────────
@@ -923,9 +924,6 @@ export default function GanttChart({
     if (minTs === Infinity || maxTs === -Infinity) return null
     return dateToX(new Date(Math.round((minTs + maxTs) / 2)))
   }, [tasks, dateToX])
-  const depLagToDays = useCallback((lag: number | null | undefined) => (
-    (lag ?? 0) / 1440
-  ), [])
   const depLagToInput = useCallback((lag: number | null | undefined) => (
     isMinute ? (lag ?? 0) : Math.round((lag ?? 0) / 1440)
   ), [isMinute])
@@ -1515,15 +1513,7 @@ export default function GanttChart({
             const descendantSet = new Set(descendantIds)
             const effectiveDays = days
 
-            const map: Record<string, Task> = {}
-            const localStart = new Map<string, Date>()
-            const localEnd   = new Map<string, Date>()
-
-            // 初始化所有任务的原始日期
-            tasks.forEach(t => {
-              if (t.start_date) localStart.set(t.id, new Date(t.start_date))
-              if (t.end_date)   localEnd.set(t.id, new Date(t.end_date))
-            })
+            let map: Record<string, Task> = {}
 
             // 平移所有后代
             for (const did of descendantIds) {
@@ -1531,8 +1521,6 @@ export default function GanttChart({
               if (!dt?.start_date || !dt?.end_date) continue
               const s = addDays(new Date(dt.start_date), effectiveDays)
               const e = addDays(new Date(dt.end_date), effectiveDays)
-              localStart.set(did, s)
-              localEnd.set(did, e)
               map[did] = { ...dt, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
             }
 
@@ -1545,42 +1533,7 @@ export default function GanttChart({
                 if (!descendantSet.has(d)) externalDownstream.add(d)
               }
             }
-            const extIds = [...externalDownstream]
-            let changed = true, iter = 0
-            while (changed && iter++ < extIds.length + 1) {
-              changed = false
-              for (const toId of extIds) {
-                const t = tasks.find(x => x.id === toId)
-                if (!t || !t.start_date || !t.end_date) continue
-                const incoming = deps.filter(d => d.active !== false && d.to_task_id === toId)
-                let maxRS: Date | null = null
-                for (const dep of incoming) {
-                  const pS = localStart.get(dep.from_task_id)
-                  const pE = localEnd.get(dep.from_task_id)
-                  if (!pS || !pE) continue
-                  const lag = depLagToDays(dep.lag)
-                  const dt2 = dep.type ?? 2
-                  let rs: Date
-                  if (dt2 === 2)      rs = addDays(pE, lag)
-                  else if (dt2 === 0) rs = addDays(pS, lag)
-                  else if (dt2 === 3) { const dur = diffDays(localStart.get(toId)!, localEnd.get(toId)!); rs = addDays(pE, lag - dur) }
-                  else                { const dur = diffDays(localStart.get(toId)!, localEnd.get(toId)!); rs = addDays(pS, lag - dur) }
-                  if (!maxRS || rs > maxRS) maxRS = rs
-                }
-                if (!maxRS) continue
-                const curS = localStart.get(toId)!
-                if (curS.getTime() === maxRS.getTime()) continue
-                const shift = diffDays(curS, maxRS)
-                const s = addDays(curS, shift)
-                let eNew = addDays(localEnd.get(toId)!, shift)
-                if (t.is_milestone) eNew = s
-                if (eNew < s) eNew = s
-                localStart.set(toId, s)
-                localEnd.set(toId, eNew)
-                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(eNew), duration: diffMins(s, eNew) }
-                changed = true
-              }
-            }
+            map = cascadeDragSuccessors(tasks, deps, map, [...externalDownstream])
 
             // 更新摘要任务日期（包括被拖的摘要任务本身及其祖先）
             const refreshSummary = (pid: string | null) => {
@@ -1619,23 +1572,19 @@ export default function GanttChart({
           } else {
           // ── 普通叶子任务拖动（原有逻辑） ──
           let newStart = drag.origStart, newEnd = drag.origEnd
-          let cascadeDays = days
 
           if (drag.mode === 'move') {
             newStart = addDays(drag.origStart, days)
             newEnd   = addDays(drag.origEnd,   days)
-            cascadeDays = diffDays(drag.origStart, newStart)
           } else if (drag.mode === 'resize-right') {
             const resized = resizeTaskSchedule(orig, 'end', fmtDt(addDays(drag.origEnd, days)), isMinute)
             newEnd = new Date(resized.end_date!)
-            cascadeDays = diffDays(drag.origEnd, newEnd)
           } else if (drag.mode === 'resize-left') {
             const resized = resizeTaskSchedule(orig, 'start', fmtDt(addDays(drag.origStart, days)), isMinute)
             newStart = new Date(resized.start_date!)
-            cascadeDays = 0
           }
 
-          const map: Record<string, Task> = {
+          let map: Record<string, Task> = {
             [orig.id]: {
               ...orig,
               start_date: fmtDt(newStart),
@@ -1644,73 +1593,8 @@ export default function GanttChart({
             },
           }
 
-          // ── 级联更新：迭代式处理所有依赖类型(SS/SF/FS/FF)和传递链 ──
-          const localStart = new Map<string, Date>()
-          const localEnd   = new Map<string, Date>()
-          localStart.set(drag.taskId, newStart)
-          localEnd.set(drag.taskId, newEnd)
-          tasks.forEach(t => {
-            if (t.start_date && !localStart.has(t.id)) localStart.set(t.id, new Date(t.start_date))
-            if (t.end_date && !localEnd.has(t.id))     localEnd.set(t.id, new Date(t.end_date))
-          })
-
-          const downstreamIds = downstreamCache.get(drag.taskId) || []
-          let changed = true, iter = 0
-          while (changed && iter++ < downstreamIds.length + 1) {
-            changed = false
-            for (const toId of downstreamIds) {
-              const t = tasks.find(x => x.id === toId)
-              if (!t || !t.start_date || !t.end_date) continue
-
-              const incoming = deps.filter(d => d.active !== false && d.to_task_id === toId)
-              let maxRequiredStart: Date | null = null
-
-              for (const dep of incoming) {
-                const predStart = localStart.get(dep.from_task_id)
-                const predEnd   = localEnd.get(dep.from_task_id)
-                if (!predStart || !predEnd) continue
-                const lag = depLagToDays(dep.lag)
-                const depType = dep.type ?? 2
-
-                let requiredStart: Date
-                if (depType === 2) {
-                  requiredStart = addDays(predEnd, lag)
-                } else if (depType === 0) {
-                  requiredStart = addDays(predStart, lag)
-                } else if (depType === 3) {
-                  const curS = localStart.get(toId)!
-                  const curE = localEnd.get(toId)!
-                  const dur = diffDays(curS, curE)
-                  requiredStart = addDays(predEnd, lag - dur)
-                } else {
-                  const curS = localStart.get(toId)!
-                  const curE = localEnd.get(toId)!
-                  const dur = diffDays(curS, curE)
-                  requiredStart = addDays(predStart, lag - dur)
-                }
-
-                if (!maxRequiredStart || requiredStart > maxRequiredStart) {
-                  maxRequiredStart = requiredStart
-                }
-              }
-
-              if (!maxRequiredStart) continue
-
-              const curStart = localStart.get(toId)!
-              if (curStart.getTime() === maxRequiredStart.getTime()) continue
-              {
-                const shift = diffDays(curStart, maxRequiredStart)
-                const s = addDays(curStart, shift)
-                let e = addDays(localEnd.get(toId)!, shift)
-                if (t.is_milestone) e = s
-                if (e < s) e = s
-                localStart.set(toId, s)
-                localEnd.set(toId, e)
-                map[toId] = { ...t, start_date: fmtDt(s), end_date: fmtDt(e), duration: diffMins(s, e) }
-                changed = true
-              }
-            }
-          }
+          // 自动后继跟随依赖；手动后继保持当前已确认或草稿中的日期。
+          map = cascadeDragSuccessors(tasks, deps, map, downstreamCache.get(drag.taskId) ?? [])
 
           // ── 更新摘要任务（父任务）日期范围 ──
           const affectedParents = new Set<string>()
@@ -1799,7 +1683,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, depLagToDays, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
+  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1852,8 +1736,8 @@ export default function GanttChart({
           // ── 摘要任务拖动提交：只提交非摘要后代 + 外部级联任务（服务端自动重算摘要日期）
           dirtyList = finalPreview.filter(t => !summarySet.has(t.id))
         } else if (finalPreview.length > 0 && !isSummaryDrag) {
-          // ── 普通叶子任务拖动：保存预览中的整条后续链。
-          // 手动任务不参与服务端自动级联，因此这里必须把被带动的手动后继一起提交。
+          // ── 普通叶子任务拖动：暂存直接编辑与自动后继的预览。
+          // 手动后继不参与依赖级联，只有显式选中平移时才会更新。
           const draggedTask = tasks.find(t => t.id === drag.taskId)
           if (draggedTask && draggedTask.auto_schedule !== false) {
             const dragged = finalPreview.find(t => t.id === drag.taskId)
@@ -4632,14 +4516,13 @@ export default function GanttChart({
 
         const Sep = () => <div className="my-1 border-t border-gray-100" />
 
-        const Row = ({ icon, label, onClick, disabled = false, danger = false, sub = false }: {
+        const Row = ({ icon, label, onClick, disabled = false, danger = false }: {
           icon: React.ReactNode; label: string; onClick?: () => void
-          disabled?: boolean; danger?: boolean; sub?: boolean
+          disabled?: boolean; danger?: boolean
         }) => (
           <button
             disabled={disabled}
             onClick={!disabled ? onClick : undefined}
-            onMouseEnter={() => !sub && setCtxMenu(p => p ? { ...p, submenu: null } : null)}
             className={`w-full flex items-center gap-3 px-4 py-[7px] text-[13px] whitespace-nowrap transition-colors
               ${disabled
                 ? 'text-gray-300 cursor-default'
@@ -4663,21 +4546,14 @@ export default function GanttChart({
         }
 
         const SubRow = ({ icon, label, sub }: { icon: React.ReactNode; label: string; sub: 'add' | 'delete-dep' }) => (
-          <div className="relative"
-               onMouseEnter={(e) => {
-                 const rect = e.currentTarget.getBoundingClientRect()
-                 const subMenuW = 200
-                 const x = rect.right + subMenuW > window.innerWidth ? rect.left - subMenuW : rect.right
-                 setCtxMenu(p => p ? { ...p, submenu: sub, subX: x, subY: rect.top } : null)
-               }}>
-            <button className="w-full flex items-center gap-3 px-4 py-[7px] text-[13px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 cursor-pointer whitespace-nowrap transition-colors">
+            <button onClick={() => setCtxMenu(p => p ? { ...p, submenu: sub } : null)}
+                    className="w-full flex items-center gap-3 px-4 py-[7px] text-[13px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 cursor-pointer whitespace-nowrap transition-colors">
               <span className="w-4 flex-none flex items-center justify-center opacity-70">{icon}</span>
               <span className="flex-1 text-left">{label}</span>
               <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" className="flex-none text-gray-400">
                 <path d="M6 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
             </button>
-          </div>
         )
 
         // Icons
@@ -4694,10 +4570,38 @@ export default function GanttChart({
 
         return (
           <div
+            data-task-context-menu
+            aria-label={ctxMenu.submenu === 'add' ? '新增任务菜单' : ctxMenu.submenu === 'delete-dep' ? '删除依赖菜单' : '任务操作菜单'}
             className="fixed z-50 bg-white border border-gray-200 rounded-lg shadow-2xl py-1.5 text-[13px] select-none overflow-y-auto"
-            style={{ left, top, minWidth: 220, maxHeight: `calc(100vh - ${pad * 2}px)` }}
+            style={{ left, top, width: menuW, maxWidth: `calc(100vw - ${pad * 2}px)`, maxHeight: `calc(100vh - ${pad * 2}px)` }}
             onClick={e => e.stopPropagation()}
           >
+            {ctxMenu.submenu ? <>
+              <button className="w-full flex items-center gap-2 px-4 py-[7px] text-gray-600 hover:bg-blue-50 hover:text-blue-700"
+                      onClick={() => setCtxMenu(p => p ? { ...p, submenu: null } : null)}>
+                <span aria-hidden>←</span> 返回任务操作
+              </button>
+              <Sep />
+              {ctxMenu.submenu === 'add' && ([
+                ['上方插入任务', () => handleCtxAddAbove(ctxMenu.taskId)],
+                ['下方插入任务', () => handleCtxAddBelow(ctxMenu.taskId)],
+                ['添加里程碑', () => handleCtxAddMilestone(ctxMenu.taskId)],
+                ['添加子任务', () => handleCtxAddSubtask(ctxMenu.taskId)],
+                ['添加后续任务', () => handleCtxAddSuccessor(ctxMenu.taskId)],
+                ['添加前置任务', () => handleCtxAddPredecessor(ctxMenu.taskId)],
+              ] as [string, () => void][]).map(([label, onClick]) => (
+                <button key={label} className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 whitespace-nowrap"
+                        onClick={onClick}>{label}</button>
+              ))}
+              {ctxMenu.submenu === 'delete-dep' && taskDeps.map(dep => {
+                const from = tasks.find(t => t.id === dep.from_task_id)
+                const to = tasks.find(t => t.id === dep.to_task_id)
+                const label = `${from?.name ?? '?'} → ${to?.name ?? '?'}`
+                return <button key={dep.id} title={label}
+                               className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-red-50 hover:text-red-600 truncate"
+                               onClick={() => handleCtxDeleteDep(dep.id)}>{label}</button>
+              })}
+            </> : <>
             {/* Group 1: Edit / Copy selected tasks relative to this task */}
             <Row icon={IcoEdit}  label="编辑"  onClick={() => handleCtxEdit(ctxMenu.taskId)} />
             <Row icon={IcoCopy} label="复制选中任务到上方" onClick={() => handleCtxCopyTo(ctxMenu.taskId, 'before')} disabled={!canCopySelection} />
@@ -4740,7 +4644,7 @@ export default function GanttChart({
               : hasDeps
                 ? <SubRow icon={IcoUnlink} label="删除依赖关系" sub="delete-dep" />
                 : <Row    icon={IcoUnlink} label="删除依赖关系" disabled />}
-
+            </>}
           </div>
         )
       })()}
@@ -4754,35 +4658,6 @@ export default function GanttChart({
           <div className="text-gray-800 whitespace-pre-wrap break-words">{reasonPopup.reason}</div>
         </div>,
         document.body,
-      )}
-
-      {/* ── Context submenu (portal) ─────────────────────────────────── */}
-      {ctxMenu?.submenu && ctxMenu.subX != null && ctxMenu.subY != null && ReactDOM.createPortal(
-        <div className="fixed bg-white border border-gray-200 rounded-lg shadow-2xl py-1 text-[13px] overflow-y-auto z-[60]"
-             style={{ minWidth: 180, maxHeight: 320, left: ctxMenu.subX, top: ctxMenu.subY }}
-             onClick={e => e.stopPropagation()}>
-          {ctxMenu.submenu === 'add' && ([
-            ['上方插入任务',  () => handleCtxAddAbove(ctxMenu.taskId)],
-            ['下方插入任务',  () => handleCtxAddBelow(ctxMenu.taskId)],
-            ['添加里程碑',   () => handleCtxAddMilestone(ctxMenu.taskId)],
-            ['添加子任务',   () => handleCtxAddSubtask(ctxMenu.taskId)],
-            ['添加后续任务', () => handleCtxAddSuccessor(ctxMenu.taskId)],
-            ['添加前置任务', () => handleCtxAddPredecessor(ctxMenu.taskId)],
-          ] as [string, () => void][]).map(([lbl, fn]) => (
-            <button key={lbl} className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-blue-50 hover:text-blue-700 whitespace-nowrap" onClick={fn}>{lbl}</button>
-          ))}
-          {ctxMenu.submenu === 'delete-dep' && deps.filter(d => d.from_task_id === ctxMenu.taskId || d.to_task_id === ctxMenu.taskId).map(dep => {
-            const from = tasks.find(t => t.id === dep.from_task_id)
-            const to   = tasks.find(t => t.id === dep.to_task_id)
-            return (
-              <button key={dep.id} className="w-full text-left px-4 py-[7px] text-gray-700 hover:bg-red-50 hover:text-red-600 whitespace-nowrap truncate max-w-[220px]"
-                      onClick={() => handleCtxDeleteDep(dep.id)}>
-                {from?.name ?? '?'} → {to?.name ?? '?'}
-              </button>
-            )
-          })}
-        </div>,
-        document.body
       )}
 
       {/* ── Predecessor popup ────────────────────────────────────────── */}
