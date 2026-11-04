@@ -36,6 +36,7 @@ function task(name, index = 0) {
   };
 }
 async function seedVersion(p) {
+  await api(`/projects/${p.id}`, 'PUT', { planning_status: 'stable' });
   await api(`/versions/${p.id}`, 'POST', { use_database_snapshot: true, status_date: p.status_date }, 201);
 }
 async function taskState(p) { return api(`/tasks/${p.id}`); }
@@ -109,11 +110,18 @@ async function main() {
   console.log('Test fixture prefix:', prefix);
   token = (await api('/auth/login', 'POST', { login: rootLogin, password: rootPassword })).token;
   const p = await project('API');
+  assert.equal(p.planning_status, 'draft');
+  await api(`/projects/${p.id}`, 'PUT', { planning_status: 'invalid' }, 400);
+  await api(`/projects/${p.id}`, 'PUT', { planning_status: null }, 400);
+  await api(`/versions/${p.id}`, 'POST', { use_database_snapshot: true, status_date: p.status_date }, 409);
+  await api(`/versions/${p.id}`, 'POST', { is_autosave: true }, 409);
   const a = task('API-A'), b = task('API-B', 1);
   await Promise.all([api(`/tasks/${p.id}`, 'POST', [a, b], 201), api(`/tasks/${p.id}`, 'POST', [a, b], 201)]);
   const repeated = await api(`/tasks/${p.id}`, 'POST', [a, b], 201);
   assert.deepEqual(repeated.map(t => t.id), [a.id, b.id]);
   assert.equal((await taskState(p)).tasks.length, 2);
+  assert.equal((await api(`/versions/${p.id}?list=1`)).length, 0);
+  assert.equal((await api(`/projects/${p.id}`)).planning_status, 'draft');
   assert.equal((await api(`/tasks/${p.id}/${a.id}`)).lifecycle.filter(e => e.event_type === 'created').length, 1);
   const dep = { id: randomUUID(), from_task_id: a.id, to_task_id: b.id, type: 2, lag: 0, active: true };
   const concurrent = await Promise.all([api(`/dependencies/${p.id}`, 'POST', dep, 201), api(`/dependencies/${p.id}`, 'POST', dep, 201)]);
@@ -125,6 +133,14 @@ async function main() {
   await api(`/dependencies/${foreign.id}`, 'POST', dep, 409);
   await api(`/dependencies/${p.id}`, 'POST', { ...dep, from_task_id: b.id, to_task_id: a.id }, 409);
   assert.equal((await taskState(foreign)).tasks.length, 0);
+  const imported = await api(`/import/${foreign.id}`, 'POST', {
+    mode: 'replace', dependencies: [], tasks: [{
+      ...task('草稿导入'), task_code: '1', level: 1, parent_task_code: '',
+      assignee: null, is_milestone: false, auto_schedule: false, note: null,
+    }],
+  });
+  assert.equal(imported.version, null);
+  assert.equal((await api(`/versions/${foreign.id}?list=1`)).length, 0);
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { name: `${p.name}-renamed` })).status_date, p.status_date);
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { start_date: '2026-10-02' })).status_date, p.status_date);
   assert.equal((await api(`/projects/${p.id}`, 'PUT', { status_date: null })).status_date, null);
@@ -132,11 +148,22 @@ async function main() {
   await Promise.all([api(`/project-lines/${p.id}`, 'POST', line, 201), api(`/project-lines/${p.id}`, 'POST', line, 201)]);
   assert.equal((await api(`/project-lines/${p.id}`)).filter(l => l.id === line.id).length, 1);
   await api(`/project-lines/${foreign.id}`, 'POST', line, 404);
+  assert.equal((await api(`/projects/${p.id}`, 'PUT', { planning_status: 'stable' })).planning_status, 'stable');
   const lineVersion = await api(`/versions/${p.id}`, 'POST', { use_database_snapshot: true, include_snapshot: true, status_date: '2026-10-19' }, 201);
   assert.equal(lineVersion.snapshot.lines.find(l => l.id === line.id).name, line.name);
+  assert.equal(lineVersion.snapshot.planning_status, 'stable');
+  const copied = await api('/projects', 'POST', { name: `${prefix}复制计划`, copy_from: p.id }, 201);
+  projects.push(copied.id);
+  assert.equal(copied.planning_status, 'draft');
+  await api(`/projects/${p.id}`, 'PUT', { planning_status: 'draft' });
+  await api(`/versions/${p.id}`, 'POST', { use_database_snapshot: true }, 409);
+  assert.equal((await api(`/versions/${p.id}?list=1`)).length, 1);
   await api(`/project-lines/${p.id}`, 'PUT', { ...line, name: '后续改名' });
   await api(`/versions/${p.id}/restore`, 'POST', { id: lineVersion.id });
   assert.equal((await api(`/project-lines/${p.id}`)).find(l => l.id === line.id).name, line.name);
+  assert.equal((await api(`/projects/${p.id}`)).planning_status, 'stable');
+  assert.equal((await api(`/projects/${p.id}`, 'PUT', { name: `${p.name}-stable` })).planning_status, 'stable');
+  console.log('PASS API: new/copied plans default to draft; draft edits create no versions; stable state persists in snapshots and restores');
   console.log('PASS API: replay/concurrent create, single lifecycle event, project ID isolation, and status date preservation/explicit clearing');
   console.log('PASS API: project-line IDs are idempotent and project-isolated; confirmed snapshots restore project lines');
   if (process.argv.includes('--api-only')) return;

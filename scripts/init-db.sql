@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS projects (
   end_date DATE,
   status_date DATE,
   time_granularity VARCHAR(10) DEFAULT 'day',  -- 'day' | 'minute'，创建时固定
+  planning_status VARCHAR(10) NOT NULL DEFAULT 'draft' CHECK (planning_status IN ('draft', 'stable')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

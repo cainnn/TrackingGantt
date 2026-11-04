@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
+import { isPlanningStatus } from '@/lib/planningStatus'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -26,25 +27,30 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const { id } = await params
 
   const body = await req.json()
-  const { name, start_date, end_date, status_date } = body as {
+  const { name, start_date, end_date, status_date, planning_status } = body as {
     name?: string
     start_date?: string | null
     end_date?: string | null
     status_date?: string | null
+    planning_status?: unknown
+  }
+  if (Object.hasOwn(body, 'planning_status') && !isPlanningStatus(planning_status)) {
+    return NextResponse.json(failure('计划状态必须是草稿态或稳定态', 400), { status: 400 })
   }
 
   if (!isUuid(id)) return NextResponse.json(failure('Project not found', 404), { status: 404 })
-  const access = projectAccessSql(auth.value, 7)
+  const access = projectAccessSql(auth.value, 8)
   const result = await pool.query(
     `UPDATE projects p
      SET name = COALESCE($1, name),
          start_date = COALESCE($2, start_date),
          end_date = COALESCE($3, end_date),
-         status_date = CASE WHEN $4::boolean THEN $5::timestamp ELSE status_date END
+         status_date = CASE WHEN $4::boolean THEN $5::timestamp ELSE status_date END,
+         planning_status = COALESCE($7, planning_status)
      WHERE p.id = $6 AND (${access.sql})
      RETURNING *`,
     [name ?? null, start_date ?? null, end_date ?? null,
-     Object.hasOwn(body, 'status_date'), status_date ?? null, id, ...access.values]
+     Object.hasOwn(body, 'status_date'), status_date ?? null, id, planning_status ?? null, ...access.values]
   )
   if (result.rows.length === 0) {
     return NextResponse.json(failure('Project not found', 404), { status: 404 })

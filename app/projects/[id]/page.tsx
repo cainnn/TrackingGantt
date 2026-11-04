@@ -9,6 +9,7 @@ import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slic
 import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
 import { toDateTimeStr } from '@/lib/clientTime'
 import type { SaveBaseline } from '@/lib/clientSave'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
@@ -158,7 +159,7 @@ export default function ProjectPage() {
       if (!projectData.ok || !taskData.ok || !versionsData.ok || !linesData.ok) throw new Error('恢复已提交，但重新加载失败，请刷新核对')
       const baseline = {
         tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
-        statusDate: toDateTimeStr(projectData.value.status_date), lines: linesData.value,
+        statusDate: toDateTimeStr(projectData.value.status_date), planningStatus: normalizePlanningStatus(projectData.value.planning_status), lines: linesData.value,
       }
       dispatch(setCurrentProject(projectData.value))
       dispatch(resetDraft({ ...baseline, descriptions: {} }))
@@ -239,6 +240,7 @@ export default function ProjectPage() {
             projectId,
             tasks: tr.value.tasks,
             dependencies: loadedDeps,
+            planningStatus: normalizePlanningStatus(pr.value.planning_status),
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value,
           })
         }
@@ -246,6 +248,7 @@ export default function ProjectPage() {
           dispatch(setProjectLines(plr.value))
           dispatch(initializeDraft({ projectId, baseline: {
             tasks: tr.value.tasks, dependencies: tr.value.dependencies,
+            planningStatus: normalizePlanningStatus(pr.value.planning_status),
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value, descriptions: {},
           } }))
         }

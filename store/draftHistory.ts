@@ -4,14 +4,16 @@ import project from './slices/projectSlice'
 import tasks from './slices/tasksSlice'
 import projectLines from './slices/projectLinesSlice'
 import versions from './slices/versionsSlice'
-import type { Task, Dependency, ProjectLine } from '../types'
+import type { Task, Dependency, ProjectLine, PlanningStatus } from '../types'
 import { buildSaveDiff, hasAnyDiff, mergeSavedRecords } from '../lib/clientSave'
 import { toDateTimeStr } from '../lib/clientTime'
+import { normalizePlanningStatus } from '../lib/planningStatus'
 
 export interface DraftSnapshot {
   tasks: Task[]
   dependencies: Dependency[]
   statusDate: string | null
+  planningStatus?: PlanningStatus
   lines: ProjectLine[]
   descriptions: Record<string, string>
 }
@@ -46,6 +48,7 @@ export function snapshotDraft(state: DraftRootState): DraftSnapshot {
   return {
     tasks: state.tasks.tasks, dependencies: state.tasks.dependencies,
     statusDate: toDateTimeStr(state.project.currentProject?.status_date ?? null),
+    planningStatus: normalizePlanningStatus(state.project.currentProject?.planning_status),
     lines: state.projectLines.lines, descriptions: state.tasks.editDescriptions,
   }
 }
@@ -57,6 +60,7 @@ export function linesEqual(a: ProjectLine[], b: ProjectLine[]): boolean {
 }
 export function draftsEqual(a: DraftSnapshot, b: DraftSnapshot): boolean {
   return toDateTimeStr(a.statusDate) === toDateTimeStr(b.statusDate)
+    && normalizePlanningStatus(a.planningStatus) === normalizePlanningStatus(b.planningStatus)
     && linesEqual(a.lines, b.lines)
     && !hasAnyDiff(buildSaveDiff(a.tasks, a.dependencies, b.tasks, b.dependencies))
 }
@@ -75,8 +79,8 @@ function restore(state: DraftRootState, value: DraftSnapshot): DraftRootState {
     },
     projectLines: { ...state.projectLines, lines: value.lines },
     project: { ...state.project,
-      currentProject: state.project.currentProject ? { ...state.project.currentProject, status_date: value.statusDate } : null,
-      projects: state.project.projects.map(p => p.id === state.draft.projectId ? { ...p, status_date: value.statusDate } : p),
+      currentProject: state.project.currentProject ? { ...state.project.currentProject, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus) } : null,
+      projects: state.project.projects.map(p => p.id === state.draft.projectId ? { ...p, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus) } : p),
     },
   }
 }
@@ -86,6 +90,8 @@ function rebase(saved: DraftSnapshot, submitted: DraftSnapshot, current: DraftSn
     dependencies: mergeSavedRecords(saved.dependencies, submitted.dependencies, current.dependencies),
     lines: mergeSavedRecords(saved.lines, submitted.lines, current.lines),
     statusDate: toDateTimeStr(current.statusDate) === toDateTimeStr(submitted.statusDate) ? saved.statusDate : current.statusDate,
+    planningStatus: normalizePlanningStatus(current.planningStatus) === normalizePlanningStatus(submitted.planningStatus)
+      ? normalizePlanningStatus(saved.planningStatus) : normalizePlanningStatus(current.planningStatus),
     descriptions: Object.fromEntries(Object.entries(current.descriptions).filter(([id, text]) => submitted.descriptions[id] !== text)),
   }
 }
@@ -147,7 +153,7 @@ export function rootReducer(state: DraftRootState | undefined, action: UnknownAc
 const mutations = new Set([
   'tasks/setTasks', 'tasks/addTasks', 'tasks/updateTasks', 'tasks/deleteTasks',
   'tasks/addDependency', 'tasks/removeDependency', 'tasks/updateDependency',
-  'project/setStatusDate', 'projectLines/setProjectLines', 'projectLines/addProjectLine',
+  'project/setStatusDate', 'project/setPlanningStatus', 'projectLines/setProjectLines', 'projectLines/addProjectLine',
   'projectLines/updateProjectLine', 'projectLines/removeProjectLine',
 ])
 export const createDraftMiddleware = (): Middleware<{}, DraftRootState> => api => {

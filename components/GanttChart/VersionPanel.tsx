@@ -4,7 +4,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
 import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter, setViewSnapshot } from '@/store/slices/tasksSlice'
-import { setStatusDate } from '@/store/slices/projectSlice'
+import { setStatusDate, setPlanningStatus } from '@/store/slices/projectSlice'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { labelDraftStep, hasDraftChanges } from '@/store/draftHistory'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
@@ -64,6 +65,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
   const { tasks, dependencies, comparison, diffFilter } = useAppSelector(s => s.tasks)
   const currentProject = useAppSelector(s => s.project.currentProject)
   const isMinute = currentProject?.time_granularity === 'minute'
+  const canCreateVersions = normalizePlanningStatus(currentProject?.planning_status) === 'stable'
   const formatStatusDate = useCallback((value?: string | null) => {
     if (!value) return ''
     const s = String(value)
@@ -136,7 +138,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
 
   // 创建快照
   const handleCreate = useCallback(async () => {
-    if (saving || readOnly || draftChanged || historyBusy) return false
+    if (saving || readOnly || draftChanged || historyBusy || !canCreateVersions) return false
     setSaving(true)
     try {
       const res = await authFetch(`/api/versions/${projectId}`, {
@@ -163,7 +165,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       alert('网络错误')
     } finally { setSaving(false) }
     return false
-  }, [projectId, currentProject, newName, newDesc, saving, readOnly, draftChanged, historyBusy, dispatch])
+  }, [projectId, currentProject, newName, newDesc, saving, readOnly, draftChanged, historyBusy, canCreateVersions, dispatch])
 
   // 重命名
   const handleRename = useCallback(async (v: ProjectVersion) => {
@@ -220,6 +222,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
         lines: snap.lines,
+        planningStatus: normalizePlanningStatus(snap.planning_status),
         versionId: v.id,
         versionName,
       }))
@@ -245,6 +248,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
       }))
       dispatch(setStatusDate({ projectId, statusDate: v.status_date }))
+      dispatch(setPlanningStatus({ projectId, planningStatus: normalizePlanningStatus(snap.planning_status) }))
       if (Array.isArray(snap.lines)) dispatch(setProjectLines(snap.lines))
       alert(`已加载「${v.name}」到本地。点"确认变更 → 确认并保存"后入库。`)
     } catch {
@@ -420,7 +424,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                 />
                 显示自动保存
               </label>
-              {!readOnly && <button
+              {!readOnly && canCreateVersions && <button
                 disabled={saving || historyBusy}
                 onClick={() => setShowCreate(v => !v)}
                 className="text-[12px] text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
@@ -470,7 +474,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       {activeTab === 'versions' && (
         <>
           {/* Create form */}
-          {showCreate && (
+          {showCreate && canCreateVersions && (
             <div className="px-4 py-3 border-b border-gray-100 bg-blue-50/50">
               <input
                 type="text"
@@ -505,12 +509,12 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
           )}
 
           {/* Version list */}
-          <div className="overflow-y-auto" style={{ maxHeight: showCreate ? 330 : 430 }}>
+          <div className="overflow-y-auto" style={{ maxHeight: showCreate && canCreateVersions ? 330 : 430 }}>
             {loading && (
               <div className="py-8 text-center text-[12px] text-gray-400">加载中...</div>
             )}
             {!loading && versions.length === 0 && (
-              <div className="py-8 text-center text-[12px] text-gray-400">暂无快照版本</div>
+              <div className="py-8 text-center text-[12px] text-gray-400">{canCreateVersions ? '暂无快照版本' : '草稿态只保存当前计划，不生成历史版本'}</div>
             )}
             {!loading && versions.filter(v => showAutosave || !v.is_autosave).map(v => (
               <div key={v.id} className={`border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors ${v.is_autosave ? 'bg-gray-50/60' : ''}`}>

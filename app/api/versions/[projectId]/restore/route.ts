@@ -4,6 +4,7 @@ import type { PoolClient } from 'pg'
 import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -198,9 +199,9 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     await client.query(
       `UPDATE projects
-       SET status_date = $1, updated_at = NOW()
+       SET status_date = $1, planning_status = $3, updated_at = NOW()
        WHERE id = $2`,
-      [version.status_date ?? null, projectId],
+      [version.status_date ?? null, projectId, normalizePlanningStatus(version.snapshot?.planning_status)],
     )
 
     const [tasksRes, depsRes] = await Promise.all([
@@ -226,6 +227,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       snapshot: {
         tasks: tasksRes.rows,
         dependencies: depsRes.rows,
+        planning_status: normalizePlanningStatus(version.snapshot?.planning_status),
       },
       deleted_later_versions: true,
     }))

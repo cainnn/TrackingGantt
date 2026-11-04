@@ -7,6 +7,7 @@ export interface User {
 }
 
 export type TimeGranularity = 'day' | 'minute'
+export type PlanningStatus = 'draft' | 'stable'
 
 export interface Project {
   id: string
@@ -16,6 +17,7 @@ export interface Project {
   end_date: string | null
   status_date: string | null
   time_granularity?: TimeGranularity  // 'day' 或 'minute'，创建时固定
+  planning_status?: PlanningStatus
   created_at: string
   progress?: number
   estimated_end_date?: string | null

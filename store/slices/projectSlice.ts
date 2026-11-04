@@ -1,5 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
-import type { Project } from '@/types'
+import type { Project, PlanningStatus } from '@/types'
 
 interface ProjectState {
   projects: Project[]
@@ -47,6 +47,12 @@ const projectSlice = createSlice({
         state.currentProject.status_date = statusDate
       }
     },
+    setPlanningStatus(state, action: PayloadAction<{ projectId: string; planningStatus: PlanningStatus }>) {
+      const { projectId, planningStatus } = action.payload
+      const project = state.projects.find(p => p.id === projectId)
+      if (project) project.planning_status = planningStatus
+      if (state.currentProject?.id === projectId) state.currentProject.planning_status = planningStatus
+    },
     setLoading(state, action: PayloadAction<boolean>) {
       state.loading = action.payload
     },
@@ -58,6 +64,6 @@ const projectSlice = createSlice({
 
 export const {
   setProjects, addProject, updateProject, deleteProject,
-  setCurrentProject, setStatusDate, setLoading, setError,
+  setCurrentProject, setStatusDate, setPlanningStatus, setLoading, setError,
 } = projectSlice.actions
 export default projectSlice.reducer

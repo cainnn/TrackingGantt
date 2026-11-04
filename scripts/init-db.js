@@ -54,6 +54,7 @@ async function initDatabase() {
     console.log('正在执行SQL脚本...');
     await client.query(sql);
     await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-memberships.sql'), 'utf8'));
+    await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-planning-status.sql'), 'utf8'));
     console.log('✓ 数据库初始化完成');
 
     // 显示测试数据

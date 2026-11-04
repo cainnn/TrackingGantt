@@ -4,6 +4,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -68,10 +69,14 @@ export async function POST(req: NextRequest, { params }: Params) {
     const statusDate: string | null = isAutosave ? null : (body.status_date ?? null)
     const description: string | null = body.description ?? null
     const projectRes = await client.query(
-      'SELECT time_granularity FROM projects WHERE id = $1',
+      'SELECT time_granularity, planning_status FROM projects WHERE id = $1',
       [projectId],
     )
     const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
+    if (normalizePlanningStatus(projectRes.rows[0]?.planning_status) === 'draft') {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('草稿态不创建历史版本，请先切换为稳定态', 409), { status: 409 })
+    }
 
     const lastRes = await client.query(
       `SELECT id, version_number, status_date, snapshot FROM project_versions
@@ -105,7 +110,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
 
     const linesResult = await client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId])
-    const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: linesResult.rows }
+    const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: linesResult.rows,
+      planning_status: normalizePlanningStatus(projectRes.rows[0]?.planning_status) }
 
     // 计算与上一版本的差异
     let changes = null

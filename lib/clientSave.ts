@@ -1,9 +1,9 @@
 /**
  * 客户端保存：对比 baseline 与当前 Redux 状态，生成需要发送给服务端的批量操作。
  *
- * 用于 "保存版本" 流程：先将所有本地编辑落库，然后创建版本快照。
+ * 用于 "确认变更" 流程：先保存当前计划；稳定态再创建版本快照。
  */
-import type { Task, Dependency, ProjectLine } from '@/types'
+import type { Task, Dependency, ProjectLine, PlanningStatus } from '@/types'
 import { toDateTimeStr } from './clientTime'
 import { normalizeDurationMinutes } from './taskNumbers'
 
@@ -58,6 +58,7 @@ export interface SaveBaseline {
   tasks: Task[]
   dependencies: Dependency[]
   statusDate: string | null
+  planningStatus?: PlanningStatus
   lines?: ProjectLine[]
 }
 

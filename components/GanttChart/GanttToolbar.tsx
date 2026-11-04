@@ -10,7 +10,8 @@ import {
   setSelectedIds, setTasks,
   markDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
-import { setStatusDate } from '@/store/slices/projectSlice'
+import { setStatusDate, setPlanningStatus } from '@/store/slices/projectSlice'
+import { normalizePlanningStatus, planningStatusLabel, changeReasonsComplete } from '@/lib/planningStatus'
 import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task } from '@/types'
 import EditTaskModal from './EditTaskModal'
@@ -299,6 +300,7 @@ export default function GanttToolbar({
           tasks: Array.isArray(d.value.snapshot.tasks) ? d.value.snapshot.tasks : [],
           dependencies: Array.isArray(d.value.snapshot.dependencies) ? d.value.snapshot.dependencies : [],
           lines: d.value.snapshot.lines,
+          planningStatus: normalizePlanningStatus(d.value.snapshot.planning_status),
           versionId: v.id,
           versionName: versionLabel(v),
         }))
@@ -315,6 +317,11 @@ export default function GanttToolbar({
   const [baselineDeps, setBaselineDeps] = useState<Dependency[]>(() => initialBaseline.dependencies.map(d => ({ ...d })))
   // 状态日期同样进入"待确认"流程：捕获原始值，确认变更时落库，放弃更改时回滚。
   const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(initialBaseline.statusDate)
+  const [baselinePlanningStatus, setBaselinePlanningStatus] = useState(() => normalizePlanningStatus(initialBaseline.planningStatus))
+  const planningStatus = normalizePlanningStatus(currentProject?.planning_status)
+  const displayedPlanningStatus = viewSnapshot ? normalizePlanningStatus(viewSnapshot.planningStatus) : planningStatus
+  const reasonsRequired = planningStatus === 'stable'
+  const planningStatusChanged = planningStatus !== baselinePlanningStatus
   const [baselineLines, setBaselineLines] = useState(initialBaseline.lines ?? [])
   const attemptedLineIds = useRef(new Set<string>())
   const [saveIncomplete, setSaveIncomplete] = useState(false)
@@ -578,9 +585,9 @@ export default function GanttToolbar({
   }, [])
   // 有任意变更（任务/依赖/状态日期）即视为可提交；
   // 任务变更里所有主动项需要填理由，纯状态日期变更不需要理由。
-  const allReasonsFilled = hasChanges &&
-    changeDiffs.every(d => !requiredReasonCodes.has(d.task_code) || (reasons[d.task_code] ?? '').trim().length > 0) &&
-    depDiff.items.every(d => (dependencyReasons[d.id] ?? '').trim().length > 0)
+  const allReasonsFilled = hasChanges && changeReasonsComplete(
+    planningStatus, requiredReasonCodes, depDiff.items.map(d => d.id), reasons, dependencyReasons,
+  )
 
   // Opening a project only reads versions; the first version is created by confirmation.
   useEffect(() => {
@@ -1219,6 +1226,7 @@ export default function GanttToolbar({
     return {
       tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
       statusDate: toDateTimeStr(projectData.value.status_date ?? null), lines: lineData.value,
+      planningStatus: normalizePlanningStatus(projectData.value.planning_status),
     }
   }, [projectId])
 
@@ -1231,10 +1239,11 @@ export default function GanttToolbar({
     dispatch(setStatusDate({ projectId, statusDate: val }))
   }, [dispatch, projectId, normalizeStatusDate])
 
-  // 确认变更：批量落库本地编辑 + 重算完成度 + 创建版本快照
+  // 确认变更：保存当前计划；稳定态同时重算完成度并创建版本快照。
   const handleConfirmChanges = useCallback(async () => {
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
-    if (!sd || statusDateSaving || !allReasonsFilled) return
+    const createVersion = normalizePlanningStatus(currentProject?.planning_status) === 'stable'
+    if ((createVersion && !sd) || statusDateSaving || !allReasonsFilled) return
 
     setStatusDateSaving(true)
     dispatch(beginDraftSave())
@@ -1243,10 +1252,12 @@ export default function GanttToolbar({
     const submitted = reduxStore.getState().tasks
     const submittedTasks = submitted.tasks
     const submittedDeps = submitted.dependencies
+    const submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
     try {
       let saveBaseTasks = baselineTasks
       let saveBaseDeps = baselineDeps
       let saveBaseStatusDate = baselineStatusDate
+      let saveBasePlanningStatus = baselinePlanningStatus
       let saveBaseLines = baselineLines
       if (saveIncomplete) {
         // Earlier requests may have committed even when their replies were lost.
@@ -1254,14 +1265,15 @@ export default function GanttToolbar({
         saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks, attemptedSaveIds.current.taskIds)
         saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies, attemptedSaveIds.current.dependencyIds)
         saveBaseStatusDate = persisted.statusDate
+        saveBasePlanningStatus = normalizePlanningStatus(persisted.planningStatus)
         saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [], attemptedLineIds.current)
       }
 
       // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
-      const sdDate = new Date(sd)
+      const sdDate = sd ? new Date(sd) : null
       const prevEndByTaskId = new Map<string, string | null>()
       const prevVersion = versions[0]
-      if (prevVersion) {
+      if (createVersion && prevVersion) {
         try {
           const r = await authFetch(`/api/versions/${projectId}?id=${prevVersion.id}`)
           const d = await r.json()
@@ -1272,7 +1284,7 @@ export default function GanttToolbar({
           }
         } catch { /* ignore, 退化为当前 end */ }
       }
-      const recomputed = submittedTasks
+      const recomputed = createVersion && sdDate ? submittedTasks
         .filter(t => t.start_date && t.end_date)
         .map(t => {
           const prevEnd = prevEndByTaskId.get(t.id) ?? null
@@ -1282,7 +1294,7 @@ export default function GanttToolbar({
             percent_done: calcPercent(t, sdDate),
             baseline_end_date: baselineEnd,
           }
-        })
+        }) : []
       const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
 
       const reasonMap: Record<string, string> = {}
@@ -1379,13 +1391,13 @@ export default function GanttToolbar({
 
       // 2.5 状态日期若有变更，先把它持久化到 projects 表
       //     （版本快照只写 project_versions.status_date，不会同步 projects.status_date）
-      if (sd !== saveBaseStatusDate) {
+      if (sd !== saveBaseStatusDate || submittedPlanningStatus !== saveBasePlanningStatus) {
         const r = await authFetch(`/api/projects/${projectId}`, {
           method: 'PUT',
           headers: authFetchHeaders(true),
-          body: JSON.stringify({ status_date: sd }),
+          body: JSON.stringify({ status_date: sd, planning_status: submittedPlanningStatus }),
         })
-        if (!r.ok) throw new Error(`保存状态日期失败 (${r.status})`)
+        if (!r.ok) throw new Error(`保存项目状态失败 (${r.status})`)
       }
 
       // Project lines use client IDs so a lost reply can be retried safely.
@@ -1411,29 +1423,32 @@ export default function GanttToolbar({
       }
       const savedLines = [...savedLineMap.values()]
 
-      // 3. 创建版本快照
-      const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
-        method: 'POST',
-        headers: authFetchHeaders(true),
-        body: JSON.stringify({
-          use_database_snapshot: true,
-          include_snapshot: true,
-          status_date: sd,
-          reasons: reasonMap,
-        }),
-      })
-      const snapshotData = await snapshotRes.json()
-
-      if (!snapshotRes.ok || !snapshotData.ok) throw new Error(snapshotData.error ?? `版本保存失败 (${snapshotRes.status})`)
-      if (!Array.isArray(snapshotData.value?.snapshot?.tasks) || !Array.isArray(snapshotData.value?.snapshot?.dependencies)) {
-        throw new Error('版本响应缺少保存结果，请重试')
+      // 草稿态只读取已保存的当前计划；稳定态才创建历史版本。
+      let confirmed: SaveBaseline
+      if (createVersion) {
+        const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
+          method: 'POST', headers: authFetchHeaders(true),
+          body: JSON.stringify({ use_database_snapshot: true, include_snapshot: true, status_date: sd, reasons: reasonMap }),
+        })
+        const snapshotData = await snapshotRes.json()
+        if (!snapshotRes.ok || !snapshotData.ok) throw new Error(snapshotData.error ?? `版本保存失败 (${snapshotRes.status})`)
+        const snapshot = snapshotData.value?.snapshot
+        if (!Array.isArray(snapshot?.tasks) || !Array.isArray(snapshot?.dependencies)) throw new Error('版本响应缺少保存结果，请重试')
+        confirmed = {
+          tasks: snapshot.tasks, dependencies: snapshot.dependencies, statusDate: sd,
+          planningStatus: normalizePlanningStatus(snapshot.planning_status),
+          lines: Array.isArray(snapshot.lines) ? snapshot.lines : savedLines,
+        }
+      } else {
+        confirmed = await readPersistedState()
       }
-      const savedTasks: Task[] = snapshotData.value.snapshot.tasks
-      const savedDeps: Dependency[] = snapshotData.value.snapshot.dependencies
-      // Rebase on the server-confirmed version while retaining any edits made
-      // after this save started. Those edits remain dirty for the next save.
-      const confirmedLines = Array.isArray(snapshotData.value.snapshot.lines) ? snapshotData.value.snapshot.lines : savedLines
-      dispatch(finishDraftSave({ tasks: savedTasks, dependencies: savedDeps, statusDate: sd, lines: confirmedLines, descriptions: {} }))
+      const savedTasks = confirmed.tasks
+      const savedDeps = confirmed.dependencies
+      const confirmedLines = confirmed.lines ?? savedLines
+      const savedPlanningStatus = normalizePlanningStatus(confirmed.planningStatus)
+      // Both save modes create an undo boundary while retaining later local edits.
+      dispatch(finishDraftSave({ ...confirmed, planningStatus: savedPlanningStatus, lines: confirmedLines, descriptions: {} }))
+      setBaselinePlanningStatus(savedPlanningStatus)
       setBaselineLines(confirmedLines)
       attemptedLineIds.current.clear()
       setReviewOpen(false)
@@ -1449,7 +1464,7 @@ export default function GanttToolbar({
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
       setBaselineDeps(savedDeps.map(d => ({ ...d })))
-      setBaselineStatusDate(sd)
+      setBaselineStatusDate(confirmed.statusDate)
       setSaveIncomplete(false)
       attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
 
@@ -1467,7 +1482,7 @@ export default function GanttToolbar({
     }
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
-      baselineTasks, baselineDeps, baselineStatusDate, saveIncomplete, readPersistedState, reduxStore,
+      baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, saveIncomplete, readPersistedState, reduxStore,
       snapshotEndForBaseline, baselineLines])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
@@ -1480,6 +1495,8 @@ export default function GanttToolbar({
       const restoredTasks = (persisted?.tasks ?? baselineTasks).map(t => ({ ...t }))
       const restoredDeps = (persisted?.dependencies ?? baselineDeps).map(d => ({ ...d }))
       const restoredStatusDate = persisted ? persisted.statusDate : baselineStatusDate
+      const restoredPlanningStatus = persisted ? normalizePlanningStatus(persisted.planningStatus) : baselinePlanningStatus
+      setBaselinePlanningStatus(restoredPlanningStatus)
       if (persisted) {
         setBaseline(restoredTasks.map(t => ({ ...t })))
         setBaselineTasks(restoredTasks)
@@ -1488,7 +1505,7 @@ export default function GanttToolbar({
       }
       const restoredLines = persisted?.lines ?? baselineLines
       setBaselineLines(restoredLines)
-      dispatch(resetDraft({ tasks: restoredTasks, dependencies: restoredDeps, statusDate: restoredStatusDate, lines: restoredLines, descriptions: {} }))
+      dispatch(resetDraft({ tasks: restoredTasks, dependencies: restoredDeps, statusDate: restoredStatusDate, planningStatus: restoredPlanningStatus, lines: restoredLines, descriptions: {} }))
       attemptedLineIds.current.clear()
       dispatch(clearComparison())
       dispatch(clearDiffFilter())
@@ -1502,7 +1519,7 @@ export default function GanttToolbar({
     } finally {
       setStatusDateSaving(false)
     }
-  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, dispatch, projectId, onDiscardChanges,
+  }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, dispatch, projectId, onDiscardChanges,
       statusDateSaving, saveIncomplete, readPersistedState, baselineLines, history.uncertain])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
@@ -1586,6 +1603,21 @@ export default function GanttToolbar({
           )}
         </div>
 
+        <label className="inline-flex items-center gap-1.5 text-xs text-gray-500 whitespace-nowrap">
+          计划状态
+          <select aria-label="计划状态" value={displayedPlanningStatus} disabled={readOnly || statusDateSaving}
+                  title="草稿态原因选填，不生成历史版本；稳定态主动变更需填写原因并保存版本。状态切换需确认变更后保存"
+                  className="h-8 rounded border border-gray-300 bg-white px-2 text-[13px] text-gray-700 disabled:bg-gray-50"
+                  onChange={e => {
+                    dispatch(labelDraftStep('切换计划状态'))
+                    dispatch(setPlanningStatus({ projectId, planningStatus: normalizePlanningStatus(e.target.value) }))
+                  }}>
+            <option value="draft">草稿态</option>
+            <option value="stable">稳定态</option>
+          </select>
+          {planningStatusChanged && !readOnly && <span className="text-amber-600">待确认</span>}
+        </label>
+
         {!readOnly && (
           <>
             {sep}
@@ -1630,15 +1662,15 @@ export default function GanttToolbar({
               {(() => {
                 const sd = toDateTimeStr(currentProject?.status_date ?? null)
                 const sdLabel = isMinute ? '状态时间' : '状态日期'
-                const canSubmit = !!sd && !statusDateSaving && hasChanges
-                const tip = !sd
+                const canSubmit = (!reasonsRequired || !!sd) && !statusDateSaving && hasChanges
+                const tip = reasonsRequired && !sd
                   ? `请先设置${sdLabel}`
-                  : hasChanges ? '确认变更：保存所有改动并创建版本快照'
+                  : hasChanges ? (reasonsRequired ? '确认变更：保存所有改动并创建版本快照' : '确认变更：保存当前计划，不生成历史版本')
                   : '没有变更，无需保存'
                 return (
                   <button
                     onClick={() => {
-                      if (!sd) { alert(`请先设置${sdLabel}`); return }
+                      if (reasonsRequired && !sd) { alert(`请先设置${sdLabel}`); return }
                       openReview()
                     }}
                     disabled={!canSubmit}
@@ -2092,8 +2124,9 @@ export default function GanttToolbar({
                       </span>
                     )}
                     {linesChanged && <span className="text-blue-600">项目线 {lineDiffs.length}</span>}
+                    {planningStatusChanged && <span className="text-blue-600">计划状态</span>}
                     {statusDateChanged && <span className="text-orange-600">{isMinute ? '状态时间' : '状态日期'}</span>}
-                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total + lineDiffs.length + Number(statusDateChanged)} 项变更</span>
+                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total + lineDiffs.length + Number(statusDateChanged) + Number(planningStatusChanged)} 项变更</span>
                   </>
                 )
               })()}
@@ -2101,6 +2134,12 @@ export default function GanttToolbar({
 
             {/* Diff list */}
             <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 min-h-0">
+              <div className="text-xs text-gray-500">
+                {reasonsRequired ? '稳定态：主动变更、手动任务和依赖变更需填写原因。' : '草稿态：原因可选填，只保存当前计划，不生成历史版本。'}
+              </div>
+              {planningStatusChanged && <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm">
+                计划状态：{planningStatusLabel(baselinePlanningStatus)} → {planningStatusLabel(planningStatus)}
+              </div>}
               {statusDateChanged && <div className="rounded border border-orange-200 bg-orange-50 p-3 text-sm">
                     {isMinute ? '状态时间' : '状态日期'}：
                     <span className="font-medium text-gray-800">
@@ -2152,12 +2191,13 @@ export default function GanttToolbar({
                     {requiredReasonCodes.has(d.task_code) ? (
                       <textarea
                         aria-label={`任务 ${d.task_code} 的变更原因`}
+                        aria-required={reasonsRequired}
                         value={reasons[d.task_code] ?? ''}
                         onChange={e => setReasons(prev => ({ ...prev, [d.task_code]: e.target.value }))}
-                        placeholder={manualReasonCodes.has(d.task_code) ? '手动任务原因（必填）' : '变更原因（必填，例如：设备到货延期，安装时间顺延）'}
+                        placeholder={!reasonsRequired ? '变更原因（选填）' : manualReasonCodes.has(d.task_code) ? '手动任务原因（必填）' : '变更原因（必填，例如：设备到货延期，安装时间顺延）'}
                         rows={2}
                         className={`w-full text-xs px-2 py-1 rounded border resize-y bg-white focus:outline-none ${
-                          (reasons[d.task_code] ?? '').trim().length === 0
+                          reasonsRequired && (reasons[d.task_code] ?? '').trim().length === 0
                             ? 'border-red-300 focus:border-red-400'
                             : 'border-gray-300 focus:border-blue-400'
                         }`}
@@ -2211,7 +2251,8 @@ export default function GanttToolbar({
                     aria-label={`${item.fromName} 到 ${item.toName} 的依赖变更原因`}
                     value={dependencyReasons[item.id] ?? ''}
                     onChange={e => setDependencyReasons(prev => ({ ...prev, [item.id]: e.target.value }))}
-                    placeholder="依赖变更原因（必填）"
+                    aria-required={reasonsRequired}
+                    placeholder={reasonsRequired ? '依赖变更原因（必填）' : '依赖变更原因（选填）'}
                     rows={2}
                     className="mt-2 w-full text-xs px-2 py-1 rounded border border-gray-300 resize-y bg-white focus:outline-none focus:border-blue-400"
                   />
