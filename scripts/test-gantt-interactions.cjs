@@ -54,6 +54,9 @@ async function fixture(role = 'admin', minute = false, history = false) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1680, height: 1100 });
   page.setDefaultTimeout(15000);
+  // A deployed server may deliver its initial bundles over a slow connection.
+  // Keep interaction assertions at 15s; only navigation gets a larger budget.
+  page.setDefaultNavigationTimeout(60000);
   page.testModifiers = {};
   const keyDown = page.keyboard.down.bind(page.keyboard), keyUp = page.keyboard.up.bind(page.keyboard);
   const modifierKey = { Shift: 'shiftKey', Control: 'ctrlKey', Meta: 'metaKey' };
@@ -76,6 +79,10 @@ async function fixture(role = 'admin', minute = false, history = false) {
   };
   page.on('pageerror', e => errors.push(e.message));
   page.on('dialog', d => d.accept().catch(e => errors.push(e.message)));
+  page.pendingRequests = new Set();
+  page.on('request', r => page.pendingRequests.add(r.url()));
+  page.on('requestfinished', r => page.pendingRequests.delete(r.url()));
+  page.on('requestfailed', r => page.pendingRequests.delete(r.url()));
   await page.setRequestInterception(true);
   const p = { ...project, status_date: minute ? '2026-11-02T09:00:00' : project.status_date, time_granularity: minute ? 'minute' : 'day' };
   const tasks = [task('1'), task('2'), task('3'), task('4', '3')].map(t => minute ? { ...t, start_date: '2026-11-02T09:00:00', end_date: '2026-11-02T10:15:00', duration: 75 } : t);
@@ -95,7 +102,8 @@ async function fixture(role = 'admin', minute = false, history = false) {
     // Empty versions explicitly verifies that entering a project never creates an initial snapshot.
     await req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, value }) });
   });
-  await page.goto(`${base}/login`, { waitUntil: 'networkidle0' });
+  await page.goto(`${base}/login`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('button[type=submit]'); await waitFrame(page);
   await page.type('input[type=text]', 'fixture'); await page.type('input[type=password]', 'fixture');
   await page.click('button[type=submit]');
   await page.waitForSelector(`a[href="/projects/${project.id}"]`);
@@ -265,4 +273,4 @@ async function main() {
   assert.deepEqual(errors, []); assert.deepEqual(writes, []);
   console.log('PASS minute UI and read-only access; no page errors or business API writes. Dropped native event fallbacks:', eventFallbacks);
 }
-main().catch(async error => { console.error(error); if (browser) { const pages = await browser.pages(); await pages.at(-1)?.screenshot({ path: '/private/tmp/gantt-interactions-failure.png' }); } process.exitCode = 1; }).finally(async () => { if (browser) await browser.close(); });
+main().catch(async error => { console.error(error); if (browser) { const pages = await browser.pages(); console.error('Pending browser requests:', [...(pages.at(-1)?.pendingRequests || [])]); await pages.at(-1)?.screenshot({ path: '/private/tmp/gantt-interactions-failure.png' }); } process.exitCode = 1; }).finally(async () => { if (browser) await browser.close(); });
