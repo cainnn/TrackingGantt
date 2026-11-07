@@ -1,5 +1,6 @@
 // Real Chrome clicks/typing + Puppeteer's select helper + live API verification.
 // No mocked responses, DOM click(), Redux mutations, or access to existing projects.
+// One draft-save request is deliberately aborted to verify failure recovery.
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
@@ -13,6 +14,8 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), 'gantt-attributes-ui-'));
 const modal = '[role="dialog"][aria-label="编辑任务"]';
 const report = { base, output, steps: [], screenshots: [], pageErrors: [], writes: [], fileRequests: [], imports: [], files: [], passed: false };
 let token, project, task, browser, page;
+let failDraftUpdate = false, expectSaveFailure = false;
+const expectedSaveFailures = [];
 async function api(route, method = 'GET', body) {
   const response = await fetch(`${base}/api${route}`, { method, headers: {
     'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), 'x-gantt-confirmed-save': '1',
@@ -80,7 +83,7 @@ async function persisted() {
 }
 async function waitSave() {
   await page.waitForFunction(() => ![...document.querySelectorAll('button')].some(b => b.textContent.trim() === '保存中...'));
-  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === '确认变更' && b.disabled));
+  await page.waitForFunction(() => document.querySelector('[data-action="save-plan"]')?.disabled === true);
 }
 async function until(check, label) {
   const deadline = Date.now() + 60000;
@@ -101,7 +104,7 @@ async function loginAndOpen() {
 async function main() {
   token = (await api('/auth/login', 'POST', { login, password })).token;
   project = await api('/projects', 'POST', { name: `属性点击验收-${randomUUID().slice(0, 8)}`, start_date: '2026-11-01',
-    status_date: '2026-11-03', planning_status: 'draft', time_granularity: 'day', use_template: false });
+    status_date: null, planning_status: 'draft', time_granularity: 'day', use_template: false });
   const taskCount = Number(process.env.ATTR_UI_TASK_COUNT || 2);
   assert.ok(Number.isInteger(taskCount) && taskCount >= 2 && taskCount <= 1000);
   [task] = await api(`/tasks/${project.id}`, 'POST', Array.from({ length: taskCount }, (_, i) => ({ id: randomUUID(),
@@ -122,7 +125,9 @@ async function main() {
   page.on('pageerror', error => report.pageErrors.push(error.message));
   page.on('dialog', async dialog => {
     // Only app confirmation/alert dialogs in our isolated fixture are accepted.
-    if (/失败|error/i.test(dialog.message())) report.pageErrors.push(dialog.message());
+    if (expectSaveFailure && dialog.message().startsWith('保存失败：')) {
+      expectedSaveFailures.push(dialog.message()); expectSaveFailure = false;
+    } else if (/失败|error/i.test(dialog.message())) report.pageErrors.push(dialog.message());
     if (dialog.message().includes('导入成功')) report.imports.push(dialog.message());
     await dialog.accept(dialog.type() === 'prompt' ? '2' : undefined);
   });
@@ -135,6 +140,9 @@ async function main() {
     if (pathname.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && pathname !== '/api/auth/login') {
       if (!pathname.includes(project.id)) { report.pageErrors.push(`Blocked mutation outside fixture: ${pathname}`); return request.abort(); }
       report.writes.push({ method: request.method(), path: pathname });
+      if (failDraftUpdate && pathname === `/api/tasks/${project.id}` && request.method() === 'PUT') {
+        failDraftUpdate = false; return request.abort('internetdisconnected');
+      }
     }
     return request.continue();
   });
@@ -190,8 +198,24 @@ async function main() {
   assert.equal(report.writes.length, 0);
   pass('另一任务从空属性开始，可以自定义同名文本属性；两个任务的类型和值互不影响');
 
-  await click('确认变更'); const save = await button('确认并保存'); await save.dispose();
-  await screenshot('04-draft-confirmation'); await click('确认并保存'); await waitSave();
+  await page.evaluate(() => {
+    window.__draftReviewSeen = false;
+    window.__draftReviewObserver = new MutationObserver(() => { if (document.querySelector('[role="dialog"][aria-label="变更审核"]')) window.__draftReviewSeen = true; });
+    window.__draftReviewObserver.observe(document.body, { subtree: true, childList: true });
+  });
+  failDraftUpdate = true; expectSaveFailure = true;
+  await click('保存', '[data-toolbar-row="progress"]');
+  await until(() => expectedSaveFailures.length === 1, 'injected draft save failure');
+  assert.equal(failDraftUpdate, false, 'Only the intended task update was aborted');
+  await page.waitForFunction(() => !document.querySelector('[data-action="save-plan"]').disabled);
+  assert.deepEqual((await persisted()).task.custom_values, {}, 'Failed write must leave database unchanged');
+  await openValues();
+  assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), exact, 'Failed save retains local edits');
+  await closeEditor();
+  pass('草稿态直接保存遇到断网时保留修改并允许重试，不弹审核窗口');
+  await click('保存', '[data-toolbar-row="progress"]'); await waitSave();
+  assert.equal(await page.evaluate(() => { window.__draftReviewObserver.disconnect(); return window.__draftReviewSeen; }), false, 'Draft save/retry must never open change review');
+  await screenshot('04-draft-direct-save');
   let saved = await persisted();
   const money = saved.task.custom_fields.find(f => f.name === '支出金额');
   const contract = saved.task.custom_fields.find(f => f.name === '合同编号');
@@ -199,7 +223,10 @@ async function main() {
   assert.equal(saved.task.custom_values[money.id], exact); assert.equal(saved.task.custom_values[contract.id], 'HT-000123');
   assert.equal(saved.versions.length, 0); assert.equal(saved.p.planning_status, 'draft');
   assert.equal(saved.task.start_date, task.start_date); assert.equal(saved.task.end_date, task.end_date);
-  pass('确认并保存才入库；大金额精度正确，草稿态无强制原因且不生成版本');
+  assert.equal(saved.p.status_date, null, 'Draft saves do not require a status date');
+  pass('草稿态点击顶部保存直接入库：无审核、无原因、无需状态日期、不生成版本，金额精度正确');
+  // Prepare the independent stable-state scenario; only this fixture is changed.
+  await api(`/projects/${project.id}`, 'PUT', { status_date: '2026-11-03' });
   await page.reload({ waitUntil: 'networkidle2' });
   await page.waitForFunction(() => location.pathname === '/login' || document.querySelector('[data-task-row]'));
   if (new URL(page.url()).pathname === '/login') await loginAndOpen();
@@ -412,6 +439,20 @@ async function main() {
   assert.equal(report.writes.length, writesBeforeHistory);
   assert.deepEqual(report.pageErrors, []);
   pass('历史版本可按任务查看自定义属性，只读查看不产生后台写入');
+  const beforeDraft = await persisted();
+  await page.select('select[aria-label="计划状态"]', 'draft');
+  await openValues(); await fill(`${modal} input[aria-label="支出金额"]`, '77'); await click('保存', modal);
+  await page.waitForSelector(modal, { hidden: true }); await click('保存', '[data-toolbar-row="progress"]'); await waitSave();
+  const afterDraft = await persisted();
+  assert.equal(afterDraft.p.planning_status, 'draft'); assert.equal(afterDraft.task.custom_values[money.id], '77.00');
+  assert.deepEqual(afterDraft.versions, beforeDraft.versions, 'Switching back to draft retains history without updating versions');
+  const lifecycle = await api(`/tasks/${project.id}/${task.id}`);
+  const lastAmount = lifecycle.lifecycle.find(e => e.field_name === `custom:${money.id}`);
+  assert.ok(lastAmount); assert.ok(!lastAmount.reason, 'Draft direct saves must not reuse old stable-review reasons');
+  assert.equal(await page.$('[role="dialog"][aria-label="变更审核"]'), null);
+  assert.deepEqual(report.pageErrors, []);
+  pass('切回草稿态后直接保存，保留已有版本且不沿用上次稳定态审核原因');
+  report.expectedSaveFailures = expectedSaveFailures;
   report.trustedClicks = await page.evaluate(() => window.__trustedClicks);
   report.passed = true;
 }

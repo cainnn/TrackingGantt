@@ -783,7 +783,7 @@ export default function GanttToolbar({
 
       const mode = choice === '1' ? 'replace' : 'merge'
       if (mode === 'replace') {
-        const ok = confirm('⚠️ 替换导入将替换当前草稿，可以撤销；确认并保存后才会写入数据库。\n\n确认继续？')
+        const ok = confirm('⚠️ 替换导入将替换当前未保存的修改，可以撤销；通过顶部保存操作后才会写入数据库。\n\n确认继续？')
         if (!ok) return
       }
 
@@ -891,8 +891,8 @@ export default function GanttToolbar({
         }))
         dispatch(setProjectLines(lines))
       }
-      alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，“确认变更 → 确认并保存”后入库。`)
-  }, [dispatch, projectId, tasks, dependencies, currentProject?.custom_fields])
+      alert(`导入成功！${nextTasks.length} 个任务、${nextDeps.length} 条依赖已加载到本地，${reasonsRequired ? '“确认变更 → 确认并保存”后入库' : '点击顶部“保存”直接入库'}。`)
+  }, [dispatch, projectId, tasks, dependencies, currentProject?.custom_fields, reasonsRequired])
 
   const handleImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -1230,8 +1230,8 @@ export default function GanttToolbar({
     }
   }, [projectId])
 
-  // 状态日期：进入"待确认"流程，仅改 Redux，不直接落库。
-  // 允许任意日期时间以便预览进展；用户点"确认变更"才一并保存并创建版本快照，
+  // 状态日期仅改 Redux，用户通过顶部工具栏保存时才入库。
+  // 允许任意日期时间以便预览进展；稳定态审核保存时创建版本快照，
   // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
   const handleStatusDatePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = normalizeStatusDate(e.target.value || null)
@@ -1239,11 +1239,11 @@ export default function GanttToolbar({
     dispatch(setStatusDate({ projectId, statusDate: val }))
   }, [dispatch, projectId, normalizeStatusDate])
 
-  // 确认变更：保存当前计划；稳定态同时重算完成度并创建版本快照。
+  // 草稿态直接保存；稳定态经审核后保存，并创建版本快照。
   const handleConfirmChanges = useCallback(async () => {
     const sd = toDateTimeStr(currentProject?.status_date ?? null)
     const createVersion = normalizePlanningStatus(currentProject?.planning_status) === 'stable'
-    if ((createVersion && !sd) || statusDateSaving || !allReasonsFilled) return
+    if (readOnly || (createVersion && !sd) || statusDateSaving || !allReasonsFilled) return
 
     setStatusDateSaving(true)
     dispatch(beginDraftSave())
@@ -1254,6 +1254,8 @@ export default function GanttToolbar({
     const submittedDeps = submitted.dependencies
     const submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
     const submittedCustomFields = reduxStore.getState().project.currentProject?.custom_fields ?? []
+    // Direct draft saves must not reuse reasons from an earlier stable review.
+    const submittedDependencyReasons = createVersion ? dependencyReasons : {}
     const saveHeaders = authFetchHeaders(true)
     saveHeaders.set('x-gantt-confirmed-save', '1')
     const saveWarnings: Array<{ taskName: string; message: string }> = []
@@ -1313,7 +1315,7 @@ export default function GanttToolbar({
       const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
 
       const reasonMap: Record<string, string> = {}
-      for (const d of changeDiffs) {
+      for (const d of createVersion ? changeDiffs : []) {
         if (requiredReasonCodes.has(d.task_code)) {
           const r = (reasons[d.task_code] ?? '').trim()
           if (r) reasonMap[d.task_code] = r
@@ -1337,7 +1339,7 @@ export default function GanttToolbar({
       for (const depId of diff.depsToDelete) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
           method: 'DELETE', headers: saveHeaders,
-          body: JSON.stringify({ id: depId, _reason: dependencyReasons[depId]?.trim() }),
+          body: JSON.stringify({ id: depId, _reason: submittedDependencyReasons[depId]?.trim() }),
         })
         if (!r.ok) throw new Error(`删除依赖失败 (${r.status})`)
       }
@@ -1390,7 +1392,7 @@ export default function GanttToolbar({
           body: JSON.stringify({
             id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
             type: dep.type, lag: dep.lag, active: dep.active ?? true,
-            _reason: dependencyReasons[dep.id]?.trim(),
+            _reason: submittedDependencyReasons[dep.id]?.trim(),
           }),
         })
         const result = await r.json()
@@ -1401,7 +1403,7 @@ export default function GanttToolbar({
       for (const dep of diff.depsToUpdate) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
           method: 'PUT', headers: saveHeaders,
-          body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true, _reason: dependencyReasons[dep.id]?.trim() }),
+          body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true, _reason: submittedDependencyReasons[dep.id]?.trim() }),
         })
         if (!r.ok) throw new Error(`更新依赖失败 (${r.status})`)
       }
@@ -1497,7 +1499,7 @@ export default function GanttToolbar({
     } catch (err) {
       dispatch(failDraftSave())
       setSaveIncomplete(true)
-      console.error('确认变更保存失败:', err)
+      console.error('计划保存失败:', err)
       alert(`保存失败：${err instanceof Error ? err.message : String(err)}。请重试，系统会核对已保存的内容。`)
     } finally {
       setStatusDateSaving(false)
@@ -1505,7 +1507,7 @@ export default function GanttToolbar({
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, saveIncomplete, readPersistedState, reduxStore,
-      snapshotEndForBaseline, baselineLines, baselineCustomFields, customFieldsChanged, customFieldsReason])
+      snapshotEndForBaseline, baselineLines, baselineCustomFields, customFieldsChanged, customFieldsReason, readOnly])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -1641,7 +1643,7 @@ export default function GanttToolbar({
         <label className="inline-flex items-center gap-1.5 text-xs text-gray-500 whitespace-nowrap">
           计划状态
           <select aria-label="计划状态" value={displayedPlanningStatus} disabled={readOnly || statusDateSaving}
-                  title="草稿态原因选填，不生成历史版本；稳定态主动变更需填写原因并保存版本。状态切换需确认变更后保存"
+                  title="草稿态点击保存直接入库，不审核、不填原因、不生成历史版本；稳定态审核后保存。状态切换在保存后生效"
                   className="h-8 rounded border border-gray-300 bg-white px-2 text-[13px] text-gray-700 disabled:bg-gray-50"
                   onChange={e => {
                     dispatch(labelDraftStep('切换计划状态'))
@@ -1650,7 +1652,7 @@ export default function GanttToolbar({
             <option value="draft">草稿态</option>
             <option value="stable">稳定态</option>
           </select>
-          {planningStatusChanged && !readOnly && <span className="text-amber-600">待确认</span>}
+          {planningStatusChanged && !readOnly && <span className="text-amber-600">未保存</span>}
         </label>
 
         {!readOnly && (
@@ -1679,13 +1681,15 @@ export default function GanttToolbar({
                 const canSubmit = (!reasonsRequired || !!sd) && !statusDateSaving && hasChanges
                 const tip = reasonsRequired && !sd
                   ? `请先设置${sdLabel}`
-                  : hasChanges ? (reasonsRequired ? '确认变更：保存所有改动并创建版本快照' : '确认变更：保存当前计划，不生成历史版本')
+                  : hasChanges ? (reasonsRequired ? '确认变更：保存所有改动并创建版本快照' : '保存当前计划，直接入库，不审核、不生成历史版本')
                   : '没有变更，无需保存'
                 return (
                   <button
+                    data-action="save-plan"
                     onClick={() => {
                       if (reasonsRequired && !sd) { alert(`请先设置${sdLabel}`); return }
-                      openReview()
+                      if (reasonsRequired) openReview()
+                      else void handleConfirmChanges()
                     }}
                     disabled={!canSubmit}
                     title={tip}
@@ -1697,7 +1701,7 @@ export default function GanttToolbar({
                     <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
-                    {statusDateSaving ? '保存中...' : '确认变更'}
+                    {statusDateSaving ? '保存中...' : reasonsRequired ? '确认变更' : '保存'}
                   </button>
                 )
               })()}
@@ -2028,8 +2032,8 @@ export default function GanttToolbar({
       )}
 
       {/* Review Changes Dialog */}
-      {reviewOpen && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
+      {reviewOpen && reasonsRequired && (
+        <div role="dialog" aria-modal="true" aria-label="变更审核" className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-lg shadow-xl w-[560px] max-h-[80vh] flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200">

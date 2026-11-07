@@ -5,6 +5,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { updateTasks, addDependency, updateDependency, removeDependency } from '@/store/slices/tasksSlice'
 import type { Task, Dependency, TaskLifecycleEvent, TaskCustomValues, TaskCustomField } from '@/types'
 import { normalizeCustomFields, normalizeCustomValues, taskCustomFields } from '@/lib/taskCustomFields'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 import TaskCustomValueInput from './TaskCustomValueInput'
 import TaskCustomFieldsEditor from './TaskCustomFieldsEditor'
 import DependencyTaskPicker from './DependencyTaskPicker'
@@ -863,7 +864,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
           })()}
 
           {tab === 'custom' && <div className="space-y-4 px-5 py-4">
-            <div className="flex items-center justify-between gap-3"><p className="text-xs text-gray-500">属性仅属于当前任务。任务保存后先进入草稿，“确认变更”后才保存到后台。</p><button type="button" className="shrink-0 text-sm text-blue-600" onClick={() => {
+            <div className="flex items-center justify-between gap-3"><p className="text-xs text-gray-500">属性仅属于当前任务。完成编辑后，{normalizePlanningStatus(currentProject?.planning_status) === 'draft' ? '点击顶部“保存”直接入库。' : '通过顶部“确认变更”审核后入库。'}</p><button type="button" className="shrink-0 text-sm text-blue-600" onClick={() => {
               if (manageFields) {
                 try { setCustomFields(normalizeCustomFields(pendingCustomFields ?? customFields, customFields)); setPendingCustomFields(undefined); setManageFields(false); setFormError('') }
                 catch (err) { setFormError(err instanceof Error ? err.message : '属性设置无效') }
@@ -892,7 +893,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
           {tab === 'history' && (
             <div className="px-5 py-4">
               <p className="mb-4 text-xs leading-relaxed text-gray-500">
-                记录任务的变更内容、原因、时间和操作人。变更原因在“确认变更”时填写，提交后显示在这里。
+                记录任务的变更内容、时间和操作人。稳定态的变更原因在“确认变更”时填写；草稿态直接保存，不要求填写原因。
               </p>
               {lcLoading ? (
                 <div className="flex items-center justify-center h-32 text-gray-400 text-sm">加载中...</div>

@@ -7,6 +7,7 @@ import {
 } from '@/store/slices/projectLinesSlice'
 import { uuid } from '@/lib/uuid'
 import { labelDraftStep } from '@/store/draftHistory'
+import { normalizePlanningStatus } from '@/lib/planningStatus'
 import type { ProjectLine } from '@/types'
 
 const PRESET_COLORS = ['#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#6b7280']
@@ -20,6 +21,7 @@ interface Props {
 export default function ProjectLinesPanel({ projectId, onClose, readOnly = false }: Props) {
   const dispatch = useAppDispatch()
   const lines = useAppSelector(s => s.projectLines.lines)
+  const planningStatus = useAppSelector(s => s.project.currentProject?.planning_status)
 
   const [newName, setNewName] = useState('')
   const [newDate, setNewDate] = useState('')
@@ -73,7 +75,7 @@ export default function ProjectLinesPanel({ projectId, onClose, readOnly = false
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>
       </div>
 
-      <p className="text-xs text-gray-500 mb-2">项目线修改在“确认变更 → 确认并保存”后生效。</p>
+      <p className="text-xs text-gray-500 mb-2">{normalizePlanningStatus(planningStatus) === 'draft' ? '项目线修改后，点击顶部“保存”直接入库。' : '项目线修改在“确认变更 → 确认并保存”后入库。'}</p>
       <fieldset disabled={readOnly}>
       {/* Add new line */}
       <div className="flex items-center gap-2 mb-3">

@@ -233,9 +233,9 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
     }
   }, [projectId, dispatch])
 
-  // 回退：仅本地预览，"确认变更 → 确认并保存"后才入库
+  // 回退仅加载到本地，按恢复后的计划状态执行保存流程。
   const handleRollback = useCallback(async (v: ProjectVersion) => {
-    if (!confirm(`回退到「${v.name}」（本地预览）？\n\n当前所有未保存编辑会被覆盖。\n回退后需点"确认变更 → 确认并保存"才会真正入库；保存后自动生成新版本（递增 version_number），原有历史版本保留。`)) return
+    if (!confirm(`回退到「${v.name}」（本地预览）？\n\n当前所有未保存编辑会被覆盖。\n回退后通过顶部工具栏保存才会入库：草稿态直接保存，稳定态审核后保存版本。`)) return
     try {
       const res = await authFetch(`/api/versions/${projectId}?id=${v.id}`)
       const data = await res.json()
@@ -258,7 +258,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         ...(currentProject?.custom_fields ?? []).filter(f => !snap.custom_fields.some((old: { id: string }) => old.id === f.id)).map(f => ({ ...f, archived: true })),
       ] }))
       if (Array.isArray(snap.lines)) dispatch(setProjectLines(snap.lines))
-      alert(`已加载「${v.name}」到本地。点"确认变更 → 确认并保存"后入库。`)
+      alert(`已加载「${v.name}」到本地。${normalizePlanningStatus(snap.planning_status) === 'draft' ? '点击顶部“保存”直接入库。' : '通过顶部“确认变更 → 确认并保存”入库。'}`)
     } catch {
       alert('网络错误')
     }
@@ -500,7 +500,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
               />
               <div className="flex gap-2">
                 <button
-                  onClick={() => { if (draftChanged) { alert('当前有未保存草稿，请先通过工具栏确认变更'); return }; setManagementReview({ kind: 'create' }) }}
+                  onClick={() => { if (draftChanged) { alert('当前有未保存修改，请先通过顶部工具栏保存'); return }; setManagementReview({ kind: 'create' }) }}
                   disabled={saving}
                   className="px-3 py-1 text-[12px] bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
                 >
@@ -607,7 +607,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
                         {!readOnly && (
                         <button
                           onClick={() => handleRollback(v)}
-                          title="回退到此版本（本地预览，确认变更 → 确认并保存后入库）"
+                          title="回退到此版本（本地预览，通过顶部工具栏保存后入库）"
                           className="px-1.5 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded cursor-pointer"
                         >
                           回退
