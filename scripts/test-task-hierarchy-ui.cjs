@@ -44,6 +44,16 @@ async function dragBefore(id, target) {
   const to = await page.$eval(`[data-task-row="${target}"]`, el => { const r = el.getBoundingClientRect(); return { x: r.x + 10, y: r.y + 4 }; });
   await page.mouse.move(from.x, from.y); await page.mouse.down(); await page.mouse.move(to.x, to.y, { steps: 15 }); await page.mouse.up();
 }
+async function startNameDrag(id, target) {
+  const from = await page.$eval(cell(id), el => { const r = el.getBoundingClientRect(); return { x: r.x + Math.min(r.width - 12, 85), y: r.y + r.height / 2 }; });
+  const to = await page.$eval(`[data-task-row="${target}"]`, el => { const r = el.getBoundingClientRect(); return { x: r.x + 120, y: r.y + 4 }; });
+  await page.mouse.move(from.x, from.y); await page.mouse.down(); await page.mouse.move(to.x, to.y, { steps: 15 });
+  await page.waitForSelector('[data-task-drag-preview]');
+}
+const visibleIds = () => page.$$eval('[data-task-row]', rows => rows.map(r => r.dataset.taskRow));
+async function expectIds(ids) {
+  await page.waitForFunction(ids => JSON.stringify([...document.querySelectorAll('[data-task-row]')].map(r => r.dataset.taskRow)) === JSON.stringify(ids), {}, ids);
+}
 async function parentInUi(id, parent) {
   await page.waitForFunction((id, parent) => {
     const ancestors = [];
@@ -115,6 +125,40 @@ async function main() {
     return request.continue();
   });
   await page.goto(`${base}/login`, { waitUntil: 'networkidle2' }); await loginAndOpen();
+  const initialIds = [a, c, b, d, e, f], beforeDrag = await state();
+  assert.equal(await page.$eval(`[data-task-drag-handle="${f}"]`, el => getComputedStyle(el).opacity), '1');
+  const rowTopBefore = await page.$eval(cell(a), el => el.getBoundingClientRect().top);
+  await startNameDrag(f, a);
+  assert.ok(await page.$eval('[data-task-drag-preview]', el => el.textContent.includes('放到「父任务 A」上方')));
+  assert.equal(await page.$eval(cell(a), el => el.getBoundingClientRect().top), rowTopBefore, 'Insertion indicator must not move the rows');
+  await page.screenshot({ path: path.join(output, 'name-drag-preview.png'), fullPage: true });
+  await page.mouse.up(); await expectIds([f, a, c, b, d, e]);
+  await page.click('button[title^="撤销"]'); await expectIds(initialIds);
+  await page.click('button[title^="重做"]'); await expectIds([f, a, c, b, d, e]);
+  await page.click('button[title^="撤销"]'); await expectIds(initialIds);
+  await page.click(`${cell(a)} button`); await expectIds([a, d, e, f]);
+  await startNameDrag(a, f); await page.mouse.up(); await expectIds([d, e, a, f]);
+  await page.click(`${cell(a)} button`); await expectIds([d, e, a, c, b, f]);
+  await page.click('button[title^="撤销"]'); await expectIds(initialIds);
+  assert.equal(report.writes.length, 0); assert.deepEqual(await state(), beforeDrag);
+  pass('任务名称可直接向上/向下拖动，手柄常显、插入线不挤动行；折叠父任务带全部子任务移动，撤销重做不写后台');
+
+  await page.click(cell(d)); await page.click(`[data-task-row="${f}"] input[type=checkbox]`);
+  await startNameDrag(f, c);
+  assert.ok(await page.$eval('[data-task-drag-preview]', el => el.textContent.includes('移动 2 个任务（含子任务）')));
+  await page.mouse.up(); await expectIds([a, d, e, f, c, b]); await parentInUi(d, a); await parentInUi(e, d); await parentInUi(f, a);
+  await page.click('button[title^="撤销"]'); await expectIds(initialIds);
+  await page.click(cell(a)); await startNameDrag(a, b);
+  assert.ok(await page.$eval('[data-task-drag-preview]', el => el.textContent.includes('不能移到自身或子任务内')));
+  await page.mouse.up(); await expectIds(initialIds);
+  await page.click(cell(f)); await startNameDrag(f, a); await page.keyboard.press('Escape'); await page.mouse.up();
+  await page.waitForSelector('[data-task-drag-preview]', { hidden: true }); await expectIds(initialIds);
+  await startNameDrag(f, a);
+  const outside = await page.$eval('[data-gantt-grid]', el => { const r = el.getBoundingClientRect(); return { x: r.right + 50, y: r.top + 50 }; });
+  await page.mouse.move(outside.x, outside.y); await page.mouse.up(); await expectIds(initialIds);
+  assert.equal(report.writes.length, 0); assert.deepEqual(await state(), beforeDrag);
+  pass('多选任务按原顺序整组移动；自身/子任务位置被拦截，Esc 或列表外释放均取消，原结构不丢失');
+
   await level(b, 1); await operation([b], '提升任务层级'); await level(b, 0);
   assert.equal(report.writes.length, 0); assert.equal((await state()).tasks.find(t => t.id === b).parent_id, a);
   // Simulate an independently changed backend and an unseen task in this fixture only.
@@ -184,6 +228,23 @@ async function main() {
   rows = (await state()).tasks; assert.ok(!rows.some(t => t.id === d)); assert.equal(rows.find(t => t.id === e).parent_id, null);
   await reload(); await graphMatchesUi(); assert.deepEqual(report.pageErrors, []);
   pass('提升保留的子任务再删除旧父任务，保存不会误删子任务');
+
+  const extra = Array.from({ length: 60 }, (_, i) => make(randomUUID(), `滚动验收 ${i + 1}`, null, i + 100, i + 100));
+  await api(`/tasks/${project.id}`, 'POST', extra); await reload();
+  const beforeScrollIds = await visibleIds(), beforeScrollState = await state(), writesBeforeScroll = report.writes.length;
+  const source = await page.$eval(cell(a), el => { const r = el.getBoundingClientRect(); return { x: r.x + 85, y: r.y + r.height / 2 }; });
+  const edge = await page.$eval('[data-gantt-grid]', el => { const r = el.getBoundingClientRect(); return { x: r.x + 150, y: r.bottom - 8 }; });
+  await page.mouse.move(source.x, source.y); await page.mouse.down(); await page.mouse.move(edge.x, edge.y, { steps: 15 });
+  await page.waitForFunction(() => document.querySelector('[data-gantt-grid]').scrollTop > 160);
+  await page.waitForFunction(() => Math.abs(document.querySelector('[data-gantt-grid]').scrollTop - document.querySelector('[data-timeline-scroll]').scrollTop) < 2);
+  await page.screenshot({ path: path.join(output, 'edge-auto-scroll.png'), fullPage: true });
+  await page.mouse.up();
+  assert.notDeepEqual(await visibleIds(), beforeScrollIds);
+  assert.equal(report.writes.length, writesBeforeScroll); assert.deepEqual(await state(), beforeScrollState);
+  await page.click('button[title^="撤销"]'); await expectIds(beforeScrollIds);
+  await page.click('button[title^="重做"]'); await saveDraft(); await reload(); await graphMatchesUi();
+  pass('长列表拖到边缘自动滚动且左右同步；父任务整棵分支移动后可撤销重做，保存刷新仍保持顺序');
+  assert.deepEqual(report.pageErrors, []);
   report.trustedClicks = priorClicks + await page.evaluate(() => window.__trustedClicks); report.passed = true;
   await page.screenshot({ path: path.join(output, 'saved-hierarchy.png'), fullPage: true });
 }

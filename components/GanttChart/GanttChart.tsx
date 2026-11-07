@@ -26,6 +26,7 @@ import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normali
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
+import { buildTaskRowMove, taskMoveSelection } from '@/lib/clientTaskMove'
 import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
 import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
@@ -638,8 +639,14 @@ export default function GanttChart({
   const depDragJustEndedRef = useRef(false)
 
   // ── Row reorder drag ────────────────────────────────────────────────────
-  const [rowDrag, setRowDrag] = useState<{ taskId: string; startY: number; dragging: boolean }|null>(null)
+  type RowDrag = { taskId: string; taskIds: string[]; startY: number; dragging: boolean }
+  const [rowDrag, setRowDrag] = useState<RowDrag | null>(null)
   const [dropIdx, setDropIdx] = useState<number|null>(null)
+  const [rowDragPoint, setRowDragPoint] = useState<{ x: number; y: number } | null>(null)
+  const rowDragSession = useRef<RowDrag | null>(null)
+  const rowDropIndex = useRef<number | null>(null)
+  const rowPointer = useRef({ x: 0, y: 0 })
+  const rowDragJustEnded = useRef(false)
 
   // ── Context menu ────────────────────────────────────────────────────────
   interface CtxMenu { x: number; y: number; taskId: string; submenu: 'add' | 'delete-dep' | null }
@@ -1110,6 +1117,18 @@ export default function GanttChart({
     return rows
   }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute])
 
+  const rowDropTarget = useCallback((index: number | null) => {
+    if (index === null || !displayRows.length) return null
+    const target = displayRows[Math.min(index, displayRows.length - 1)]?.task
+    return target ? { target, position: index < displayRows.length ? 'before' as const : 'after' as const } : null
+  }, [displayRows])
+  const movingRows = useMemo(() => taskMoveSelection(tasks, rowDrag?.taskIds ?? []), [tasks, rowDrag?.taskIds])
+  const movingRowIds = useMemo(() => new Set(movingRows.ids), [movingRows])
+  const rowDrop = useMemo(() => {
+    const target = rowDropTarget(dropIdx)
+    return target && rowDrag ? { ...target, plan: buildTaskRowMove(tasks, rowDrag.taskIds, target.target.id, target.position) } : null
+  }, [dropIdx, rowDrag, rowDropTarget, tasks])
+
   const progressTasks = useMemo(() => {
     if (Object.keys(previewMap).length === 0) return tasks
     return tasks.map(t => previewMap[t.id] ?? t)
@@ -1423,11 +1442,108 @@ export default function GanttChart({
 
   // ── Row drag handle: mousedown ──────────────────────────────────────────
   const onRowDragStart = useCallback((e: React.MouseEvent, taskId: string) => {
-    if (readOnly) return
-    // 不阻止默认行为和冒泡，让 click 事件能正常触发（选中行）
-    // 只记录拖动起点，超过阈值后才真正进入拖动模式
-    setRowDrag({ taskId, startY: e.clientY, dragging: false })
-  }, [readOnly])
+    rowDragJustEnded.current = false
+    if (readOnly || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || (sortCol && sortDir)) return
+    if ((e.target as HTMLElement).closest('input, button, select, textarea, a')) return
+    e.preventDefault()
+    const session = { taskId, taskIds: selectedIds.includes(taskId) ? [...selectedIds] : [taskId], startY: e.clientY, dragging: false }
+    rowDragSession.current = session
+    rowPointer.current = { x: e.clientX, y: e.clientY }
+    rowDropIndex.current = null
+    setDropIdx(null)
+    setRowDrag({ ...session })
+  }, [readOnly, selectedIds, sortCol, sortDir])
+
+  // List dragging is independent of timeline dragging. RAF keeps edge scrolling
+  // moving even while the pointer is held still; drop markers never shift rows.
+  useEffect(() => {
+    if (!rowDrag) return
+    const session = rowDragSession.current
+    if (!session) return
+    let frame = 0
+    const cancel = () => {
+      rowDragSession.current = null
+      rowDropIndex.current = null
+      setRowDrag(null); setDropIdx(null); setRowDragPoint(null)
+    }
+    if (readOnly) { cancel(); return }
+    const locate = () => {
+      const el = leftRef.current, point = rowPointer.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const inside = point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
+      const index = inside ? Math.min(displayRows.length, Math.max(0, Math.round((point.y - rect.top + el.scrollTop) / ROW_H))) : null
+      rowDropIndex.current = index
+      setDropIdx(index)
+      setRowDragPoint(point)
+    }
+    const onMove = (e: MouseEvent) => {
+      if (!rowDragSession.current) return
+      if ((e.buttons & 1) === 0) { cancel(); return }
+      rowPointer.current = { x: e.clientX, y: e.clientY }
+      if (!session.dragging && Math.abs(e.clientY - session.startY) > 4) {
+        session.dragging = true
+        rowDragJustEnded.current = true
+        setRowDrag({ ...session })
+        setCtxMenu(null); setHoveredBar(null)
+        dispatch(setSelectedIds(session.taskIds))
+      }
+      if (session.dragging) { e.preventDefault(); locate() }
+    }
+    const scroll = () => {
+      const el = leftRef.current
+      if (rowDragSession.current && session.dragging && el) {
+        const rect = el.getBoundingClientRect(), point = rowPointer.current
+        if (point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom) {
+          const edge = 36
+          const delta = point.y < rect.top + edge ? -Math.ceil((rect.top + edge - point.y) / 3)
+            : point.y > rect.bottom - edge ? Math.ceil((point.y - rect.bottom + edge) / 3) : 0
+          if (delta) {
+            const before = el.scrollTop
+            el.scrollTop += delta
+            if (before !== el.scrollTop) { onLeftBodyScroll(); locate() }
+          }
+        }
+      }
+      frame = requestAnimationFrame(scroll)
+    }
+    const onUp = (e: MouseEvent) => {
+      if (!rowDragSession.current) return
+      rowPointer.current = { x: e.clientX, y: e.clientY }
+      if (session.dragging) {
+        locate()
+        const target = rowDropTarget(rowDropIndex.current)
+        if (target) {
+          const plan = buildTaskRowMove(tasks, session.taskIds, target.target.id, target.position)
+          if (!plan.invalidReason && plan.updates.length) {
+            const updates = new Map(plan.updates.map(t => [t.id, t]))
+            const next = tasks.map(t => updates.get(t.id) ?? t)
+            for (const summary of rollupSummaryTasks(next)) updates.set(summary.id, summary)
+            dispatch(labelDraftStep('拖动任务顺序'))
+            dispatch(updateTasks([...updates.values()]))
+            dispatch(markDirty([...updates.keys()]))
+            if (plan.parentId) setExpanded(prev => ({ ...prev, [plan.parentId!]: true }))
+          }
+        }
+      }
+      cancel()
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel() }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    window.addEventListener('keydown', onKey, true)
+    window.addEventListener('blur', cancel)
+    frame = requestAnimationFrame(scroll)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('blur', cancel)
+    }
+  }, [!!rowDrag, readOnly, tasks, displayRows.length, rowDropTarget, dispatch, onLeftBodyScroll])
 
   // ── 节流函数：限制setState频率，trailing 确保最后一帧一定生效 ──────────
   const throttleTimer = useRef<NodeJS.Timeout | null>(null)
@@ -1647,18 +1763,6 @@ export default function GanttChart({
         setConnect(prev => prev ? { ...prev, curX:svgX, curY:y } : null)
       }
 
-      if (rowDrag) {
-        if (!rowDrag.dragging && Math.abs(e.clientY - rowDrag.startY) > 4)
-          setRowDrag(prev => prev ? { ...prev, dragging: true } : null)
-        if (rowDrag.dragging) {
-          const rect = leftRef.current?.getBoundingClientRect()
-          if (rect) {
-            const rel = e.clientY - rect.top + (leftRef.current?.scrollTop ?? 0)
-            setDropIdx(Math.min(Math.max(0, Math.round(rel / ROW_H)), displayRows.length))
-          }
-        }
-      }
-
       if (splitterDrag) {
         const newW = Math.max(COL_NUM + COL_CHECK + nameW, Math.min(900, splitterDrag.startW + e.clientX - splitterDrag.startX))
         setPanelW(newW)
@@ -1686,7 +1790,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, rowDrag, displayRows.length, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
+  }, [drag, connect, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1903,57 +2007,6 @@ export default function GanttChart({
         setConnect(null)
       }
 
-      if (rowDrag) {
-        if (rowDrag.dragging && dropIdx !== null) {
-          const dIdx = displayRows.findIndex(r => r.task.id === rowDrag.taskId)
-          if (dIdx !== -1 && dropIdx !== dIdx && dropIdx !== dIdx + 1) {
-            const dTask = displayRows[dIdx].task
-            const without = displayRows.filter((_, i) => i !== dIdx)
-            const adj = dropIdx > dIdx ? dropIdx - 1 : dropIdx
-
-            const newPid: string | null = adj < without.length
-              ? without[adj].task.parent_id
-              : without.length > 0 ? without[without.length - 1].task.parent_id : null
-
-            const insertAt = without.slice(0, adj).filter(r => r.task.parent_id === newPid).length
-
-            const siblings = tasks
-              .filter(t => t.parent_id === newPid && t.id !== dTask.id)
-              .sort((a, b) => a.order_index - b.order_index)
-
-            const newGroup = [
-              ...siblings.slice(0, insertAt),
-              { ...dTask, parent_id: newPid },
-              ...siblings.slice(insertAt),
-            ]
-
-            const updates: Array<{ id: string; parent_id: string | null; order_index: number }> = []
-            newGroup.forEach((t, i) => {
-              const orig = tasks.find(o => o.id === t.id)!
-              if (orig.parent_id !== t.parent_id || orig.order_index !== i)
-                updates.push({ id: t.id, parent_id: t.parent_id, order_index: i })
-            })
-
-            if (dTask.parent_id !== newPid) {
-              tasks
-                .filter(t => t.parent_id === dTask.parent_id && t.id !== dTask.id)
-                .sort((a, b) => a.order_index - b.order_index)
-                .forEach((t, i) => {
-                  if (t.order_index !== i)
-                    updates.push({ id: t.id, parent_id: t.parent_id, order_index: i })
-                })
-            }
-
-            if (updates.length > 0) {
-          
-              dispatch(updateTasks(updates.map(u => ({ ...tasks.find(t => t.id === u.id)!, ...u }))))
-              dispatch(markDirty(updates.map(u => u.id)))
-            }
-          }
-        }
-        setRowDrag(null); setDropIdx(null)
-      }
-
       if (splitterDrag) setSplitterDrag(null)
       if (nameDrag) setNameDrag(null)
 
@@ -1969,7 +2022,7 @@ export default function GanttChart({
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, rowDrag, dropIdx, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot, isMinute])
+  }, [drag, connect, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot, isMinute])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -3007,14 +3060,14 @@ export default function GanttChart({
         {gridError && <div role="alert" className="bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
         <div ref={leftRef} data-gantt-grid tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
-             className="overflow-y-scroll flex-1 scrollbar-hide outline-none"
+             className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
              style={{ cursor: rowDrag?.dragging ? 'grabbing' : undefined }}>
           {displayRows.map((row, i) => {
             const t = row.task
             const sel = selectedIds.includes(t.id)
             const isEditing = editId === t.id
-            const isDraggingThis = rowDrag?.dragging && rowDrag.taskId === t.id
+            const isDraggingThis = rowDrag?.dragging && movingRowIds.has(t.id)
             const incomingDeps = deps.filter(d => d.to_task_id === t.id)
             const predNums = incomingDeps
               .map(d => flatRowIdx[d.from_task_id])
@@ -3036,15 +3089,14 @@ export default function GanttChart({
             const pickCell = (col: OptionalCol | 'name') => () => { setSelectedCell({ taskId: t.id, col }); leftRef.current?.focus({ preventScroll: true }) }
             return (
               <React.Fragment key={t.id}>
-                {rowDrag?.dragging && dropIdx === i && (
-                  <div style={{ height: 2, background: '#3b82f6', flexShrink: 0 }} />
-                )}
                 <div
                   className={`flex border-b border-gray-100 cursor-pointer
                     ${sel ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   style={{ height: ROW_H, opacity: isDraggingThis ? 0.35 : 1 }}
                   data-task-row={t.id}
+                  onMouseDownCapture={() => { rowDragJustEnded.current = false }}
                   onClickCapture={e => {
+                    if (rowDragJustEnded.current) { rowDragJustEnded.current = false; e.preventDefault(); e.stopPropagation(); return }
                     if (rowDrag?.dragging || (e.target as HTMLElement).closest('input,button,select,textarea')) return
                     selectTask(t.id, e)
                     leftRef.current?.focus({ preventScroll: true })
@@ -3070,9 +3122,10 @@ export default function GanttChart({
                        className="flex items-center border-r border-gray-100 h-full flex-none flex-shrink-0 relative group/wbs">
                     {/* Drag handle */}
                     <div
-                      className="flex items-center justify-center w-4 h-full cursor-grab active:cursor-grabbing opacity-0 group-hover/wbs:opacity-100 transition-opacity flex-none"
-                      onMouseDown={e => { e.preventDefault(); e.stopPropagation(); onRowDragStart(e, t.id) }}
-                      title="拖动排序"
+                      className={`flex items-center justify-center w-5 h-full flex-none ${readOnly || (sortCol && sortDir) ? 'cursor-default opacity-25' : 'cursor-grab active:cursor-grabbing text-slate-400 hover:bg-blue-100 hover:text-blue-600'}`}
+                      onMouseDown={e => { e.stopPropagation(); onRowDragStart(e, t.id) }}
+                      data-task-drag-handle={t.id}
+                      title={sortCol && sortDir ? '请先取消列排序，再拖动任务' : '拖动排序'}
                     >
                       <svg viewBox="0 0 6 10" width="6" height="10" fill="#9ca3af">
                         <circle cx="1.5" cy="1.5" r="1" /><circle cx="4.5" cy="1.5" r="1" />
@@ -3096,10 +3149,13 @@ export default function GanttChart({
                   </div>
 
                   {/* ── Name cell ─────────────────────────────────── */}
-                  <div style={{ width: nameColW, minWidth: MIN_NAME_W, paddingLeft: 4 + row.level * 16 }}
+                  <div style={{ width: nameColW, minWidth: MIN_NAME_W, paddingLeft: 4 + row.level * 16,
+                         cursor: !readOnly && !isEditing && !(sortCol && sortDir) ? 'grab' : undefined }}
                        className={`flex items-center border-r border-gray-100 h-full flex-none overflow-hidden ${isEditing ? '' : cellRing('name')}`}
                        data-task-cell={t.id}
                        data-col="name" onClick={pickCell('name')}
+                       onMouseDown={e => { if (!isEditing) onRowDragStart(e, t.id) }}
+                       title={readOnly ? undefined : sortCol && sortDir ? '请先取消列排序，再拖动任务' : '按住任务名称上下拖动；双击编辑名称'}
                        onDoubleClick={() => { if (!readOnly) { setEditId(t.id); setEditName(t.name) } }}>
                     {row.hasChildren
                       ? <button onClick={e => { e.stopPropagation(); toggle(t.id) }}
@@ -3555,14 +3611,27 @@ export default function GanttChart({
               </React.Fragment>
             )
           })}
-          {rowDrag?.dragging && dropIdx === flatRows.length && (
-            <div style={{ height: 2, background: '#3b82f6' }} />
+          {rowDrag?.dragging && dropIdx !== null && (
+            <div data-task-drop-indicator aria-hidden="true" className="absolute inset-x-0 z-10 pointer-events-none"
+                 style={{ top: Math.max(0, dropIdx * ROW_H - 1), height: 2, background: rowDrop?.plan.invalidReason ? '#ef4444' : '#2563eb' }} />
           )}
           {/* 补偿右侧水平滚动条高度，使左右面板底部对齐 */}
           {hScrollbarH > 0 && <div style={{ height: hScrollbarH, flexShrink: 0 }} />}
         </div>
        </div>
       </div>
+
+      {rowDrag?.dragging && rowDragPoint && ReactDOM.createPortal(
+        <div data-task-drag-preview role="status" className="fixed z-[10000] pointer-events-none rounded-lg border bg-white px-3 py-2 text-xs shadow-xl max-w-[320px]"
+             style={{ left: Math.min(rowDragPoint.x + 18, window.innerWidth - 330), top: Math.min(rowDragPoint.y + 18, window.innerHeight - 100),
+               borderColor: rowDrop?.plan.invalidReason ? '#ef4444' : '#3b82f6' }}>
+          <div className="font-medium text-gray-800">移动 {movingRows.roots.length} 个任务{movingRows.ids.length > movingRows.roots.length ? '（含子任务）' : ''}</div>
+          {rowDrop?.plan.invalidReason ? <div className="mt-1 text-red-600">{rowDrop.plan.invalidReason}</div>
+            : rowDrop ? <><div className="mt-1 text-blue-700">放到「{rowDrop.target.name}」{rowDrop.position === 'before' ? '上方' : '下方'}</div>
+              <div className="mt-1 text-gray-500">{rowDrop.plan.parentId ? `父任务：${tasks.find(t => t.id === rowDrop.plan.parentId)?.name ?? ''}` : '顶级任务'} · Esc 取消</div></>
+            : <div className="mt-1 text-gray-500">移回左侧任务列表后放置 · Esc 取消</div>}
+        </div>, document.body,
+      )}
 
       {/* ── Splitter ─────────────────────────────────────────────────── */}
       <div
