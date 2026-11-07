@@ -133,9 +133,10 @@ export async function POST(req: NextRequest, { params }: Params) {
         })
       }
 
-      const cascadedIds = await cascadeDependencies(client, projectId)
-      const summaryUpdated = await updateSummaryTasksDates(client, projectId)
-      const snappedIds = await snapTasksToDayLevel(client, projectId)
+      const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
+      const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
+      const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
+      const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
 
       const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
       let updatedTasks: Record<string, unknown>[] = []
@@ -227,9 +228,10 @@ export async function PUT(req: NextRequest, { params }: Params) {
       }
     }
 
-    const cascadedIds = await cascadeDependencies(client, projectId)
-    const summaryUpdated = await updateSummaryTasksDates(client, projectId)
-    const snappedIds = await snapTasksToDayLevel(client, projectId)
+    const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
+    const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
+    const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
+    const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
 
     const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
     let updatedTasks: Record<string, unknown>[] = []
@@ -300,9 +302,10 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     }
 
     // 删除依赖后重新级联，让后继任务回到独立排程
-    const cascadedIds = await cascadeDependencies(client, projectId)
-    const summaryUpdated = await updateSummaryTasksDates(client, projectId)
-    const snappedIds = await snapTasksToDayLevel(client, projectId)
+    const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
+    const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
+    const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
+    const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
 
     const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
     let updatedTasks: Record<string, unknown>[] = []

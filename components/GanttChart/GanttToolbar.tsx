@@ -1253,6 +1253,9 @@ export default function GanttToolbar({
     const submittedTasks = submitted.tasks
     const submittedDeps = submitted.dependencies
     const submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
+    const saveHeaders = authFetchHeaders(true)
+    saveHeaders.set('x-gantt-confirmed-save', '1')
+    const saveWarnings: Array<{ taskName: string; message: string }> = []
     try {
       let saveBaseTasks = baselineTasks
       let saveBaseDeps = baselineDeps
@@ -1321,27 +1324,20 @@ export default function GanttToolbar({
       // 删除依赖必须先于删除任务，避免外键级联删除丢失审计
       for (const depId of diff.depsToDelete) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'DELETE', headers: authFetchHeaders(true),
+          method: 'DELETE', headers: saveHeaders,
           body: JSON.stringify({ id: depId, _reason: dependencyReasons[depId]?.trim() }),
         })
         if (!r.ok) throw new Error(`删除依赖失败 (${r.status})`)
       }
-      // 删除任务
-      if (diff.tasksToDelete.length > 0) {
-        const r = await authFetch(`/api/tasks/${projectId}`, {
-          method: 'DELETE', headers: authFetchHeaders(true),
-          body: JSON.stringify({ ids: diff.tasksToDelete, reasons: reasonByTaskId }),
-        })
-        if (!r.ok) throw new Error(`删除任务失败 (${r.status})`)
-      }
       // 新增任务（连同 client id / task_code）
       if (diff.tasksToAdd.length > 0) {
         const r = await authFetch(`/api/tasks/${projectId}`, {
-          method: 'POST', headers: authFetchHeaders(true),
+          method: 'POST', headers: saveHeaders,
           body: JSON.stringify(diff.tasksToAdd.map(t => ({ ...t, _reason: reasonByTaskId[t.id] }))),
         })
         const result = await r.json()
         if (!r.ok || !result.ok || !Array.isArray(result.value)) throw new Error(result.error ?? `新增任务失败 (${r.status})`)
+        if (Array.isArray(result.warnings)) saveWarnings.push(...result.warnings)
         // The recovery read may precede an earlier request's commit. An
         // idempotent POST can then return that request's older values.
         diff.tasksToUpdate.push(...buildSaveDiff(result.value, [], diff.tasksToAdd, []).tasksToUpdate)
@@ -1350,7 +1346,7 @@ export default function GanttToolbar({
       if (diff.tasksToUpdate.length > 0) {
         const payload = diff.tasksToUpdate.map(t => ({
           id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
-          duration: t.duration, percent_done: t.percent_done, parent_id: t.parent_id,
+          duration: t.duration, duration_unit: t.duration_unit, percent_done: t.percent_done, parent_id: t.parent_id,
           order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
           assignee: t.assignee, note: t.note,
           constraint_type: t.constraint_type, constraint_date: t.constraint_date,
@@ -1360,16 +1356,25 @@ export default function GanttToolbar({
           _reason: reasonByTaskId[t.id],
         }))
         const r = await authFetch(`/api/tasks/${projectId}`, {
-          method: 'PUT', headers: authFetchHeaders(true),
+          method: 'PUT', headers: saveHeaders,
           body: JSON.stringify(payload),
         })
         const result = await r.json()
         if (!r.ok || !result.ok) throw new Error(result.error ?? `更新任务失败 (${r.status})`)
+        if (Array.isArray(result.warnings)) saveWarnings.push(...result.warnings)
+      }
+      // 删除任务
+      if (diff.tasksToDelete.length > 0) {
+        const r = await authFetch(`/api/tasks/${projectId}`, {
+          method: 'DELETE', headers: saveHeaders,
+          body: JSON.stringify({ ids: diff.tasksToDelete, reasons: reasonByTaskId }),
+        })
+        if (!r.ok) throw new Error(`删除任务失败 (${r.status})`)
       }
       // 新增依赖
       for (const dep of diff.depsToAdd) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'POST', headers: authFetchHeaders(true),
+          method: 'POST', headers: saveHeaders,
           body: JSON.stringify({
             id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
             type: dep.type, lag: dep.lag, active: dep.active ?? true,
@@ -1383,7 +1388,7 @@ export default function GanttToolbar({
       // 更新依赖
       for (const dep of diff.depsToUpdate) {
         const r = await authFetch(`/api/dependencies/${projectId}`, {
-          method: 'PUT', headers: authFetchHeaders(true),
+          method: 'PUT', headers: saveHeaders,
           body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true, _reason: dependencyReasons[dep.id]?.trim() }),
         })
         if (!r.ok) throw new Error(`更新依赖失败 (${r.status})`)
@@ -1394,7 +1399,7 @@ export default function GanttToolbar({
       if (sd !== saveBaseStatusDate || submittedPlanningStatus !== saveBasePlanningStatus) {
         const r = await authFetch(`/api/projects/${projectId}`, {
           method: 'PUT',
-          headers: authFetchHeaders(true),
+          headers: saveHeaders,
           body: JSON.stringify({ status_date: sd, planning_status: submittedPlanningStatus }),
         })
         if (!r.ok) throw new Error(`保存项目状态失败 (${r.status})`)
@@ -1405,7 +1410,7 @@ export default function GanttToolbar({
         if (submittedLines.some(l => l.id === line.id)) continue
         attemptedLineIds.current.add(line.id)
         const r = await authFetch(`/api/project-lines/${projectId}`, {
-          method: 'DELETE', headers: authFetchHeaders(true), body: JSON.stringify({ id: line.id }),
+          method: 'DELETE', headers: saveHeaders, body: JSON.stringify({ id: line.id }),
         })
         if (!r.ok) throw new Error(`删除项目线失败 (${r.status})`)
       }
@@ -1415,7 +1420,7 @@ export default function GanttToolbar({
         if (old && linesEqual([old], [line])) continue
         attemptedLineIds.current.add(line.id)
         const r = await authFetch(`/api/project-lines/${projectId}`, {
-          method: old ? 'PUT' : 'POST', headers: authFetchHeaders(true), body: JSON.stringify(line),
+          method: old ? 'PUT' : 'POST', headers: saveHeaders, body: JSON.stringify(line),
         })
         const d = await r.json()
         if (!r.ok || !d.ok || !d.value?.id) throw new Error(d.error ?? `保存项目线失败 (${r.status})`)
@@ -1427,7 +1432,7 @@ export default function GanttToolbar({
       let confirmed: SaveBaseline
       if (createVersion) {
         const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
-          method: 'POST', headers: authFetchHeaders(true),
+          method: 'POST', headers: saveHeaders,
           body: JSON.stringify({ use_database_snapshot: true, include_snapshot: true, status_date: sd, reasons: reasonMap }),
         })
         const snapshotData = await snapshotRes.json()
@@ -1465,6 +1470,7 @@ export default function GanttToolbar({
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
       setBaselineDeps(savedDeps.map(d => ({ ...d })))
       setBaselineStatusDate(confirmed.statusDate)
+      if (saveWarnings.length) alert(`所有任务修改已保存。以下无效父级关联已修正，并记入任务历史：\n${saveWarnings.map(w => `${w.taskName}：${w.message}`).join('\n')}`)
       setSaveIncomplete(false)
       attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
 

@@ -1,5 +1,8 @@
 import { hasProjectAccess } from '@/lib/projectAccess'
 import { isUuid } from '@/lib/projectAccessPolicy'
+import { randomUUID } from 'node:crypto'
+import { planSubmittedHierarchy, isSubmittedTaskBatch, type HierarchyTask, type HierarchyRepair } from '@/lib/submittedTaskHierarchy'
+import { persistSubmittedHierarchy } from '@/lib/server/submittedHierarchy'
 import { addLifecycle, addLifecycleBatch, normalizeChangeReason, type LifecycleInput } from '@/lib/taskLifecycle'
 import { NextRequest, NextResponse } from 'next/server'
 import type { PoolClient } from 'pg'
@@ -9,7 +12,7 @@ import { success, failure } from '@/lib/result'
 import { normalizeDurationMinutes } from '@/lib/taskNumbers'
 import {
   type TaskLike,
-  toDateStr, addDaysStr, diffDaysStr,
+  toDateStr, addDaysStr,
   cascadeDependencies, collapseDeletedTaskSuccessors, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
   snapTasksToDayLevel,
 } from '@/lib/scheduling'
@@ -42,41 +45,6 @@ async function taskCodeExists(client: PoolClient, projectId: string, taskCode: s
     [projectId, taskCode],
   )
   return res.rows.length > 0
-}
-
-function sortTaskInputsForInsert(taskInputs: unknown[]): Record<string, unknown>[] {
-  const tasks = taskInputs.filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
-  const byId = new Map<string, Record<string, unknown>>()
-  for (const task of tasks) {
-    if (typeof task.id === 'string' && task.id) byId.set(task.id, task)
-  }
-
-  const sorted: Record<string, unknown>[] = []
-  const visiting = new Set<string>()
-  const visited = new Set<string>()
-
-  const visit = (task: Record<string, unknown>) => {
-    const id = typeof task.id === 'string' ? task.id : null
-    if (id && visited.has(id)) return
-    if (id && visiting.has(id)) {
-      sorted.push(task)
-      visited.add(id)
-      return
-    }
-
-    if (id) visiting.add(id)
-    const parentId = typeof task.parent_id === 'string' ? task.parent_id : null
-    const parent = parentId ? byId.get(parentId) : null
-    if (parent && parent !== task) visit(parent)
-    if (id) {
-      visiting.delete(id)
-      visited.add(id)
-    }
-    if (!sorted.includes(task)) sorted.push(task)
-  }
-
-  for (const task of tasks) visit(task)
-  return sorted
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -137,7 +105,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
   }
 
-  const [tasksRes, depsRes, projRes] = await Promise.all([
+  const [tasksRes, depsRes] = await Promise.all([
     pool.query(
       'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index ASC',
       [projectId]
@@ -149,117 +117,10 @@ export async function GET(req: NextRequest, { params }: Params) {
        WHERE d.project_id = $1`,
       [projectId]
     ),
-    pool.query('SELECT time_granularity FROM projects WHERE id = $1', [projectId]),
   ])
 
-  const allTasks = tasksRes.rows
-  const allDeps = depsRes.rows
-  const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
-
-  // 检查依赖级联和摘要任务是否需要修正
-  // 优化：预先构建 byId / childrenByParent / 归一化日期，避免 O(n²) 的 find/filter。
-  {
-    let needsFix = false
-    type T = { id: string; start: string; end: string; dur: number; auto: boolean; parent_id: string | null }
-    const byId = new Map<string, T>()
-    const childrenByParent = new Map<string, T[]>()
-    for (const t of allTasks) {
-      const node: T = {
-        id: t.id,
-        start: toDateStr(t.start_date) ?? '',
-        end: toDateStr(t.end_date) ?? '',
-        dur: t.duration ?? 0,
-        auto: t.auto_schedule !== false,
-        parent_id: t.parent_id,
-      }
-      byId.set(t.id, node)
-      if (t.parent_id) {
-        const arr = childrenByParent.get(t.parent_id)
-        if (arr) arr.push(node)
-        else childrenByParent.set(t.parent_id, [node])
-      }
-    }
-    // 判断 ancestorId 是否是 taskId 的祖先
-    const isAnc = (ancestorId: string, taskId: string): boolean => {
-      let cur = byId.get(taskId); const visited = new Set<string>()
-      while (cur?.parent_id) { if (cur.parent_id === ancestorId) return true; if (visited.has(cur.parent_id)) break; visited.add(cur.parent_id); cur = byId.get(cur.parent_id) }
-      return false
-    }
-    for (const d of allDeps) {
-      // 跳过父子关系的依赖
-      if (isAnc(d.from_task_id, d.to_task_id) || isAnc(d.to_task_id, d.from_task_id)) continue
-      const from = byId.get(d.from_task_id)
-      const to = byId.get(d.to_task_id)
-      if (!from?.start || !from?.end || !to?.start || !to?.end || !to.auto) continue
-      const depType = d.type ?? 2
-      // dependencies.lag is stored in minutes for both day-level and minute-level projects.
-      const lag = d.lag ?? 0
-      let rs: string | null = null
-      if (depType === 2)      rs = addDaysStr(from.end, lag)
-      else if (depType === 0) rs = addDaysStr(from.start, lag)
-      else if (depType === 3) rs = addDaysStr(from.end, lag - to.dur)
-      else if (depType === 1) rs = addDaysStr(from.start, lag - to.dur)
-      if (rs && rs !== to.start) { needsFix = true; break }
-    }
-    // 检查摘要任务：用 childrenByParent 跑 min/max（线性，不再排序整个数组）
-    if (!needsFix) {
-      for (const [pid, children] of childrenByParent) {
-        const parent = byId.get(pid)
-        if (!parent) continue
-        let minStart: string | null = null
-        let maxEnd: string | null = null
-        for (const c of children) {
-          if (c.start && (minStart === null || c.start < minStart)) minStart = c.start
-          if (c.end && (maxEnd === null || c.end > maxEnd)) maxEnd = c.end
-        }
-        if (minStart === null || maxEnd === null) continue
-        if (parent.start !== minStart || parent.end !== maxEnd) {
-          needsFix = true; break
-        }
-      }
-    }
-    // 天级项目：发现任一任务带非整天的时分秒，需要 snap 到 00:00
-    if (!needsFix && !projIsMinute) {
-      for (const t of allTasks) {
-        const s = t.start_date instanceof Date ? t.start_date : (t.start_date ? new Date(t.start_date) : null)
-        const e = t.end_date   instanceof Date ? t.end_date   : (t.end_date   ? new Date(t.end_date)   : null)
-        const dur = t.duration as number | null
-        const expectedDur = !t.is_milestone && t.start_date && t.end_date
-          ? Math.max(0, Math.round((e!.getTime() - s!.getTime()) / 86_400_000) * 1440)
-          : null
-        const offDay =
-          (s && (s.getHours() !== 0 || s.getMinutes() !== 0 || s.getSeconds() !== 0)) ||
-          (e && (e.getHours() !== 0 || e.getMinutes() !== 0 || e.getSeconds() !== 0)) ||
-          (dur != null && dur % 1440 !== 0) ||
-          (expectedDur != null && dur !== expectedDur)
-        if (offDay) { needsFix = true; break }
-      }
-    }
-    if (needsFix) {
-      const client = await pool.connect()
-      try {
-        await client.query('BEGIN')
-        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
-        await cascadeDependencies(client, projectId)
-        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
-        await updateSummaryTasksDates(client, projectId)
-        if (!projIsMinute) await snapTasksToDayLevel(client, projectId)
-        await client.query('COMMIT')
-        const refreshRes = await pool.query(
-          'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index ASC',
-          [projectId]
-        )
-        allTasks.length = 0
-        allTasks.push(...refreshRes.rows)
-      } catch {
-        await client.query('ROLLBACK').catch(() => {})
-      } finally {
-        client.release()
-      }
-    }
-  }
-
-  return NextResponse.json(success({ tasks: allTasks, dependencies: allDeps }))
+  // Loading or retrying a save must never repair/cascade/write the stored plan.
+  return NextResponse.json(success({ tasks: tasksRes.rows, dependencies: depsRes.rows }))
 }
 
 // ── POST ──────────────────────────────────────────────────────────────────
@@ -278,7 +139,10 @@ export async function POST(req: NextRequest, { params }: Params) {
   } catch {
     return NextResponse.json(failure('请求体解析失败', 400), { status: 400 })
   }
-  const taskInputs = Array.isArray(body) ? body : [body]
+  const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1' || isSubmittedTaskBatch(body)
+  const taskInputs = (Array.isArray(body) ? body : [body]).filter(t => t && typeof t === 'object')
+    .map(t => ({ ...t, id: isUuid(t.id) ? t.id : randomUUID() }))
+  let hierarchyRepairs: HierarchyRepair[] = []
 
   let client: PoolClient
   try {
@@ -291,25 +155,25 @@ export async function POST(req: NextRequest, { params }: Params) {
   try {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
-    const sortedTaskInputs = sortTaskInputsForInsert(taskInputs)
-    const insertedIds = new Set<string>()
-    const existingParentIds = new Map<string, boolean>()
-    const resolveParentId = async (rawParentId: unknown, clientId: string | null): Promise<string | null> => {
-      if (typeof rawParentId !== 'string' || !rawParentId.trim()) return null
-      const parentId = rawParentId.trim()
-      if (clientId && parentId === clientId) return null
-      if (insertedIds.has(parentId)) return parentId
-      if (!existingParentIds.has(parentId)) {
-        const parentRes = await client.query(
-          'SELECT 1 FROM tasks WHERE project_id = $1 AND id = $2 AND is_deleted = false LIMIT 1',
-          [projectId, parentId],
-        )
-        existingParentIds.set(parentId, parentRes.rows.length > 0)
-      }
-      return existingParentIds.get(parentId) ? parentId : null
+    const existingRows = await client.query('SELECT * FROM tasks WHERE project_id = $1', [projectId])
+    const foreign = await client.query('SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND project_id <> $2', [taskInputs.map(t => t.id), projectId])
+    if (foreign.rows.length) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('任务 ID 属于其他项目，当前修改仍保留', 409), { status: 409 })
     }
+    if (taskInputs.some(t => typeof t.name !== 'string' || !t.name.trim())) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('任务名称不能为空，当前修改仍保留', 400), { status: 400 })
+    }
+    const existingById = new Map(existingRows.rows.map(t => [t.id, t]))
+    const hierarchy = planSubmittedHierarchy(existingRows.rows, taskInputs.map(t => {
+      const old = existingById.get(t.id)
+      // A replayed create must not undo a later successful parent move.
+      return old && !old.is_deleted ? { ...t, parent_id: old.parent_id } : t
+    }))
+    hierarchyRepairs = hierarchy.repairs
 
-    for (const task of sortedTaskInputs) {
+    for (const task of taskInputs) {
       const { id, task_code, name, parent_id, assignee, start_date, end_date, duration, duration_unit,
               percent_done, is_milestone, note, order_index, auto_schedule,
               constraint_type, constraint_date, deadline, status, rollup, inactive,
@@ -322,14 +186,13 @@ export async function POST(req: NextRequest, { params }: Params) {
         const existing = await client.query('SELECT * FROM tasks WHERE id = $1', [clientId])
         const saved = existing.rows[0]
         if (saved) {
-          if (saved.project_id !== projectId || saved.is_deleted) {
+          if (saved.project_id !== projectId) {
             await client.query('ROLLBACK')
-            return NextResponse.json(failure('任务 ID 已被使用，请重新加载项目', 409), { status: 409 })
+            return NextResponse.json(failure('任务 ID 属于其他项目，当前修改仍保留', 409), { status: 409 })
           }
           // A committed create whose response was lost is safe to replay.
           // Updates to that task must still use PUT; do not duplicate its history.
           inserted.push(saved)
-          insertedIds.add(saved.id)
           continue
         }
       }
@@ -377,7 +240,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       {
         const projRes = await client.query('SELECT start_date FROM projects WHERE id = $1', [projectId])
         const projStart = projRes.rows[0]?.start_date ? toDateStr(projRes.rows[0].start_date) : null
-        if (projStart && normalizedStart && normalizedStart < projStart) {
+        if (!submittedPlan && projStart && normalizedStart && normalizedStart < projStart) {
           const dur = normalizedDuration ?? 0
           normalizedStart = projStart
           if (is_milestone) {
@@ -395,7 +258,7 @@ export async function POST(req: NextRequest, { params }: Params) {
             constraint_type, constraint_date, deadline, status, rollup, inactive,
             project_boundary, baseline_end_date)
          VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
-        [clientId, projectId, await resolveParentId(parent_id, clientId), code, name,
+        [clientId, projectId, null, code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          normalizedDuration, duration_unit ?? 'day',
          percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
@@ -405,7 +268,6 @@ export async function POST(req: NextRequest, { params }: Params) {
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
-      insertedIds.add(newTask.id)
 
       await addLifecycle(client, {
         taskId: newTask.id, taskCode: code, projectId,
@@ -415,10 +277,16 @@ export async function POST(req: NextRequest, { params }: Params) {
       })
     }
 
-    // 更新摘要任务的时间范围
-    await updateSummaryTasksDates(client, projectId)
-    // 天级项目：把任何残留的非整天时间统一 snap 到 00:00
-    await snapTasksToDayLevel(client, projectId)
+    // All IDs now exist; apply the final graph and revive explicitly retained
+    // same-project records before any summary handling.
+    await persistSubmittedHierarchy(client, projectId, auth.value.userId, existingRows.rows, hierarchy)
+    if (!submittedPlan) {
+      await updateSummaryTasksDates(client, projectId)
+      await snapTasksToDayLevel(client, projectId)
+    }
+    const saved = await client.query('SELECT * FROM tasks WHERE project_id = $1 AND id = ANY($2::uuid[])', [projectId, inserted.map(t => t.id)])
+    const savedById = new Map(saved.rows.map(t => [t.id, t]))
+    for (let i = 0; i < inserted.length; i++) inserted[i] = savedById.get(inserted[i].id) ?? inserted[i]
 
     await client.query('COMMIT')
   } catch (err) {
@@ -430,7 +298,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     client.release()
   }
 
-  return NextResponse.json(success(inserted), { status: 201 })
+  return NextResponse.json({ ...success(inserted), warnings: hierarchyRepairs }, { status: 201 })
 }
 
 // ── PUT ───────────────────────────────────────────────────────────────────
@@ -472,7 +340,10 @@ export async function PUT(req: NextRequest, { params }: Params) {
   } catch {
     return NextResponse.json(failure('请求体解析失败', 400), { status: 400 })
   }
-  const taskInputs = Array.isArray(body) ? body : [body]
+  const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1' || isSubmittedTaskBatch(body)
+  let taskInputs: Record<string, any>[] = (Array.isArray(body) ? body : [body]).filter(t => t && typeof t === 'object')
+  if (taskInputs.some(t => !isUuid(t.id))) return NextResponse.json(failure('无效的任务 ID，当前修改仍保留', 400), { status: 400 })
+  let hierarchyRepairs: HierarchyRepair[] = []
 
   let client: PoolClient
   try {
@@ -499,17 +370,24 @@ export async function PUT(req: NextRequest, { params }: Params) {
       ? projStatusDate
       : (projStatusDate ? projStatusDate.slice(0, 10) : null)
 
-    // ── Batch fetch all old tasks in one query ────────────────────────────
-    const inputIds = taskInputs.map((t: Record<string, unknown>) => t.id as string).filter(Boolean)
-    const oldMap = new Map<string, Record<string, unknown>>()
-    if (inputIds.length > 0) {
-      const ph = inputIds.map((_: string, i: number) => `$${i + 2}`).join(',')
-      const prevRes = await client.query(
-        `SELECT * FROM tasks WHERE project_id = $1 AND id IN (${ph}) AND is_deleted = false`,
-        [projectId, ...inputIds]
-      )
-      for (const row of prevRes.rows) oldMap.set(row.id, row)
+    const inputIds = taskInputs.map(t => t.id as string)
+    const existingRows = await client.query('SELECT * FROM tasks WHERE project_id = $1', [projectId])
+    const oldMap = new Map<string, Record<string, any>>(existingRows.rows.map(t => [t.id, t]))
+    const missingIds = inputIds.filter(id => !oldMap.has(id))
+    if (missingIds.length) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('部分任务已不存在于当前项目，请直接重试以按当前提交重建；未保存修改仍保留', 404), { status: 404 })
     }
+    const hierarchy = planSubmittedHierarchy(existingRows.rows, taskInputs as HierarchyTask[])
+    if (!submittedPlan && hierarchy.repairs.length) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('父任务必须属于当前项目且不能形成循环', 400), { status: 400 })
+    }
+    hierarchyRepairs = hierarchy.repairs
+    const parents = new Map(hierarchy.parents.map(t => [t.id, t.parent_id]))
+    taskInputs = taskInputs.map(t => ({ ...t, parent_id: parents.get(t.id) ?? null }))
+    // Resolve parent reversals as one graph, not against intermediate old rows.
+    await persistSubmittedHierarchy(client, projectId, auth.value.userId, existingRows.rows, hierarchy)
 
     // Collect lifecycle events for batch insert at the end
     const lifecycleEvents: LifecycleInput[] = []
@@ -534,17 +412,6 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
       const hasParentKey = 'parent_id' in task
       const hasAssigneeKey = 'assignee' in task
-
-      if (hasParentKey && task.parent_id != null) {
-        const parentId = task.parent_id
-        const parent = isUuid(parentId) && parentId !== id
-          ? await client.query('SELECT id FROM tasks WHERE id = $1 AND project_id = $2 AND is_deleted = false', [parentId, projectId])
-          : null
-        if (!parent?.rows.length) {
-          await client.query('ROLLBACK')
-          return NextResponse.json(failure('父任务必须属于当前项目且不能是任务自身', 400), { status: 400 })
-        }
-      }
 
       // ── 里程碑强制约束：工期=0, end_date=start_date, percent_done=100 ──
       const taskRec = task as Record<string, unknown>
@@ -617,13 +484,13 @@ export async function PUT(req: NextRequest, { params }: Params) {
            name         = COALESCE($1, name),
            parent_id    = CASE WHEN $13 THEN $2 ELSE parent_id END,
            assignee     = CASE WHEN $14 THEN $3 ELSE assignee END,
-           start_date   = COALESCE($4, start_date),
-           end_date     = COALESCE($5, end_date),
-           duration     = COALESCE($6, duration),
+           start_date   = CASE WHEN $34 THEN $4 ELSE start_date END,
+           end_date     = CASE WHEN $35 THEN $5 ELSE end_date END,
+           duration     = CASE WHEN $36 THEN $6 ELSE duration END,
            duration_unit= COALESCE($7, duration_unit),
            percent_done = COALESCE($8, percent_done),
            is_milestone = COALESCE($9, is_milestone),
-           note         = $10,
+           note         = CASE WHEN $37 THEN $10 ELSE note END,
            order_index  = COALESCE($11, order_index),
            auto_schedule= CASE WHEN $16 THEN $17 ELSE auto_schedule END,
            constraint_type = CASE WHEN $18 THEN $19 ELSE constraint_type END,
@@ -659,6 +526,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
           hasPB, (t.project_boundary as string | null) ?? 'ask',
           hasBE, normalizeDate(t.baseline_end_date),
           hasDL, normalizeDate(t.deadline),
+          Object.hasOwn(t, 'start_date'), Object.hasOwn(t, 'end_date'), Object.hasOwn(t, 'duration'), Object.hasOwn(t, 'note'),
         ]
       )
       if (!r.rows[0]) continue
@@ -708,7 +576,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         }
 
         // ── When parent_id changes, update both old and new parent task dates ────────
-        if (parentChanged) {
+        if (parentChanged && !submittedPlan) {
           const collected: TaskLike[] = []
           if (old.parent_id) {
             await updateSummaryTaskDateRecursive(client, old.parent_id as string, collected)
@@ -772,7 +640,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       }
 
       // ── When task date changes, update parent summary task dates (once) ─
-      if (dateChanged && cur.parent_id) {
+      if (!submittedPlan && dateChanged && cur.parent_id) {
         const collected: TaskLike[] = []
         await updateSummaryTaskDateRecursive(client, cur.parent_id, collected)
         for (const u of collected) {
@@ -831,7 +699,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     await addLifecycleBatch(client, lifecycleEvents)
 
     // FS 依赖自动级联：确保后继任务开始日期 >= 前置任务结束日期 + lag
-    const cascadedIds = await cascadeDependencies(client, projectId)
+    const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
     if (cascadedIds.length > 0) {
       const ph = cascadedIds.map((_, i) => `$${i + 2}`).join(',')
       const cascadedRows = await client.query(
@@ -844,7 +712,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     }
 
     // 更新摘要任务的时间范围：摘要任务的起止时间应该与所有子任务的范围一致
-    const summaryUpdated = await updateSummaryTasksDates(client, projectId)
+    const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
     if (summaryUpdated.length > 0) {
       summaryUpdated.forEach(r => {
         if (!updated.some((u: TaskLike) => u.id === r.id)) updated.push(r)
@@ -852,7 +720,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     }
 
     // 天级项目：把级联/摘要算出的非整天时间统一 snap 到 00:00
-    const snappedIds = await snapTasksToDayLevel(client, projectId)
+    const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
     if (snappedIds.length > 0) {
       const ph = snappedIds.map((_, i) => `$${i + 2}`).join(',')
       const snappedRows = await client.query(
@@ -921,7 +789,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     client.release()
   }
 
-  return NextResponse.json(success(updated))
+  return NextResponse.json({ ...success(updated), warnings: hierarchyRepairs })
 }
 
 // ── DELETE (soft) ─────────────────────────────────────────────────────────
@@ -941,7 +809,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     return NextResponse.json(failure('请求体解析失败', 400), { status: 400 })
   }
   const ids: string[] = Array.isArray(body.ids) ? body.ids : [body.id!]
-  if (!ids.length) return NextResponse.json(failure('No IDs provided', 400), { status: 400 })
+  if (!ids.length || ids.some(id => !isUuid(id))) return NextResponse.json(failure('无效的任务 ID', 400), { status: 400 })
 
   let client: PoolClient
   try {
@@ -956,12 +824,12 @@ export async function DELETE(req: NextRequest, { params }: Params) {
 
     // Collect all descendants recursively for cascade soft-delete
     const allIds = new Set<string>(ids)
-    let frontier = [...ids]
+    let frontier = Array.isArray(body.ids) ? [] : [...ids]
     while (frontier.length) {
       const ph = frontier.map((_, i) => `$${i + 1}`).join(',')
       const children = await client.query(
-        `SELECT id FROM tasks WHERE parent_id IN (${ph}) AND is_deleted = false`,
-        frontier
+        `SELECT id FROM tasks WHERE parent_id IN (${ph}) AND project_id = $${frontier.length + 1} AND is_deleted = false`,
+        [...frontier, projectId]
       )
       const childIds = children.rows.map((r: { id: string }) => r.id).filter((id: string) => !allIds.has(id))
       childIds.forEach((id: string) => allIds.add(id))
@@ -973,19 +841,31 @@ export async function DELETE(req: NextRequest, { params }: Params) {
 
     // Fetch tasks for lifecycle before soft-deleting
     const toDelete = await client.query(
-      `SELECT id, task_code, name FROM tasks WHERE project_id = $1 AND id IN (${ph})`,
+      `SELECT id, task_code, name FROM tasks WHERE project_id = $1 AND id IN (${ph}) AND is_deleted = false`,
       [projectId, ...allIdArr]
     )
 
     // Soft-delete
     await client.query(
       `UPDATE tasks SET is_deleted = true, deleted_at = NOW()
-       WHERE project_id = $1 AND id IN (${ph})`,
+       WHERE project_id = $1 AND id IN (${ph}) AND is_deleted = false`,
       [projectId, ...allIdArr]
     )
 
-    await collapseDeletedTaskSuccessors(client, projectId, allIdArr)
-    await updateSummaryTasksDates(client, projectId)
+    // Retained children must not vanish just because the old parent is removed.
+    const retained = await client.query(`WITH children AS (
+      SELECT id, parent_id FROM tasks WHERE project_id = $1 AND is_deleted = false AND parent_id = ANY($2::uuid[])
+    ) UPDATE tasks t SET parent_id = NULL, updated_at = NOW() FROM children c WHERE t.id = c.id
+      RETURNING t.id, t.task_code, t.name, c.parent_id AS old_parent_id`, [projectId, allIdArr])
+    await addLifecycleBatch(client, retained.rows.map(t => ({ taskId: t.id, taskCode: t.task_code ?? t.id,
+      projectId, userId: auth.value.userId, event_type: 'moved', field_name: 'parent_id',
+      old_value: t.old_parent_id, new_value: null,
+      description: `删除旧父任务时保留任务「${t.name}」，暂列为顶级任务，后续提交按用户指定父级保存`,
+    })))
+    if (!Array.isArray(body.ids)) {
+      await collapseDeletedTaskSuccessors(client, projectId, allIdArr)
+      await updateSummaryTasksDates(client, projectId)
+    }
 
     // Lifecycle events
     for (const t of toDelete.rows) {
