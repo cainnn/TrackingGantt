@@ -219,6 +219,14 @@ ASPOSE_TASKS_LICENSE=/path/to/Aspose.Total.lic node scripts/test-project-attribu
 
 这会验证实际 MPP 的原生字段、金额精度、外部字段编辑、空值/零值、层级、工期、状态日期、项目线和文件格式边界。浏览器页面与 Microsoft Project 桌面显示仍需单独验收。部署脚本校验 CLI 源码指纹，防止新版页面继续使用旧版 MPP 工具。
 
+任务属性的真实浏览器点击验收（使用独立 Chrome，只创建及清理本轮专用测试项目）：
+
+```bash
+node scripts/test-task-attributes-ui.cjs http://127.0.0.1:3117
+```
+
+默认显示浏览器，可用 `ATTR_UI_HEADLESS=1` 无窗口执行，登录通过 `ATTR_UI_USER` / `ATTR_UI_PASSWORD` 配置。验收属性入口、新增配置、填写、校验提示清除、撤销/重做、确认前零写入、草稿不生成版本、稳定态原因、金额空值/零值、重新进入后数据保留及状态日期线；也通过菜单下载 Excel/MPP 并重新导入，验证属性保留及导入撤销。测试服务须配置可运行的 MPP 转换程序及许可证。结果、下载文件和截图输出到系统临时目录。按钮和文本使用浏览器真实鼠标和键盘输入，下拉框使用 Puppeteer 的标准选择接口，不替换接口响应或直接改应用状态。
+
 升级已有数据库时执行增量迁移（可重复执行，不修改既有任务值）：
 
 ```bash

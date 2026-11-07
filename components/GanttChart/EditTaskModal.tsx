@@ -967,7 +967,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
             {!(currentProject?.custom_fields ?? []).some(f => !f.archived) && <div className="py-6 text-center"><p className="mb-3 text-sm text-gray-400">尚未配置任务属性</p><button type="button" onClick={() => setManageFields(true)} className="rounded bg-blue-600 px-4 py-2 text-sm text-white">新增任务属性</button></div>}
             {(currentProject?.custom_fields ?? []).filter(f => !f.archived).map(field => <label key={field.id} className="block text-sm text-gray-700">
               <span className="mb-1 block">{field.name}{field.unit ? `（${field.unit}）` : ''}</span>
-              <TaskCustomValueInput field={field} value={customValues[field.id] ?? ''} onChange={value => setCustomValues(v => ({ ...v, [field.id]: value }))} />
+              <TaskCustomValueInput field={field} value={customValues[field.id] ?? ''} onChange={value => { setCustomValues(v => ({ ...v, [field.id]: value })); setFormError('') }} />
             </label>)}</>}
           </div>}
 
