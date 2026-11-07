@@ -536,8 +536,8 @@ export default function GanttToolbar({
         if (!primary.has(code)) passive[code] = `由于 ${label} 的调整引发`
       }
     }
-    // Custom attributes never change as a consequence of dependency scheduling.
-    for (const diff of changeDiffs) if (diff.changes?.some(c => c.field.startsWith('属性：'))) {
+    // Reparenting and custom attributes are explicit edits, never dependency cascades.
+    for (const diff of changeDiffs) if (diff.changes?.some(c => c.field === '父任务' || c.field.startsWith('属性：'))) {
       primary.add(diff.task_code)
       delete passive[diff.task_code]
     }
@@ -1220,7 +1220,7 @@ export default function GanttToolbar({
     const [taskData, projectData, lineData] = await Promise.all([taskRes.json(), projectRes.json(), lineRes.json()])
     if (!taskRes.ok || !taskData.ok || !projectRes.ok || !projectData.ok || !lineRes.ok || !lineData.ok || !Array.isArray(lineData.value)
         || !Array.isArray(taskData.value?.tasks) || !Array.isArray(taskData.value?.dependencies)) {
-      throw new Error('无法核对上次保存结果，请稍后重试')
+      throw new Error('无法读取后台最新计划，请稍后重试；当前修改仍保留')
     }
     return {
       tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
@@ -1260,22 +1260,19 @@ export default function GanttToolbar({
     saveHeaders.set('x-gantt-confirmed-save', '1')
     const saveWarnings: Array<{ taskName: string; message: string }> = []
     try {
-      let saveBaseTasks = baselineTasks
-      let saveBaseDeps = baselineDeps
-      let saveBaseStatusDate = baselineStatusDate
-      let saveBasePlanningStatus = baselinePlanningStatus
-      let saveBaseCustomFields = baselineCustomFields
-      let saveBaseLines = baselineLines
-      if (saveIncomplete) {
-        // Earlier requests may have committed even when their replies were lost.
-        const persisted = await readPersistedState()
-        saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks, attemptedSaveIds.current.taskIds)
-        saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies, attemptedSaveIds.current.dependencyIds)
-        saveBaseStatusDate = persisted.statusDate
-        saveBasePlanningStatus = normalizePlanningStatus(persisted.planningStatus)
-        saveBaseCustomFields = persisted.customFields ?? []
-        saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [], attemptedLineIds.current)
-      }
+      // Compare every save with the latest database records, not the page-load
+      // baseline. The submitted plan wins for known records; unseen additions
+      // from other sessions must never become accidental deletions.
+      const persisted = await readPersistedState()
+      const saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks,
+        [...attemptedSaveIds.current.taskIds, ...submittedTasks.map(t => t.id)])
+      const saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies,
+        [...attemptedSaveIds.current.dependencyIds, ...submittedDeps.map(d => d.id)])
+      const saveBaseStatusDate = persisted.statusDate
+      const saveBasePlanningStatus = normalizePlanningStatus(persisted.planningStatus)
+      const saveBaseCustomFields = persisted.customFields ?? []
+      const saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [],
+        [...attemptedLineIds.current, ...submittedLines.map(l => l.id)])
 
       // Definitions must exist before tasks reference them. This is inside the
       // explicit confirm flow; recovery reads this state after any partial save.
@@ -1347,7 +1344,10 @@ export default function GanttToolbar({
       if (diff.tasksToAdd.length > 0) {
         const r = await authFetch(`/api/tasks/${projectId}`, {
           method: 'POST', headers: saveHeaders,
-          body: JSON.stringify(diff.tasksToAdd.map(t => ({ ...t, _reason: reasonByTaskId[t.id] }))),
+          // Create IDs first, then apply all new/existing parent changes in one
+          // PUT graph. An intermediate old hierarchy can otherwise look cyclic
+          // and cause a valid new parent edge to be "repaired" away.
+          body: JSON.stringify(diff.tasksToAdd.map(t => ({ ...t, parent_id: null, _reason: reasonByTaskId[t.id] }))),
         })
         const result = await r.json()
         if (!r.ok || !result.ok || !Array.isArray(result.value)) throw new Error(result.error ?? `新增任务失败 (${r.status})`)

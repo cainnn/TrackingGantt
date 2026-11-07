@@ -40,6 +40,19 @@ test('a note-only edit appears in the change review and preserves its full text'
   assert.deepEqual(diffSnapshots([oldTask], [{ ...oldTask, note: '' }]), [])
 })
 
+test('parent-only changes appear in review even when dates and sibling order stay unchanged', () => {
+  const a = task({ task_code: '1', name: '原父任务' })
+  const b = task({ task_code: '2', name: '新父任务' })
+  const child = task({ task_code: '3', parent_id: a.id })
+  for (const [parent_id, label] of [[b.id, b.name], [null, '顶级任务']] as const) {
+    const diff = diffSnapshots([a, b, child], [a, b, { ...child, parent_id }])
+    assert.equal(diff.length, 1)
+    assert.equal(diff[0].task_code, child.task_code)
+    assert.deepEqual(diff[0].changes, [{ field: '父任务', old: a.name, new: label }])
+  }
+  assert.deepEqual(diffSnapshots([a, child], [{ ...a, name: '父任务改名' }, child]).map(d => d.task_code), [a.task_code])
+})
+
 test('reports task type changes between auto and manual', () => {
   const diffs = diffSnapshots(
     [task({ task_code: '1', auto_schedule: true })],

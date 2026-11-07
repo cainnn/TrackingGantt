@@ -93,6 +93,24 @@ test('uncertain saves block undo until retry or reconciliation establishes the s
   assert.equal(store.getState().draft.past.length, 0)
   assert.equal(store.getState().tasks.tasks.some(t => t.id === 'a'), false)
 })
+
+test('hierarchy edits made during save remain local and undo back to the saved hierarchy', async () => {
+  const store = setup()
+  const b = store.getState().tasks.tasks[1]
+  store.dispatch(updateTasks([{ ...b, parent_id: 'a' }]))
+  store.dispatch(beginDraftSave())
+  const saved = snapshotDraft(store.getState())
+  store.dispatch(updateTasks([{ ...b, parent_id: null, order_index: 2 }]))
+  await Promise.resolve()
+  store.dispatch(finishDraftSave(saved))
+  assert.equal(store.getState().tasks.tasks[1].parent_id, null)
+  assert.equal(hasDraftChanges(store.getState()), true)
+  store.dispatch(undoDraft())
+  assert.equal(store.getState().tasks.tasks[1].parent_id, 'a')
+  assert.equal(hasDraftChanges(store.getState()), false)
+  store.dispatch(undoDraft())
+  assert.equal(store.getState().tasks.tasks[1].parent_id, 'a')
+})
 test('history is isolated from historical viewing and cleared when switching projects', async () => {
   const store = setup()
   store.dispatch(setViewSnapshot({ tasks: [], dependencies: [], versionId: 'v', versionName: 'V' }))

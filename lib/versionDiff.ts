@@ -99,6 +99,10 @@ function normalizeField(field: string, val: unknown, opts: DiffOptions): { compa
 export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[], opts: DiffOptions = {}): DiffItem[] {
   const oldMap = new Map(oldTasks.map(t => [t.task_code, t]))
   const newMap = new Map(newTasks.map(t => [t.task_code, t]))
+  const oldById = new Map(oldTasks.map(t => [t.id, t]))
+  const newById = new Map(newTasks.map(t => [t.id, t]))
+  const parentName = (id: string | null, preferred: Map<string, SnapshotTask>, fallback: Map<string, SnapshotTask>) =>
+    id ? (preferred.get(id) ?? fallback.get(id))?.name ?? '(未找到父任务)' : '顶级任务'
   const result: DiffItem[] = []
 
   for (const [code, t] of newMap) {
@@ -119,6 +123,12 @@ export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]
     if (!oldT) continue
 
     const changes: { field: string; old: string; new: string }[] = []
+    if ((oldT.parent_id ?? null) !== (newT.parent_id ?? null)) {
+      changes.push({ field: '父任务',
+        old: parentName(oldT.parent_id, oldById, newById),
+        new: parentName(newT.parent_id, newById, oldById),
+      })
+    }
     for (const f of compareFields) {
       const ov = normalizeField(f, (oldT as unknown as Record<string, unknown>)[f], opts)
       const nv = normalizeField(f, (newT as unknown as Record<string, unknown>)[f], opts)

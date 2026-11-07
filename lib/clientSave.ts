@@ -1,7 +1,7 @@
 /**
  * 客户端保存：对比 baseline 与当前 Redux 状态，生成需要发送给服务端的批量操作。
  *
- * 用于 "确认变更" 流程：先保存当前计划；稳定态再创建版本快照。
+ * 用于草稿直接保存与稳定态确认保存：自动识别字段及层级差异。
  */
 import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField, TaskCustomValues } from '@/types'
 import { customValuesEqual, customFieldsEqual } from './taskCustomFields'
@@ -65,8 +65,8 @@ export interface SaveBaseline {
   lines?: ProjectLine[]
 }
 
-/** Use persisted results for records involved in a failed attempt. Other
- * sessions' newly created records must not become deletions in our retry. */
+/** Limit the latest database state to known/submitted/previously attempted IDs.
+ * Other sessions' unseen additions must not become deletions in our save. */
 export function recoverSaveRecords<T extends { id: string }>(
   baseline: T[], persisted: T[], attemptedIds: Iterable<string>,
 ): T[] {

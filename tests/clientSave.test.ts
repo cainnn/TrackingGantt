@@ -29,6 +29,27 @@ function task(partial: Partial<Task> & Pick<Task, 'id'>): Task {
 
 const deps: Dependency[] = []
 
+test('detects hierarchy and order changes without relying on UI dirty markers', () => {
+  const a = task({ id: 'A' }), b = task({ id: 'B', parent_id: 'A', order_index: 1 })
+  const c = task({ id: 'C', order_index: 1 })
+  const diff = buildSaveDiff([a, b, c], [], [a, { ...b, parent_id: null }, { ...c, order_index: 2 }], [])
+  assert.deepEqual(diff.tasksToUpdate.map(t => [t.id, t.parent_id, t.order_index]), [['B', null, 1], ['C', null, 2]])
+  assert.deepEqual(diff.tasksToAdd, [])
+  assert.deepEqual(diff.tasksToDelete, [])
+})
+
+test('latest database comparison restores submitted parents and order without deleting unseen tasks', () => {
+  const a = task({ id: 'A' }), b = task({ id: 'B', parent_id: 'A' })
+  const added = task({ id: 'local-new', parent_id: 'B' })
+  const persisted = [a, { ...b, parent_id: null, order_index: 9 }, { ...added, parent_id: null }, task({ id: 'remote-new' })]
+  const current = [a, b, added]
+  const base = recoverSaveRecords([a, b], persisted, current.map(t => t.id))
+  const diff = buildSaveDiff(base, [], current, [])
+  assert.deepEqual(diff.tasksToUpdate, [b, added])
+  assert.deepEqual(diff.tasksToAdd, [])
+  assert.deepEqual(diff.tasksToDelete, [])
+})
+
 test('renumbers added tasks when client task codes collide with existing tasks or each other', () => {
   const baseline = [
     task({ id: 'existing-1', task_code: '1' }),
