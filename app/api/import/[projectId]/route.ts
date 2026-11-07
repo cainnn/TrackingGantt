@@ -443,7 +443,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     )
 
     // Fetch updated project for status_date
-    const updatedProj = await pool.query('SELECT status_date, time_granularity, planning_status FROM projects WHERE id = $1', [projectId])
+    const updatedProj = await pool.query('SELECT status_date, time_granularity, planning_status, custom_fields FROM projects WHERE id = $1', [projectId])
     const updatedStatusDate = updatedProj.rows[0]?.status_date
       ? toDateStr(updatedProj.rows[0].status_date) : null
     const isMinuteProject = updatedProj.rows[0]?.time_granularity === 'minute'
@@ -459,7 +459,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (normalizePlanningStatus(updatedProj.rows[0]?.planning_status) === 'stable') {
       const snapshotTasks = tasksRes.rows
       const snapshotDeps = depsRes.rows
-      const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: plRes.rows, planning_status: 'stable' }
+      const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: plRes.rows, planning_status: 'stable', custom_fields: updatedProj.rows[0]?.custom_fields ?? [] }
 
       const effectiveStatusDate = updatedStatusDate ?? null
 

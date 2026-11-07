@@ -5,6 +5,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { isPlanningStatus } from '@/lib/planningStatus'
+import { normalizeCustomFields, CustomFieldError } from '@/lib/taskCustomFields'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -39,23 +40,39 @@ export async function PUT(req: NextRequest, { params }: Params) {
   }
 
   if (!isUuid(id)) return NextResponse.json(failure('Project not found', 404), { status: 404 })
-  const access = projectAccessSql(auth.value, 8)
-  const result = await pool.query(
-    `UPDATE projects p
-     SET name = COALESCE($1, name),
-         start_date = COALESCE($2, start_date),
-         end_date = COALESCE($3, end_date),
-         status_date = CASE WHEN $4::boolean THEN $5::timestamp ELSE status_date END,
-         planning_status = COALESCE($7, planning_status)
-     WHERE p.id = $6 AND (${access.sql})
-     RETURNING *`,
-    [name ?? null, start_date ?? null, end_date ?? null,
-     Object.hasOwn(body, 'status_date'), status_date ?? null, id, planning_status ?? null, ...access.values]
-  )
-  if (result.rows.length === 0) {
-    return NextResponse.json(failure('Project not found', 404), { status: 404 })
-  }
-  return NextResponse.json(success(result.rows[0]))
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query("SET LOCAL lock_timeout = '10s'")
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [id])
+    const access = projectAccessSql(auth.value, 2)
+    const existing = await client.query(`SELECT * FROM projects p WHERE p.id = $1 AND (${access.sql}) FOR UPDATE`, [id, ...access.values])
+    if (!existing.rows.length) {
+      await client.query('ROLLBACK')
+      return NextResponse.json(failure('Project not found', 404), { status: 404 })
+    }
+    const fields = Object.hasOwn(body, 'custom_fields') ? normalizeCustomFields(body.custom_fields, existing.rows[0].custom_fields ?? []) : null
+    const result = await client.query(
+      `UPDATE projects p
+       SET name = COALESCE($1, name),
+           start_date = COALESCE($2, start_date),
+           end_date = COALESCE($3, end_date),
+           status_date = CASE WHEN $4::boolean THEN $5::timestamp ELSE status_date END,
+           planning_status = COALESCE($7, planning_status),
+           custom_fields = COALESCE($8::jsonb, custom_fields)
+       WHERE p.id = $6
+       RETURNING *`,
+      [name ?? null, start_date ?? null, end_date ?? null,
+       Object.hasOwn(body, 'status_date'), status_date ?? null, id, planning_status ?? null, fields ? JSON.stringify(fields) : null]
+    )
+    await client.query('COMMIT')
+    return NextResponse.json(success(result.rows[0]))
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof CustomFieldError) return NextResponse.json(failure(err.message, 400), { status: 400 })
+    console.error('Update project failed:', err)
+    return NextResponse.json(failure('保存项目失败，请重试', 500), { status: 500 })
+  } finally { client.release() }
 }
 
 export async function DELETE(req: NextRequest, { params }: Params) {

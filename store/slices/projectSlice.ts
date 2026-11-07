@@ -1,5 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
-import type { Project, PlanningStatus } from '@/types'
+import type { Project, PlanningStatus, TaskCustomField } from '@/types'
 
 interface ProjectState {
   projects: Project[]
@@ -53,6 +53,12 @@ const projectSlice = createSlice({
       if (project) project.planning_status = planningStatus
       if (state.currentProject?.id === projectId) state.currentProject.planning_status = planningStatus
     },
+    setCustomFields(state, action: PayloadAction<{ projectId: string; fields: TaskCustomField[] }>) {
+      const { projectId, fields } = action.payload
+      const project = state.projects.find(p => p.id === projectId)
+      if (project) project.custom_fields = fields
+      if (state.currentProject?.id === projectId) state.currentProject.custom_fields = fields
+    },
     setLoading(state, action: PayloadAction<boolean>) {
       state.loading = action.payload
     },
@@ -64,6 +70,6 @@ const projectSlice = createSlice({
 
 export const {
   setProjects, addProject, updateProject, deleteProject,
-  setCurrentProject, setStatusDate, setPlanningStatus, setLoading, setError,
+  setCurrentProject, setStatusDate, setPlanningStatus, setCustomFields, setLoading, setError,
 } = projectSlice.actions
 export default projectSlice.reducer

@@ -4,7 +4,8 @@ import project from './slices/projectSlice'
 import tasks from './slices/tasksSlice'
 import projectLines from './slices/projectLinesSlice'
 import versions from './slices/versionsSlice'
-import type { Task, Dependency, ProjectLine, PlanningStatus } from '../types'
+import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField } from '../types'
+import { customFieldsEqual } from '../lib/taskCustomFields'
 import { buildSaveDiff, hasAnyDiff, mergeSavedRecords } from '../lib/clientSave'
 import { toDateTimeStr } from '../lib/clientTime'
 import { normalizePlanningStatus } from '../lib/planningStatus'
@@ -14,6 +15,7 @@ export interface DraftSnapshot {
   dependencies: Dependency[]
   statusDate: string | null
   planningStatus?: PlanningStatus
+  customFields?: TaskCustomField[]
   lines: ProjectLine[]
   descriptions: Record<string, string>
 }
@@ -49,6 +51,7 @@ export function snapshotDraft(state: DraftRootState): DraftSnapshot {
     tasks: state.tasks.tasks, dependencies: state.tasks.dependencies,
     statusDate: toDateTimeStr(state.project.currentProject?.status_date ?? null),
     planningStatus: normalizePlanningStatus(state.project.currentProject?.planning_status),
+    customFields: state.project.currentProject?.custom_fields ?? [],
     lines: state.projectLines.lines, descriptions: state.tasks.editDescriptions,
   }
 }
@@ -61,6 +64,7 @@ export function linesEqual(a: ProjectLine[], b: ProjectLine[]): boolean {
 export function draftsEqual(a: DraftSnapshot, b: DraftSnapshot): boolean {
   return toDateTimeStr(a.statusDate) === toDateTimeStr(b.statusDate)
     && normalizePlanningStatus(a.planningStatus) === normalizePlanningStatus(b.planningStatus)
+    && customFieldsEqual(a.customFields, b.customFields)
     && linesEqual(a.lines, b.lines)
     && !hasAnyDiff(buildSaveDiff(a.tasks, a.dependencies, b.tasks, b.dependencies))
 }
@@ -79,8 +83,8 @@ function restore(state: DraftRootState, value: DraftSnapshot): DraftRootState {
     },
     projectLines: { ...state.projectLines, lines: value.lines },
     project: { ...state.project,
-      currentProject: state.project.currentProject ? { ...state.project.currentProject, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus) } : null,
-      projects: state.project.projects.map(p => p.id === state.draft.projectId ? { ...p, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus) } : p),
+      currentProject: state.project.currentProject ? { ...state.project.currentProject, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus), custom_fields: value.customFields ?? [] } : null,
+      projects: state.project.projects.map(p => p.id === state.draft.projectId ? { ...p, status_date: value.statusDate, planning_status: normalizePlanningStatus(value.planningStatus), custom_fields: value.customFields ?? [] } : p),
     },
   }
 }
@@ -89,6 +93,7 @@ function rebase(saved: DraftSnapshot, submitted: DraftSnapshot, current: DraftSn
     tasks: mergeSavedRecords(saved.tasks, submitted.tasks, current.tasks),
     dependencies: mergeSavedRecords(saved.dependencies, submitted.dependencies, current.dependencies),
     lines: mergeSavedRecords(saved.lines, submitted.lines, current.lines),
+    customFields: mergeSavedRecords(saved.customFields ?? [], submitted.customFields ?? [], current.customFields ?? []),
     statusDate: toDateTimeStr(current.statusDate) === toDateTimeStr(submitted.statusDate) ? saved.statusDate : current.statusDate,
     planningStatus: normalizePlanningStatus(current.planningStatus) === normalizePlanningStatus(submitted.planningStatus)
       ? normalizePlanningStatus(saved.planningStatus) : normalizePlanningStatus(current.planningStatus),
@@ -153,7 +158,7 @@ export function rootReducer(state: DraftRootState | undefined, action: UnknownAc
 const mutations = new Set([
   'tasks/setTasks', 'tasks/addTasks', 'tasks/updateTasks', 'tasks/deleteTasks',
   'tasks/addDependency', 'tasks/removeDependency', 'tasks/updateDependency',
-  'project/setStatusDate', 'project/setPlanningStatus', 'projectLines/setProjectLines', 'projectLines/addProjectLine',
+  'project/setStatusDate', 'project/setPlanningStatus', 'project/setCustomFields', 'projectLines/setProjectLines', 'projectLines/addProjectLine',
   'projectLines/updateProjectLine', 'projectLines/removeProjectLine',
 ])
 export const createDraftMiddleware = (): Middleware<{}, DraftRootState> => api => {

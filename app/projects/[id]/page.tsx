@@ -160,6 +160,7 @@ export default function ProjectPage() {
       const baseline = {
         tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
         statusDate: toDateTimeStr(projectData.value.status_date), planningStatus: normalizePlanningStatus(projectData.value.planning_status), lines: linesData.value,
+        customFields: projectData.value.custom_fields ?? [],
       }
       dispatch(setCurrentProject(projectData.value))
       dispatch(resetDraft({ ...baseline, descriptions: {} }))
@@ -241,6 +242,7 @@ export default function ProjectPage() {
             tasks: tr.value.tasks,
             dependencies: loadedDeps,
             planningStatus: normalizePlanningStatus(pr.value.planning_status),
+            customFields: pr.value.custom_fields ?? [],
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value,
           })
         }
@@ -249,6 +251,7 @@ export default function ProjectPage() {
           dispatch(initializeDraft({ projectId, baseline: {
             tasks: tr.value.tasks, dependencies: tr.value.dependencies,
             planningStatus: normalizePlanningStatus(pr.value.planning_status),
+            customFields: pr.value.custom_fields ?? [],
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value, descriptions: {},
           } }))
         }

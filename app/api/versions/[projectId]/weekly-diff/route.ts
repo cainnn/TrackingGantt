@@ -152,7 +152,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   const oldDeps: SnapshotDep[] = Array.isArray(base.snapshot?.dependencies) ? base.snapshot.dependencies : []
   const newDeps: SnapshotDep[] = Array.isArray(current.snapshot?.dependencies) ? current.snapshot.dependencies : []
 
-  const taskDiffs = diffSnapshots(oldTasks, newTasks, { isMinute })
+  const taskDiffs = diffSnapshots(oldTasks, newTasks, { isMinute, customFields: current.snapshot?.custom_fields ?? projectRes.rows[0]?.custom_fields ?? [] })
   const dependencyDiffs = buildDependencyDiff(oldTasks, newTasks, oldDeps, newDeps)
   const schedule = classifyScheduleChanges(taskDiffs)
   const summary = {

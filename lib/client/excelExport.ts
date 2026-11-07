@@ -2,7 +2,8 @@
 
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
-import type { Task, Dependency, ProjectLine } from '@/types'
+import type { Task, Dependency, ProjectLine, TaskCustomField } from '@/types'
+import { CUSTOM_FIELDS_SHEET, customFieldExportColumns } from '../taskCustomFields'
 import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
 import { formatMinDuration, MIN_PER_DAY, toDateTimeStr } from '@/lib/clientTime'
 
@@ -257,15 +258,17 @@ function populateSheet(
   seqMap?: Map<string, number>,
   isMinute: boolean = false,
   hasPreviousStatusVersion: boolean = !!prevTaskIds && prevTaskIds.size > 0,
+  customFields: TaskCustomField[] = [],
 ) {
-  ws.columns = COLUMNS.map(column => column.key === 'duration'
+  const customColumns = customFieldExportColumns(customFields)
+  ws.columns = [...COLUMNS.map(column => column.key === 'duration'
     ? { ...column, header: isMinute ? '工期(分钟)' : '工期(天)' }
-    : { ...column }) as ExcelJS.Column[]
+    : { ...column }), ...customColumns.map(({ header, key, width }) => ({ header, key, width, style: { numFmt: '@' } }))] as ExcelJS.Column[]
   styleHeaderRow(ws)
 
   for (const ft of flatTasks) {
     const data = buildRowData(ft, deps, codeMap, parentCodeMap, allTasks, statusDate, prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
-    const row = ws.addRow(data)
+    const row = ws.addRow({ ...data, ...Object.fromEntries(customColumns.map(c => [c.key, ft.task.custom_values?.[c.field.id] ?? ''])) })
     styleDataRow(ws, row.number, summaryIds.has(ft.task.id), ft.level)
   }
 
@@ -308,6 +311,7 @@ export async function exportToExcel(
     prevTaskIds?: Set<string>       // 上期状态日期快照存在的任务 ID；缺失则视为"新任务"
     prevEndMap?: Map<string, string> // 上期快照的 end_date 映射；覆盖 baseline 用
     isMinute?: boolean
+    customFields?: TaskCustomField[]
   },
 ) {
   const isMinute = options?.isMinute === true
@@ -368,7 +372,7 @@ export async function exportToExcel(
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, options?.customFields)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
@@ -378,9 +382,17 @@ export async function exportToExcel(
     const filtered = filterWithHierarchy(allFlat, taskMap, t => t.assignee?.trim() === assignee)
     if (filtered.length === 0) continue
     // Sheet name max 31 chars, no special chars
-    const sheetName = assignee.slice(0, 31).replace(/[\\/*?:\[\]]/g, '_')
+    const baseName = assignee.slice(0, 27).replace(/[\\/*?:\[\]]/g, '_')
+    let sheetName = baseName, suffix = 2
+    while (wb.getWorksheet(sheetName) || sheetName === CUSTOM_FIELDS_SHEET || sheetName === '项目设置') sheetName = `${baseName} ${suffix++}`
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, options?.customFields)
+  }
+
+  if (options?.customFields?.length) {
+    const metadata = wb.addWorksheet(CUSTOM_FIELDS_SHEET, { state: 'hidden' })
+    metadata.columns = [{ header: '列名', key: 'column' }, { header: '配置', key: 'definition' }]
+    for (const c of customFieldExportColumns(options.customFields)) metadata.addRow({ column: c.header, definition: JSON.stringify(c.field) })
   }
 
   // ── Project settings sheet ─────────────────────────────────────────

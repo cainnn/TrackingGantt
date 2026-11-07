@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS projects (
   status_date DATE,
   time_granularity VARCHAR(10) DEFAULT 'day',  -- 'day' | 'minute'，创建时固定
   planning_status VARCHAR(10) NOT NULL DEFAULT 'draft' CHECK (planning_status IN ('draft', 'stable')),
+  custom_fields JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -72,6 +73,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   deadline TIMESTAMP,
   status VARCHAR(20),
   note TEXT,
+  custom_values JSONB NOT NULL DEFAULT '{}'::jsonb,
   order_index INTEGER DEFAULT 0,
   rollup BOOLEAN DEFAULT false,
   inactive BOOLEAN DEFAULT false,
@@ -192,7 +194,7 @@ CREATE TABLE IF NOT EXISTS task_change_log (
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   status_date_at_change DATE,
-  field VARCHAR(40) NOT NULL,
+  field VARCHAR(100) NOT NULL,
   old_value TEXT,
   new_value TEXT,
   reason TEXT,

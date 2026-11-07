@@ -40,6 +40,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   let newTasks: SnapshotTask[]
   let v2Name: string
   let v2Date: string
+  let customFields = proj.rows[0]?.custom_fields ?? []
 
   if (!v2Id || v2Id === 'current') {
     // Compare against current working state
@@ -59,12 +60,13 @@ export async function GET(req: NextRequest, { params }: Params) {
     if (!v2Res.rows.length)
       return NextResponse.json(failure('Version v2 not found', 404), { status: 404 })
     const v2 = v2Res.rows[0]
+    customFields = v2.snapshot.custom_fields ?? customFields
     newTasks = v2.snapshot.tasks ?? []
     v2Name = v2.name || `快照 #${v2.version_number}`
     v2Date = v2.created_at
   }
 
-  const diffs = diffSnapshots(oldTasks, newTasks, { isMinute: isMinuteProject })
+  const diffs = diffSnapshots(oldTasks, newTasks, { isMinute: isMinuteProject, customFields })
 
   return NextResponse.json(success({
     base: {

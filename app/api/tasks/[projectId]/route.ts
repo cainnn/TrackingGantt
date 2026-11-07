@@ -10,6 +10,8 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { normalizeDurationMinutes } from '@/lib/taskNumbers'
+import { CustomFieldError, normalizeCustomValues, formatCustomValue } from '@/lib/taskCustomFields'
+import type { TaskCustomField } from '@/types'
 import {
   type TaskLike,
   toDateStr, addDaysStr,
@@ -156,6 +158,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
     const existingRows = await client.query('SELECT * FROM tasks WHERE project_id = $1', [projectId])
+    const fieldResult = await client.query('SELECT custom_fields FROM projects WHERE id = $1', [projectId])
+    const customFields: TaskCustomField[] = fieldResult.rows[0]?.custom_fields ?? []
     const foreign = await client.query('SELECT id FROM tasks WHERE id = ANY($1::uuid[]) AND project_id <> $2', [taskInputs.map(t => t.id), projectId])
     if (foreign.rows.length) {
       await client.query('ROLLBACK')
@@ -256,15 +260,16 @@ export async function POST(req: NextRequest, { params }: Params) {
            (id, project_id, parent_id, task_code, name, assignee, start_date, end_date,
             duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule,
             constraint_type, constraint_date, deadline, status, rollup, inactive,
-            project_boundary, baseline_end_date)
-         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
+            project_boundary, baseline_end_date, custom_values)
+         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb) RETURNING *`,
         [clientId, projectId, null, code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          normalizedDuration, duration_unit ?? 'day',
          percent_done ?? 0, is_milestone ?? false, note ?? null, order_index ?? 0, auto_schedule !== undefined ? auto_schedule : true,
          constraint_type ?? 'asap', normalizeDate(constraint_date), normalizeDate(deadline),
          status ?? null, rollup ?? false, inactive ?? false,
-         project_boundary ?? 'ask', normalizeDate(baseline_end_date)]
+         project_boundary ?? 'ask', normalizeDate(baseline_end_date),
+         JSON.stringify(normalizeCustomValues(task.custom_values ?? {}, customFields))]
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
@@ -293,6 +298,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     await client.query('ROLLBACK').catch(() => {})
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('POST /api/tasks error:', msg)
+    if (err instanceof CustomFieldError) return NextResponse.json(failure(msg, 400), { status: 400 })
     return NextResponse.json(failure('创建任务失败: ' + msg, 500), { status: 500 })
   } finally {
     client.release()
@@ -359,10 +365,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
     // 查询项目的 status_date 用于判定"历史修改"，并取粒度用于日志单位
     const projRes = await client.query(
-      'SELECT status_date, time_granularity FROM projects WHERE id = $1',
+      'SELECT status_date, time_granularity, custom_fields FROM projects WHERE id = $1',
       [projectId],
     )
     const projIsMinute = projRes.rows[0]?.time_granularity === 'minute'
+    const customFields: TaskCustomField[] = projRes.rows[0]?.custom_fields ?? []
     const projStatusDate: string | null = projRes.rows[0]?.status_date
       ? toDateStr(projRes.rows[0].status_date as string)
       : null
@@ -501,6 +508,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
            project_boundary= CASE WHEN $28 THEN $29 ELSE project_boundary END,
            baseline_end_date = CASE WHEN $30 THEN $31 ELSE baseline_end_date END,
            deadline        = CASE WHEN $32 THEN $33 ELSE deadline END,
+           custom_values   = CASE WHEN $38 THEN $39::jsonb ELSE custom_values END,
            updated_at   = NOW()
          WHERE id = $12 AND project_id = $15
          RETURNING *`,
@@ -527,6 +535,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
           hasBE, normalizeDate(t.baseline_end_date),
           hasDL, normalizeDate(t.deadline),
           Object.hasOwn(t, 'start_date'), Object.hasOwn(t, 'end_date'), Object.hasOwn(t, 'duration'), Object.hasOwn(t, 'note'),
+          Object.hasOwn(t, 'custom_values'), JSON.stringify(Object.hasOwn(t, 'custom_values') ? normalizeCustomValues(t.custom_values, customFields, old.custom_values ?? {}) : {}),
         ]
       )
       if (!r.rows[0]) continue
@@ -637,6 +646,17 @@ export async function PUT(req: NextRequest, { params }: Params) {
         })
 
         if (f === 'start_date' || f === 'end_date') dateChanged = true
+      }
+
+      for (const field of customFields) {
+        const oldValue = old.custom_values?.[field.id] ?? '', newValue = cur.custom_values?.[field.id] ?? ''
+        if (oldValue === newValue) continue
+        lifecycleEvents.push({ taskId: id, taskCode: code, projectId, userId: auth.value.userId,
+          event_type: 'updated', field_name: `custom:${field.id}`,
+          old_value: oldValue, new_value: newValue, reason: t._reason,
+          description: `任务「${cur.name}」的${field.name}：${formatCustomValue(oldValue, field) || '(空)'} → ${formatCustomValue(newValue, field) || '(空)'}`,
+        })
+        if (isHistorical) auditEntries.push({ taskId: id, field: `属性：${field.name}`, oldValue, newValue, reason: normalizeChangeReason(t._reason) })
       }
 
       // ── When task date changes, update parent summary task dates (once) ─
@@ -784,6 +804,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     await client.query('ROLLBACK').catch(() => {})
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('PUT /api/tasks error:', msg)
+    if (err instanceof CustomFieldError) return NextResponse.json(failure(msg, 400), { status: 400 })
     return NextResponse.json(failure('更新任务失败: ' + msg, 500), { status: 500 })
   } finally {
     client.release()

@@ -4,13 +4,13 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
 import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter, setViewSnapshot } from '@/store/slices/tasksSlice'
-import { setStatusDate, setPlanningStatus } from '@/store/slices/projectSlice'
+import { setStatusDate, setPlanningStatus, setCustomFields } from '@/store/slices/projectSlice'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { labelDraftStep, hasDraftChanges } from '@/store/draftHistory'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
-import type { ProjectVersion, TaskLifecycleEvent } from '@/types'
+import type { ProjectVersion, TaskLifecycleEvent, Task, TaskCustomValues, TaskCustomField } from '@/types'
 
 interface DiffItem {
   task_code: string
@@ -223,6 +223,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
         lines: snap.lines,
         planningStatus: normalizePlanningStatus(snap.planning_status),
+        customFields: snap.custom_fields,
         versionId: v.id,
         versionName,
       }))
@@ -244,17 +245,25 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       const snap = data.value.snapshot
       dispatch(labelDraftStep('载入历史版本到草稿'))
       dispatch(setTasks({
-        tasks: Array.isArray(snap.tasks) ? snap.tasks : [],
+        tasks: Array.isArray(snap.tasks) ? snap.tasks.map((task: Task) => ({ ...task,
+          custom_values: Object.hasOwn(task, 'custom_values')
+            ? { ...tasks.find(t => t.id === task.id)?.custom_values, ...Object.fromEntries((snap.custom_fields ?? []).map((f: { id: string }) => [f.id, ''])), ...task.custom_values }
+            : tasks.find(t => t.id === task.id)?.custom_values,
+        })) : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
       }))
       dispatch(setStatusDate({ projectId, statusDate: v.status_date }))
       dispatch(setPlanningStatus({ projectId, planningStatus: normalizePlanningStatus(snap.planning_status) }))
+      if (Array.isArray(snap.custom_fields)) dispatch(setCustomFields({ projectId, fields: [
+        ...snap.custom_fields.map((field: TaskCustomField) => field.type === 'select' ? { ...field, options: [...new Set([...(field.options ?? []), ...(currentProject?.custom_fields?.find(f => f.id === field.id)?.options ?? [])])] } : field),
+        ...(currentProject?.custom_fields ?? []).filter(f => !snap.custom_fields.some((old: { id: string }) => old.id === f.id)).map(f => ({ ...f, archived: true })),
+      ] }))
       if (Array.isArray(snap.lines)) dispatch(setProjectLines(snap.lines))
       alert(`已加载「${v.name}」到本地。点"确认变更 → 确认并保存"后入库。`)
     } catch {
       alert('网络错误')
     }
-  }, [projectId, dispatch])
+  }, [projectId, dispatch, tasks, currentProject?.custom_fields])
 
   // 在甘特图上对比：加载版本快照作为对比叠加层
   const handleCompareOnChart = useCallback(async (v: ProjectVersion) => {
@@ -294,16 +303,16 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
           start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, assignee: t.assignee,
           percent_done: t.percent_done, is_milestone: t.is_milestone,
-          parent_id: t.parent_id,
+          parent_id: t.parent_id, custom_values: t.custom_values as TaskCustomValues | undefined,
         }))
         const newTasks: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
           id: t.id, task_code: t.task_code, name: t.name,
           start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, assignee: t.assignee,
           percent_done: t.percent_done, is_milestone: t.is_milestone,
-          parent_id: t.parent_id,
+          parent_id: t.parent_id, custom_values: t.custom_values,
         }))
-        const diffs = diffSnapshots(oldTasks, newTasks, { isMinute })
+        const diffs = diffSnapshots(oldTasks, newTasks, { isMinute, customFields: currentProject?.custom_fields })
         const changedCodes = diffs.map(d => d.task_code)
         // 1. 筛选变更任务
         dispatch(setDiffFilter({ versionName, taskCodes: changedCodes }))
@@ -311,7 +320,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
         dispatch(setComparison({ tasks: snapshotTasks, versionName }))
       }
     } catch { /* ignore */ }
-  }, [projectId, dispatch, tasks, diffFilter, isMinute])
+  }, [projectId, dispatch, tasks, diffFilter, isMinute, currentProject?.custom_fields])
 
   // 加载变更记录
   const fetchChangelog = useCallback(async () => {

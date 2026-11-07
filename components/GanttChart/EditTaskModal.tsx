@@ -3,7 +3,9 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { updateTasks, addDependency, updateDependency, removeDependency } from '@/store/slices/tasksSlice'
-import type { Task, Dependency, TaskLifecycleEvent } from '@/types'
+import type { Task, Dependency, TaskLifecycleEvent, TaskCustomValues } from '@/types'
+import { normalizeCustomValues } from '@/lib/taskCustomFields'
+import TaskCustomValueInput from './TaskCustomValueInput'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
@@ -55,7 +57,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const durStep = isMinute ? 15 : 1
   const durHint = isMinute ? '1 小时 = 60，1 天 = 1440' : ''
 
-  type TabKey = 'general' | 'pred' | 'succ' | 'constraint' | 'note' | 'history'
+  type TabKey = 'general' | 'pred' | 'succ' | 'constraint' | 'note' | 'history' | 'custom'
   const [tab, setTab] = useState<TabKey>('general')
 
   const [name,        setName]        = useState('')
@@ -64,6 +66,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [endDate,     setEndDate]     = useState('')
   const [isMilestone, setIsMilestone] = useState(false)
   const [note,        setNote]        = useState('')
+  const [customValues, setCustomValues] = useState<TaskCustomValues>({})
   const [durationIn,  setDurationIn]  = useState('')
   const [formError, setFormError] = useState('')
   const [constraintType, setConstraintType] = useState<string>('asap')
@@ -133,6 +136,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     setEndDate((task.end_date ?? '').slice(0, dtSlice))
     setIsMilestone(task.is_milestone)
     setNote(task.note ?? '')
+    setCustomValues(task.custom_values ?? {})
     // 工期：DB 总是分钟；天级 UI 展示为天数
     setDurationIn(task.duration != null ? String(Math.round((task.duration / durMul) * 100) / 100) : '')
     setConstraintType(task.constraint_type ?? 'asap')
@@ -420,6 +424,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   }
 
   const handleSave = async () => {
+    let normalizedValues: TaskCustomValues
+    try { normalizedValues = normalizeCustomValues(customValues, currentProject?.custom_fields ?? [], task.custom_values) }
+    catch (err) { setFormError(err instanceof Error ? err.message : '任务属性填写无效'); setTab('custom'); return }
     const clampedStart = (startDate && projStart && startDate < projStart) ? projStart : startDate
     if (!isMilestone && durationIn.trim() !== '' && (!Number.isSafeInteger(Number(durationIn) * durMul) || Number(durationIn) < 0 || (!isMinute && !Number.isInteger(Number(durationIn))))) {
       setFormError(isMinute ? '工期必须是非负整数分钟' : '工期必须是非负整数天')
@@ -441,6 +448,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       percent_done: isMilestone ? 100 : task.percent_done,
       is_milestone: isMilestone,
       note: note || null,
+      custom_values: normalizedValues,
       constraint_type: constraintType || null,
       constraint_date: CONSTRAINT_NEEDS_DATE.has(constraintType) ? (constraintDate || null) : null,
       deadline: deadline || null,
@@ -546,6 +554,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
             ['succ',       '后续'],
             ['constraint', '限制'],
             ['note',       '注释'],
+            ['custom',     '自定义属性'],
             ['history',    '生命周期'],
           ] as const).map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)}
@@ -941,6 +950,15 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
               </div>
             )
           })()}
+
+          {tab === 'custom' && <div className="space-y-4 px-5 py-4">
+            <p className="text-xs text-gray-500">属性由工具栏“任务属性”统一配置，保存后点击“确认更改”才会入库。</p>
+            {!(currentProject?.custom_fields ?? []).some(f => !f.archived) && <p className="py-6 text-center text-sm text-gray-400">尚未配置属性，可先添加“支出金额”等属性。</p>}
+            {(currentProject?.custom_fields ?? []).filter(f => !f.archived).map(field => <label key={field.id} className="block text-sm text-gray-700">
+              <span className="mb-1 block">{field.name}{field.unit ? `（${field.unit}）` : ''}</span>
+              <TaskCustomValueInput field={field} value={customValues[field.id] ?? ''} onChange={value => setCustomValues(v => ({ ...v, [field.id]: value }))} />
+            </label>)}
+          </div>}
 
           {/* Note tab */}
           {tab === 'note' && (

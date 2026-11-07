@@ -2,6 +2,8 @@
 
 import * as XLSX from 'xlsx'
 import { MIN_PER_DAY } from '../clientTime'
+import type { TaskCustomField, TaskCustomValues } from '../../types'
+import { CUSTOM_FIELDS_SHEET, normalizeCustomFields, normalizeCustomValues } from '../taskCustomFields'
 
 const DEP_TYPE_MAP: Record<string, number> = { SS: 0, SF: 1, FS: 2, FF: 3 }
 
@@ -31,6 +33,7 @@ export interface ImportTask {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  custom_values?: TaskCustomValues
   percent_done?: number | null
   constraint_type?: string | null
   constraint_date?: string | null
@@ -135,6 +138,7 @@ export interface ImportProjectLine {
 }
 
 export interface ParseResult {
+  customFields?: TaskCustomField[]
   tasks: ImportTask[]
   dependencies: ImportDep[]
   statusDate?: string | null
@@ -318,6 +322,12 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
   const wb = XLSX.read(buf, { cellDates: true })
   const ws = wb.Sheets[wb.SheetNames[0]]
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws)
+  const metadata = wb.Sheets[CUSTOM_FIELDS_SHEET]
+  const columns = metadata ? XLSX.utils.sheet_to_json<{ '列名': string; '配置': string }>(metadata) : []
+  const customFields = columns.length ? normalizeCustomFields(columns.map(row => JSON.parse(row['配置']))) : undefined
+  const headers = (XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 })[0] ?? []).map(String)
+  if (columns.some(c => !headers.includes(c['列名']))) throw new Error('Excel 缺少属性列，请保留导出文件中的属性列后重试')
+  if (new Set(columns.map(c => c['列名'])).size !== columns.length) throw new Error('Excel 属性列名重复，请重新导出')
   // 未指定项目粒度时，延迟列沿用文件的分钟标注，否则默认天。
   const isMinute = options.isMinute ?? rows.some(row =>
     row['工期(分钟)'] != null || row['工期（分钟）'] != null)
@@ -346,6 +356,10 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,
+      ...(customFields ? { custom_values: normalizeCustomValues(Object.fromEntries(columns.map((column, i) => {
+        const raw = row[column['列名']]
+        return [customFields[i].id, customFields[i].type === 'date' && raw instanceof Date ? fmtDt(raw).slice(0, 10) : raw ?? '']
+      })), customFields) } : {}),
       percent_done: row['完成度'] != null && String(row['完成度']).trim() !== '' ? Number(row['完成度']) || 0 : null,
       constraint_type: (() => {
         const v = String(row['限制类型'] ?? '').trim()
@@ -403,5 +417,5 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
     }
   }
 
-  return { tasks, dependencies, statusDate: statusDate || undefined, projectLines: projectLines.length > 0 ? projectLines : undefined }
+  return { tasks, dependencies, statusDate: statusDate || undefined, projectLines: projectLines.length > 0 ? projectLines : undefined, customFields }
 }

@@ -1,3 +1,6 @@
+import type { TaskCustomField, TaskCustomValues } from '../types'
+import { formatCustomValue } from './taskCustomFields'
+
 export interface SnapshotTask {
   id: string
   task_code: string
@@ -10,6 +13,7 @@ export interface SnapshotTask {
   is_milestone: boolean
   auto_schedule?: boolean | null
   note?: string | null
+  custom_values?: TaskCustomValues
   parent_id: string | null
   order_index?: number | null
 }
@@ -24,6 +28,7 @@ export interface DiffItem {
 
 export interface DiffOptions {
   isMinute?: boolean
+  customFields?: TaskCustomField[]
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -123,6 +128,12 @@ export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]
           new: nv.display || '(空)',
         })
       }
+    }
+    for (const id of new Set([...Object.keys(oldT.custom_values ?? {}), ...Object.keys(newT.custom_values ?? {})])) {
+      const old = oldT.custom_values?.[id] ?? '', next = newT.custom_values?.[id] ?? ''
+      if (old === next) continue
+      const field = opts.customFields?.find(f => f.id === id)
+      changes.push({ field: `属性：${field?.name ?? id}`, old: formatCustomValue(old, field) || '(空)', new: formatCustomValue(next, field) || '(空)' })
     }
     if (changes.length > 0) {
       result.push({ task_code: code, task_name: newT.name, type: 'changed', changes })

@@ -3,7 +3,8 @@
  *
  * 用于 "确认变更" 流程：先保存当前计划；稳定态再创建版本快照。
  */
-import type { Task, Dependency, ProjectLine, PlanningStatus } from '@/types'
+import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField, TaskCustomValues } from '@/types'
+import { customValuesEqual } from './taskCustomFields'
 import { toDateTimeStr } from './clientTime'
 import { normalizeDurationMinutes } from './taskNumbers'
 
@@ -18,6 +19,7 @@ const TASK_FIELDS = [
 const DEP_FIELDS = ['type', 'lag', 'active'] as const
 
 function taskFieldsEqual(a: Task, b: Task): boolean {
+  if (!customValuesEqual(a.custom_values, b.custom_values)) return false
   for (const f of TASK_FIELDS) {
     let av = a[f] as unknown
     let bv = b[f] as unknown
@@ -59,6 +61,7 @@ export interface SaveBaseline {
   dependencies: Dependency[]
   statusDate: string | null
   planningStatus?: PlanningStatus
+  customFields?: TaskCustomField[]
   lines?: ProjectLine[]
 }
 
@@ -74,6 +77,10 @@ export function recoverSaveRecords<T extends { id: string }>(
 function hasChangedFields<T extends { id: string }>(submitted: T, current: T): boolean {
   const keys = new Set([...Object.keys(submitted), ...Object.keys(current)])
   for (const key of keys) {
+    if (key === 'custom_values') {
+      if (!customValuesEqual((submitted as Record<string, unknown>)[key] as TaskCustomValues | undefined, (current as Record<string, unknown>)[key] as TaskCustomValues | undefined)) return true
+      continue
+    }
     if (!Object.is((submitted as Record<string, unknown>)[key], (current as Record<string, unknown>)[key])) return true
   }
   return false
@@ -117,6 +124,16 @@ export function mergeSavedRecords<T extends { id: string }>(
 
     const item: Record<string, unknown> = { ...serverItem }
     for (const key of new Set([...Object.keys(submittedItem), ...Object.keys(currentItem)])) {
+      if (key === 'custom_values') {
+        const before = (submittedItem as Record<string, unknown>)[key] as TaskCustomValues | undefined ?? {}
+        const after = (currentItem as Record<string, unknown>)[key] as TaskCustomValues | undefined ?? {}
+        const values = { ...((serverItem as Record<string, unknown>)[key] as TaskCustomValues | undefined ?? {}) }
+        for (const id of new Set([...Object.keys(before), ...Object.keys(after)])) {
+          if ((before[id] ?? '') !== (after[id] ?? '')) values[id] = after[id] ?? ''
+        }
+        item[key] = values
+        continue
+      }
       if (!Object.is(
         (submittedItem as Record<string, unknown>)[key],
         (currentItem as Record<string, unknown>)[key],

@@ -7,8 +7,9 @@ import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import * as XLSX from 'xlsx'
 import * as clientTime from '../lib/clientTime'
+import * as taskCustomFields from '../lib/taskCustomFields'
 import { parseExcelFile } from '../lib/client/excelImport'
-import type { Task, Dependency } from '../types'
+import type { Task, Dependency, TaskCustomField } from '../types'
 
 // 执行真实导出代码和 ExcelJS，仅替换浏览器下载与无关的 React 状态计算依赖。
 function loadExporter() {
@@ -19,7 +20,7 @@ function loadExporter() {
   }).outputText
   const output: { exportToExcel?: (
     tasks: Task[], deps: Dependency[], name: string, statusDate?: string | null,
-    lines?: [], options?: { isMinute?: boolean },
+    lines?: [], options?: { isMinute?: boolean; customFields?: TaskCustomField[] },
   ) => Promise<void> } = {}
   const requireActual = createRequire(__filename)
   runInNewContext(compiled, {
@@ -28,6 +29,7 @@ function loadExporter() {
     require: (name: string) => {
       if (name === 'file-saver') return { saveAs: (blob: Blob) => saved.push(blob) }
       if (name === '@/lib/clientTime') return clientTime
+      if (name === '../taskCustomFields') return taskCustomFields
       if (name === '@/components/GanttChart/GanttChart') return {
         computeTaskStatus: () => ({ status: 'notstarted', reason: '' }),
         STATUS_META: { notstarted: { label: '未开始' } },
@@ -103,4 +105,26 @@ test('labels minute projects explicitly and keeps subsequent day exports in days
   const dayRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(dayWorkbook.Sheets['任务'])
   assert.equal(dayRows[0]['工期(天)'], 1)
   assert.equal(dayRows[0]['工期(分钟)'], undefined)
+})
+
+test('exports actual custom columns as exact text and reimports their definitions and values', async () => {
+  const { exportToExcel, saved } = loadExporter()
+  const money: TaskCustomField = { id: '00000000-0000-4000-8000-000000000001', name: '支出金额', type: 'money', unit: '元' }
+  const choice: TaskCustomField = { id: '00000000-0000-4000-8000-000000000002', name: '付款状态', type: 'select', options: ['未付款', '已付款'] }
+  const items = [
+    { ...task('1', 1440), custom_values: { [money.id]: '999999999999999999.99', [choice.id]: '已付款' } },
+    { ...task('2', 1440), custom_values: { [money.id]: '0.00', [choice.id]: '' } },
+    { ...task('3', 1440), custom_values: {} },
+  ]
+  await exportToExcel(items, [], '自定义属性', null, undefined, { customFields: [money, choice] })
+  const workbook = XLSX.read(await saved[0].arrayBuffer())
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets['任务'])
+  assert.equal(rows[0]['属性：支出金额（元）'], '999999999999999999.99')
+  assert.equal(rows[1]['属性：支出金额（元）'], '0.00')
+  assert.equal(workbook.Workbook?.Sheets?.find(s => s.name === taskCustomFields.CUSTOM_FIELDS_SHEET)?.Hidden, 1)
+  const parsed = await parseExcelFile(new File([saved[0]], '属性.xlsx'))
+  assert.deepEqual(parsed.customFields, [money, choice])
+  assert.deepEqual(parsed.tasks[0].custom_values, items[0].custom_values)
+  assert.deepEqual(parsed.tasks[1].custom_values, items[1].custom_values)
+  assert.deepEqual(parsed.tasks[2].custom_values, { [money.id]: '', [choice.id]: '' })
 })

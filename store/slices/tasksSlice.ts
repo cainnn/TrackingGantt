@@ -1,5 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
-import type { Task, Dependency, ProjectLine, PlanningStatus } from '@/types'
+import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField } from '@/types'
 
 interface Comparison {
   tasks: Task[]
@@ -18,6 +18,7 @@ interface ViewSnapshot {
   versionName: string
   lines?: ProjectLine[]
   planningStatus?: PlanningStatus
+  customFields?: TaskCustomField[]
 }
 
 interface TasksState {

@@ -9,6 +9,18 @@ export interface User {
 export type TimeGranularity = 'day' | 'minute'
 export type PlanningStatus = 'draft' | 'stable'
 
+export type TaskCustomFieldType = 'text' | 'number' | 'money' | 'date' | 'select'
+export interface TaskCustomField {
+  id: string
+  name: string
+  type: TaskCustomFieldType
+  unit?: string
+  options?: string[]
+  archived?: boolean
+}
+// Decimal values are strings so monetary amounts never lose precision.
+export type TaskCustomValues = Record<string, string>
+
 export interface Project {
   id: string
   user_id: string
@@ -18,6 +30,7 @@ export interface Project {
   status_date: string | null
   time_granularity?: TimeGranularity  // 'day' 或 'minute'，创建时固定
   planning_status?: PlanningStatus
+  custom_fields?: TaskCustomField[]
   created_at: string
   progress?: number
   estimated_end_date?: string | null
@@ -37,6 +50,7 @@ export interface Task {
   percent_done: number
   is_milestone: boolean
   note: string | null
+  custom_values?: TaskCustomValues
   order_index: number
   is_deleted: boolean
   deleted_at: string | null
@@ -89,6 +103,7 @@ export interface CreateTaskInput {
   percent_done?: number
   is_milestone?: boolean
   note?: string | null
+  custom_values?: TaskCustomValues
   order_index?: number
 }
 
