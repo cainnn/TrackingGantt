@@ -7,7 +7,7 @@ using Aspose.Tasks.Saving;
 
 namespace AsposeTasksCli;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -83,6 +83,8 @@ internal static class Program
         var rootTask = project.RootTask;
         var allTasks = new List<Aspose.Tasks.Task>();
         CollectTasks(rootTask, allTasks);
+        var metadata = ReadMetadata(project);
+        var customFields = ReadCustomFields(project, allTasks, metadata);
 
         var parentMap = BuildParentMap(rootTask);
         var seen = new HashSet<int>();
@@ -111,6 +113,7 @@ internal static class Program
                 IsMilestone = t.Get(Tsk.IsMilestone),
                 AutoSchedule = !t.Get(Tsk.IsManual),
                 Note = NullIfEmpty(t.Get(Tsk.NotesText)),
+                CustomValues = ReadCustomValues(t, customFields),
                 PercentDone = t.Get(Tsk.PercentComplete),
                 ConstraintType = MapConstraintType(t.Get(Tsk.ConstraintType)),
                 ConstraintDate = ToDateTimeString(t.Get(Tsk.ConstraintDate)),
@@ -164,7 +167,16 @@ internal static class Program
             Dependencies = deps,
             StatusDate = statusDate,
             ProjectLines = lines.Count == 0 ? null : lines,
+            CustomFields = customFields.Select(f => f.Field).ToList(),
+            TimeGranularity = metadata?.TimeGranularity,
         };
+        if (metadata != null) {
+            result.ProjectLines = metadata.ProjectLines;
+            foreach (var dep in metadata.InactiveDependencies) {
+                if (tasks.Any(t => t.TaskCode == dep.FromTaskCode) && tasks.Any(t => t.TaskCode == dep.ToTaskCode)
+                    && !deps.Any(d => d.FromTaskCode == dep.FromTaskCode && d.ToTaskCode == dep.ToTaskCode)) deps.Add(dep);
+            }
+        }
 
         Console.Out.Write(JsonSerializer.Serialize(result, JsonOpts));
         Console.Out.Flush();
@@ -285,6 +297,16 @@ internal static class Program
         }
 
         var project = new Project();
+        project.CalculationMode = CalculationMode.Manual;
+        var calendar = project.Calendars.Add("连续日历（24小时）");
+        Aspose.Tasks.Calendar.Make24HourCalendar(calendar);
+        project.Set(Prj.Calendar, calendar);
+        project.Set(Prj.MinutesPerDay, 1440);
+        project.Set(Prj.MinutesPerWeek, 10080);
+        project.Set(Prj.DefaultStartTime, new DateTime(1, 1, 1));
+        project.Set(Prj.DefaultFinishTime, new DateTime(1, 1, 1));
+        project.Set(Prj.DurationFormat, payload.TimeGranularity == "minute" ? TimeUnitType.Minute : TimeUnitType.Day);
+        project.Set(Prj.CurrencySymbol, "");
         project.Set(Prj.Name, payload.Name ?? "Project");
         if (!string.IsNullOrEmpty(payload.StartDate)) project.Set(Prj.StartDate, ParseDateTime(payload.StartDate)!.Value);
         if (!string.IsNullOrEmpty(payload.StatusDate)) project.Set(Prj.StatusDate, ParseDateTime(payload.StatusDate)!.Value);
@@ -298,8 +320,15 @@ internal static class Program
         foreach (var root in orderedRoots)
             AddTaskRecursive(project.RootTask, root, payload.Tasks, byCode);
 
+        if (byCode.Count != payload.Tasks.Count) throw new InvalidOperationException("任务编码重复或父级结构无效，无法完整导出 Project");
+        var mappings = WriteCustomFields(project, payload, byCode);
+        WriteMetadata(project, new FileMetadata { Fields = mappings, TimeGranularity = payload.TimeGranularity,
+            ProjectLines = payload.ProjectLines,
+            InactiveDependencies = payload.Dependencies.Where(d => !d.Active).Select(d => new DepOut { FromTaskCode = d.FromTaskCode, ToTaskCode = d.ToTaskCode, Type = d.Type, Lag = d.Lag, Active = false }).ToList() });
+
         foreach (var dep in payload.Dependencies)
         {
+            if (!dep.Active) continue;
             if (!byCode.TryGetValue(dep.FromTaskCode, out var from)) continue;
             if (!byCode.TryGetValue(dep.ToTaskCode, out var to)) continue;
             var linkType = dep.Type switch
@@ -317,7 +346,8 @@ internal static class Program
             }
         }
 
-        project.Save(outputMpp, SaveFileFormat.Mpp);
+        project.Save(outputMpp, new MPPSaveOptions { WriteViewData = true });
+        VerifyCustomFieldRoundtrip(outputMpp, payload);
         return 0;
     }
 
@@ -327,7 +357,9 @@ internal static class Program
         List<TaskIn> all,
         Dictionary<string, Aspose.Tasks.Task> byCode)
     {
+        if (byCode.ContainsKey(t.TaskCode)) throw new InvalidDataException("任务编码重复或父级结构循环，无法完整导出 Project");
         var node = parent.Children.Add(t.Name ?? t.TaskCode);
+        node.Set(Tsk.WBS, t.TaskCode);
         byCode[t.TaskCode] = node;
 
         if (t.IsMilestone) node.Set(Tsk.IsMilestone, true);
@@ -342,7 +374,8 @@ internal static class Program
 
         if (t.Duration.HasValue)
         {
-            var dur = node.ParentProject.GetDuration(t.Duration.Value, TimeUnitType.Minute);
+            var unit = node.ParentProject.Get(Prj.DurationFormat);
+            var dur = node.ParentProject.GetDuration(unit == TimeUnitType.Day ? t.Duration.Value / 1440 : t.Duration.Value, unit);
             node.Set(Tsk.Duration, dur);
         }
 
@@ -351,6 +384,13 @@ internal static class Program
 
         if (!string.IsNullOrEmpty(t.Note))
             node.Set(Tsk.NotesText, t.Note);
+
+        if (!string.IsNullOrWhiteSpace(t.Assignee)) {
+            foreach (var name in t.Assignee.Split(new[] { ',', '，', ';', '；' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)) {
+                var resource = node.ParentProject.Resources.FirstOrDefault(r => r.Get(Rsc.Name) == name) ?? node.ParentProject.Resources.Add(name);
+                node.ParentProject.ResourceAssignments.Add(node, resource);
+            }
+        }
 
         var ct = MapConstraintTypeOut(t.ConstraintType);
         if (ct.HasValue) node.Set(Tsk.ConstraintType, ct.Value);
@@ -430,6 +470,7 @@ internal static class Program
         [JsonPropertyName("is_milestone")] public bool IsMilestone { get; set; }
         [JsonPropertyName("auto_schedule")] public bool AutoSchedule { get; set; } = true;
         [JsonPropertyName("note")] public string? Note { get; set; }
+        [JsonPropertyName("custom_values")] public Dictionary<string, string> CustomValues { get; set; } = new();
         [JsonPropertyName("percent_done")] public int? PercentDone { get; set; }
         [JsonPropertyName("constraint_type")] public string? ConstraintType { get; set; }
         [JsonPropertyName("constraint_date")] public string? ConstraintDate { get; set; }
@@ -464,6 +505,8 @@ internal static class Program
         [JsonPropertyName("dependencies")] public List<DepOut> Dependencies { get; set; } = new();
         [JsonPropertyName("status_date")] public string? StatusDate { get; set; }
         [JsonPropertyName("project_lines")] public List<ProjectLineOut>? ProjectLines { get; set; }
+        [JsonPropertyName("custom_fields")] public List<CustomFieldDto> CustomFields { get; set; } = new();
+        [JsonPropertyName("time_granularity")] public string? TimeGranularity { get; set; }
     }
 
     private sealed class TaskIn
@@ -478,6 +521,7 @@ internal static class Program
         [JsonPropertyName("is_milestone")] public bool IsMilestone { get; set; }
         [JsonPropertyName("auto_schedule")] public bool AutoSchedule { get; set; } = true;
         [JsonPropertyName("note")] public string? Note { get; set; }
+        [JsonPropertyName("custom_values")] public Dictionary<string, string> CustomValues { get; set; } = new();
         [JsonPropertyName("percent_done")] public int? PercentDone { get; set; }
         [JsonPropertyName("constraint_type")] public string? ConstraintType { get; set; }
         [JsonPropertyName("constraint_date")] public string? ConstraintDate { get; set; }
@@ -504,5 +548,8 @@ internal static class Program
         [JsonPropertyName("status_date")] public string? StatusDate { get; set; }
         [JsonPropertyName("tasks")] public List<TaskIn> Tasks { get; set; } = new();
         [JsonPropertyName("dependencies")] public List<DepIn> Dependencies { get; set; } = new();
+        [JsonPropertyName("custom_fields")] public List<CustomFieldDto> CustomFields { get; set; } = new();
+        [JsonPropertyName("project_lines")] public List<ProjectLineOut>? ProjectLines { get; set; }
+        [JsonPropertyName("time_granularity")] public string? TimeGranularity { get; set; }
     }
 }

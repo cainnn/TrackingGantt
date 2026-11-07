@@ -84,6 +84,25 @@ async function main() {
   const viewToken = (await api('/auth/login', 'POST', { login: 'view', password: 'view123' })).token;
   await api(`/projects/${p.id}`, 'PUT', { custom_fields: [] }, 403, viewToken);
   await api(`/tasks/${p.id}`, 'PUT', [{ id: t.id, custom_values: {} }], 403, viewToken);
+  // Legacy direct import remains supported, including definitions from another
+  // workbook/project with different field IDs. Old files preserve values.
+  const incomingMoney = { ...money, id: randomUUID() };
+  await api(`/projects/${q.id}`, 'PUT', { custom_fields: [money, text] });
+  const importedTask = { task_code: '1', parent_task_code: '', level: 1, name: '导入测试', assignee: null,
+    start_date: '2026-11-01', end_date: '2026-11-02', duration: 1440, is_milestone: false, auto_schedule: false, note: null };
+  let imported = await api(`/import/${q.id}`, 'POST', { mode: 'merge', custom_fields: [incomingMoney, text],
+    tasks: [{ ...importedTask, custom_values: { [incomingMoney.id]: '999999999999999999.99', [text.id]: '合同原值' } }], dependencies: [] });
+  assert.deepEqual(imported.custom_fields, [money, text]);
+  assert.equal(imported.tasks[0].custom_values[money.id], '999999999999999999.99');
+  for (const mode of ['merge', 'replace']) {
+    imported = await api(`/import/${q.id}`, 'POST', { mode, tasks: [{ ...importedTask, name: '旧文件更新' }], dependencies: [] });
+    assert.deepEqual(imported.tasks[0].custom_values, { [money.id]: '999999999999999999.99', [text.id]: '合同原值' });
+  }
+  await api(`/import/${q.id}`, 'POST', { tasks: [{ ...importedTask, custom_values: { [money.id]: '1.001' } }], dependencies: [] }, 400);
+  assert.equal((await api(`/tasks/${q.id}`)).tasks[0].custom_values[money.id], '999999999999999999.99', 'invalid import must not clear old data');
+  imported = await api(`/import/${q.id}`, 'POST', { mode: 'merge', tasks: [{ ...importedTask, custom_values: { [money.id]: '' } }], dependencies: [] });
+  assert.deepEqual(imported.tasks[0].custom_values, { [money.id]: '', [text.id]: '合同原值' });
+  assert.equal((await api(`/versions/${q.id}?list=1`)).length, 0, 'draft import does not create versions');
   console.log(`PASS custom field API: ${requests} requests; precision, validation, atomic batches, retry, draft/stable, snapshot restore, copy, legacy clients and readonly roles`);
 }
 main().catch(err => { console.error(err); process.exitCode = 1; }).finally(async () => {

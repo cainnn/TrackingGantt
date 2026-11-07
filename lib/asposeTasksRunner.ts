@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import type { TaskCustomField, TaskCustomValues, TimeGranularity } from '../types'
+import { normalizeCustomFields, normalizeCustomValues } from './taskCustomFields'
 
 const CLI_DIR = path.join(process.cwd(), 'aspose-tasks-cli', 'publish')
 const CLI_BIN = path.join(CLI_DIR, 'aspose-tasks-cli')
@@ -24,6 +26,8 @@ export interface ImportResult {
   dependencies: ImportDepDto[]
   status_date: string | null
   project_lines?: ImportProjectLineDto[]
+  custom_fields?: TaskCustomField[]
+  time_granularity?: TimeGranularity
 }
 
 export interface ImportTaskDto {
@@ -38,6 +42,7 @@ export interface ImportTaskDto {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  custom_values?: TaskCustomValues
   percent_done?: number | null
   constraint_type?: string | null
   constraint_date?: string | null
@@ -75,6 +80,8 @@ export interface ExportTaskDto {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  assignee?: string | null
+  custom_values?: TaskCustomValues
   constraint_type: string | null
   constraint_date: string | null
   rollup: boolean
@@ -98,6 +105,9 @@ export interface ExportPayload {
   status_date: string | null
   tasks: ExportTaskDto[]
   dependencies: ExportDepDto[]
+  custom_fields?: TaskCustomField[]
+  time_granularity?: TimeGranularity
+  project_lines?: ImportProjectLineDto[]
 }
 
 interface RunResult { stdout: string; stderr: string }
@@ -143,7 +153,10 @@ export async function importMpp(mppBuffer: Buffer): Promise<ImportResult> {
   try {
     await writeFile(inPath, mppBuffer)
     const { stdout } = await runCli(['import', inPath])
-    return JSON.parse(stdout) as ImportResult
+    const result = JSON.parse(stdout) as ImportResult
+    result.custom_fields = normalizeCustomFields(result.custom_fields ?? [])
+    result.tasks = result.tasks.map(task => ({ ...task, custom_values: normalizeCustomValues(task.custom_values ?? {}, result.custom_fields!) }))
+    return result
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }

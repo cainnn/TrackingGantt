@@ -11,6 +11,8 @@ import {
 } from '@/lib/scheduling'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
+import { CustomFieldError, mergeImportedCustomFields, normalizeCustomFields, normalizeCustomValues } from '@/lib/taskCustomFields'
+import type { TaskCustomField, TaskCustomValues } from '@/types'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -34,6 +36,7 @@ function toDateStr(v: unknown): string | null {
 }
 
 interface ImportTask {
+  custom_values?: TaskCustomValues
   task_code: string
   level: number
   parent_task_code: string
@@ -204,16 +207,16 @@ async function importReplace(
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
        is_deleted, percent_done, duration_unit,
        constraint_type, constraint_date, rollup, inactive, project_boundary,
-       status, deadline, baseline_end_date)
+       status, deadline, baseline_end_date, custom_values)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'minute',
-               $15,$16,$17,$18,$19,$20,$21,$22)`,
+               $15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
        t.auto_schedule, t.note, i,
        t.percent_done ?? 0,
        t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
        t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
-       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date), JSON.stringify(t.custom_values ?? {})]
     )
   }
 
@@ -280,14 +283,14 @@ async function importMerge(
        project_boundary=COALESCE($17, project_boundary),
        status=COALESCE($18, status),
        deadline=$19,
-       baseline_end_date=$20
+       baseline_end_date=$20, custom_values=$21::jsonb
        WHERE id=$10 AND project_id=$11`,
       [parentId, t.name, t.assignee, t.start_date, t.end_date,
        t.duration, t.is_milestone, t.auto_schedule, t.note, t.id, projectId,
        t.percent_done ?? null,
        t.constraint_type ?? null, toDateStr(t.constraint_date),
        t.rollup ?? null, t.inactive ?? null, t.project_boundary ?? null,
-       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date), JSON.stringify(t.custom_values ?? {})]
     )
   }
 
@@ -302,16 +305,16 @@ async function importMerge(
        start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
        is_deleted, percent_done, duration_unit,
        constraint_type, constraint_date, rollup, inactive, project_boundary,
-       status, deadline, baseline_end_date)
+       status, deadline, baseline_end_date, custom_values)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,false,$14,'minute',
-               $15,$16,$17,$18,$19,$20,$21,$22)`,
+               $15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb)`,
       [id, projectId, parentId, t.task_code, t.name, t.assignee,
        t.start_date, t.end_date, t.duration, t.is_milestone,
        t.auto_schedule, t.note, orderIdx++,
        t.percent_done ?? 0,
        t.constraint_type ?? 'asap', toDateStr(t.constraint_date),
        t.rollup ?? false, t.inactive ?? false, t.project_boundary ?? 'ask',
-       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date)]
+       t.status ?? null, toDateStr(t.deadline), toDateStr(t.baseline_end_date), JSON.stringify(t.custom_values ?? {})]
     )
   }
 
@@ -357,6 +360,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     tasks: ImportTask[];
     dependencies: ImportDep[];
     mode?: 'replace' | 'merge';
+    custom_fields?: TaskCustomField[];
     status_date?: string | null;
     project_lines?: Array<{ name: string; line_date: string; color: string; visible: boolean }>;
   }
@@ -366,7 +370,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json(failure('Invalid JSON', 400), { status: 400 })
   }
 
-  const { tasks: rawTasks, dependencies: importDeps, mode = 'replace', status_date, project_lines } = body
+  const { tasks: rawTasks, dependencies: importDeps = [], mode = 'replace', status_date, project_lines } = body ?? {}
+  if (!Array.isArray(rawTasks) || rawTasks.length === 0 || rawTasks.some(t => !t || typeof t.task_code !== 'string') || !Array.isArray(importDeps) || importDeps.some(d => !d)) {
+    return NextResponse.json(failure('导入任务或依赖关系格式无效', 400), { status: 400 })
+  }
   // Sanitize dates on all tasks
   const importTasks = (rawTasks as ImportTask[]).map(t => ({
     ...t,
@@ -396,6 +403,19 @@ export async function POST(req: NextRequest, { params }: Params) {
   try {
     await client.query('BEGIN')
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [projectId])
+
+    const project = await client.query('SELECT custom_fields FROM projects WHERE id=$1 FOR UPDATE', [projectId])
+    const oldFields = normalizeCustomFields(project.rows[0]?.custom_fields ?? [])
+    const { fields, idMap } = mergeImportedCustomFields(oldFields, normalizeCustomFields(body.custom_fields ?? []))
+    const previous = await client.query('SELECT task_code, custom_values FROM tasks WHERE project_id=$1 AND is_deleted=false', [projectId])
+    const previousByCode = new Map<string, TaskCustomValues>(previous.rows.map(t => [t.task_code, t.custom_values ?? {}]))
+    for (const task of importTasks) {
+      const raw = task.custom_values ?? {}
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new CustomFieldError('任务属性值须为键值对象')
+      const remapped = Object.fromEntries(Object.entries(raw).map(([id, value]) => [idMap.get(id) ?? id, value]))
+      task.custom_values = normalizeCustomValues(remapped, fields, previousByCode.get(task.task_code))
+    }
+    await client.query('UPDATE projects SET custom_fields=$1::jsonb WHERE id=$2', [JSON.stringify(fields), projectId])
 
     let message: string
     if (mode === 'merge') {
@@ -473,7 +493,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       let changes = null
       if (lastVersion) {
         const prevTasks: SnapshotTask[] = lastVersion.snapshot?.tasks ?? []
-        const diffs = diffSnapshots(prevTasks, snapshotTasks, { isMinute: isMinuteProject })
+        const diffs = diffSnapshots(prevTasks, snapshotTasks, { isMinute: isMinuteProject, customFields: updatedProj.rows[0]?.custom_fields ?? [] })
         changes = {
           diffs,
           stats: {
@@ -508,10 +528,12 @@ export async function POST(req: NextRequest, { params }: Params) {
       message,
       status_date: updatedStatusDate,
       project_lines: plRes.rows,
+      custom_fields: updatedProj.rows[0]?.custom_fields ?? [],
       version: versionInfo,
     }))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof CustomFieldError) return NextResponse.json(failure(err.message, 400), { status: 400 })
     console.error('Import error:', err)
     return NextResponse.json(failure('Import failed: ' + (err instanceof Error ? err.message : 'Unknown error'), 500), { status: 500 })
   } finally {

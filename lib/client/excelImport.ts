@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx'
 import { MIN_PER_DAY } from '../clientTime'
 import type { TaskCustomField, TaskCustomValues } from '../../types'
 import { CUSTOM_FIELDS_SHEET, normalizeCustomFields, normalizeCustomValues } from '../taskCustomFields'
+import { excelCustomColumns } from './excelCustomFields'
 
 const DEP_TYPE_MAP: Record<string, number> = { SS: 0, SF: 1, FS: 2, FF: 3 }
 
@@ -317,17 +318,23 @@ export function validateImportData(
   return errors
 }
 
-export async function parseExcelFile(file: File, options: { isMinute?: boolean } = {}): Promise<ParseResult> {
+export async function parseExcelFile(file: File, options: { isMinute?: boolean; customFields?: TaskCustomField[] } = {}): Promise<ParseResult> {
   const buf = await file.arrayBuffer()
   const wb = XLSX.read(buf, { cellDates: true })
-  const ws = wb.Sheets[wb.SheetNames[0]]
+  const taskSheet = wb.SheetNames.find(name => {
+    if (name === CUSTOM_FIELDS_SHEET) return false
+    const firstRow = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[name], { header: 1 })[0] ?? []
+    return firstRow.includes('任务名称') && firstRow.includes('任务编码')
+  })
+  if (!taskSheet) throw new Error('找不到含“任务编码”和“任务名称”的任务工作表')
+  const ws = wb.Sheets[taskSheet]
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws)
+  const displayRows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { raw: false })
   const metadata = wb.Sheets[CUSTOM_FIELDS_SHEET]
-  const columns = metadata ? XLSX.utils.sheet_to_json<{ '列名': string; '配置': string }>(metadata) : []
-  const customFields = columns.length ? normalizeCustomFields(columns.map(row => JSON.parse(row['配置']))) : undefined
-  const headers = (XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 })[0] ?? []).map(String)
-  if (columns.some(c => !headers.includes(c['列名']))) throw new Error('Excel 缺少属性列，请保留导出文件中的属性列后重试')
-  if (new Set(columns.map(c => c['列名'])).size !== columns.length) throw new Error('Excel 属性列名重复，请重新导出')
+  const metadataColumns = metadata ? XLSX.utils.sheet_to_json<{ '列名': string; '配置': string }>(metadata) : []
+  const headers = Array.from(XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 })[0] ?? [], cell => String(cell ?? ''))
+  const columns = excelCustomColumns(headers, metadataColumns, options.customFields)
+  const customFields = columns.length ? normalizeCustomFields(columns.map(c => c.field)) : undefined
   // 未指定项目粒度时，延迟列沿用文件的分钟标注，否则默认天。
   const isMinute = options.isMinute ?? rows.some(row =>
     row['工期(分钟)'] != null || row['工期（分钟）'] != null)
@@ -335,7 +342,7 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
   const tasks: ImportTask[] = []
   const dependencies: ImportDep[] = []
 
-  for (const row of rows) {
+  for (const [rowIndex, row] of rows.entries()) {
     const name = String(row['任务名称'] ?? '').trim()
     if (!name) continue
 
@@ -356,9 +363,13 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean }
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,
-      ...(customFields ? { custom_values: normalizeCustomValues(Object.fromEntries(columns.map((column, i) => {
-        const raw = row[column['列名']]
-        return [customFields[i].id, customFields[i].type === 'date' && raw instanceof Date ? fmtDt(raw).slice(0, 10) : raw ?? '']
+      ...(customFields ? { custom_values: normalizeCustomValues(Object.fromEntries(columns.map(column => {
+        const raw = row[column.header]
+        const field = column.field
+        if (field.type === 'money' && typeof raw === 'number' && Math.abs(raw) >= 1e13) throw new Error(`任务「${name}」的「${field.name}」金额较大，请在 Excel 中改为文本以保留精度`)
+        const value = field.type === 'date' && raw instanceof Date ? fmtDt(raw).slice(0, 10)
+          : field.type === 'text' ? displayRows[rowIndex]?.[column.header] ?? '' : raw ?? ''
+        return [field.id, value]
       })), customFields) } : {}),
       percent_done: row['完成度'] != null && String(row['完成度']).trim() !== '' ? Number(row['完成度']) || 0 : null,
       constraint_type: (() => {

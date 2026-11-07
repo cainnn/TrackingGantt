@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthUser } from '@/lib/middleware'
 import { failure } from '@/lib/result'
 import { exportMpp, type ExportPayload } from '@/lib/asposeTasksRunner'
+import { normalizeCustomFields, normalizeCustomValues, CustomFieldError } from '@/lib/taskCustomFields'
 
 const MAX_TASKS = 10_000
 
@@ -22,8 +23,18 @@ export async function POST(req: NextRequest) {
   if (payload.tasks.length > MAX_TASKS) {
     return NextResponse.json(failure(`任务数量超过上限 ${MAX_TASKS}`, 400), { status: 400 })
   }
+  if (payload.tasks.some(t => !t || typeof t.task_code !== 'string' || !t.task_code.trim()) ||
+      new Set(payload.tasks.map(t => t.task_code)).size !== payload.tasks.length) {
+    return NextResponse.json(failure('任务编码不能为空或重复', 400), { status: 400 })
+  }
+  payload.dependencies ??= []
+  if (!Array.isArray(payload.dependencies) || payload.dependencies.some(d => !d)) {
+    return NextResponse.json(failure('依赖关系格式无效', 400), { status: 400 })
+  }
 
   try {
+    payload.custom_fields = normalizeCustomFields(payload.custom_fields ?? [])
+    payload.tasks = payload.tasks.map(task => ({ ...task, custom_values: normalizeCustomValues(task.custom_values ?? {}, payload.custom_fields!) }))
     const mpp = await exportMpp(payload)
     const filename = encodeURIComponent((payload.name || 'project') + '.mpp')
     return new NextResponse(new Uint8Array(mpp), {
@@ -37,6 +48,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('MPP build error:', msg)
+    if (err instanceof CustomFieldError) return NextResponse.json(failure(msg, 400), { status: 400 })
     return NextResponse.json(failure(`生成 MPP 失败：${msg}`, 500), { status: 500 })
   }
 }

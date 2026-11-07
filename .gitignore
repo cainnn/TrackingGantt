@@ -13,6 +13,8 @@
 # testing
 /coverage
 /.test-dist
+/aspose-tasks-tests/bin/
+/aspose-tasks-tests/obj/
 
 # next.js
 /.next/

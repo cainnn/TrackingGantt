@@ -402,18 +402,22 @@ fi
 # Aspose Tasks CLI 独立于 Next 构建；无论是否使用 LOCAL_BUILD，都要刷新 MPP 工具二进制。
 if [[ -f "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" ]]; then
   echo ">> 构建 Aspose Tasks CLI..."
-  if [[ -x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" ]]; then
-    chmod +x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" 2>/dev/null || true
+  cli_source_hash=$(cd "$APP_DIR/aspose-tasks-cli" && sha256sum ./*.cs ./*.csproj | sha256sum | cut -d' ' -f1)
+  if [[ -x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" ]] &&
+     [[ -f "$APP_DIR/aspose-tasks-cli/publish/source.sha256" ]] &&
+     [[ "$(cat "$APP_DIR/aspose-tasks-cli/publish/source.sha256")" == "$cli_source_hash" ]] &&
+     file "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" | grep -q 'ELF'; then
     echo "   使用随包发布的 Aspose Tasks CLI"
   else
     if ! command -v dotnet >/dev/null 2>&1; then
       echo "   ✗ dotnet 未安装，且部署包中缺少 aspose-tasks-cli/publish/aspose-tasks-cli" >&2
       exit 1
     fi
-    dotnet publish "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" -c Release -o "$APP_DIR/aspose-tasks-cli/publish" >/tmp/aspose-publish.log 2>&1 || {
+    dotnet publish "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -o "$APP_DIR/aspose-tasks-cli/publish" >/tmp/aspose-publish.log 2>&1 || {
       cat /tmp/aspose-publish.log >&2
       exit 1
     }
+    printf '%s\n' "$cli_source_hash" > "$APP_DIR/aspose-tasks-cli/publish/source.sha256"
     echo "   Aspose Tasks CLI 构建完成"
   fi
 fi

@@ -698,6 +698,9 @@ export default function GanttToolbar({
         start_date: exportDate(currentProject?.start_date),
         end_date: exportDate(currentProject?.end_date),
         status_date: exportDate(currentProject?.status_date),
+        time_granularity: isMinute ? 'minute' : 'day',
+        custom_fields: currentProject?.custom_fields ?? [],
+        project_lines: projectLines,
         tasks: tasks
           .filter(t => !t.is_deleted)
           .map(t => ({
@@ -711,6 +714,8 @@ export default function GanttToolbar({
             is_milestone: !!t.is_milestone,
             auto_schedule: t.auto_schedule !== false,
             note: t.note ?? null,
+            assignee: t.assignee,
+            custom_values: t.custom_values ?? {},
             constraint_type: t.constraint_type ?? null,
             constraint_date: exportDate(t.constraint_date),
             rollup: !!t.rollup,
@@ -747,7 +752,7 @@ export default function GanttToolbar({
     } catch (err) {
       alert(`导出 MS Project 失败：${err instanceof Error ? err.message : '未知错误'}`)
     }
-  }, [tasks, dependencies, currentProject, isMinute])
+  }, [tasks, dependencies, currentProject, isMinute, projectLines])
 
   const handleCreateShareLink = useCallback(async () => {
     try {
@@ -792,7 +797,8 @@ export default function GanttToolbar({
 
       // Let user choose import mode
       const choice = prompt(
-        `解析到 ${parsed.tasks.length} 个任务和 ${parsed.dependencies.length} 个依赖关系。\n\n` +
+        `解析到 ${parsed.tasks.length} 个任务和 ${parsed.dependencies.length} 个依赖关系。\n` +
+        (parsed.customFields?.length ? `任务属性：${parsed.customFields.map(f => `${f.name}（${CUSTOM_FIELD_TYPES[f.type]}${f.unit ? `，${f.unit}` : ''}）`).join('、')}。\n` : '') + '\n' +
         `请选择导入模式：\n` +
         `  1 = 替换导入（删除所有现有数据，用 ${sourceLabel} 数据替换）\n` +
         `  2 = 合并导入（保留现有数据，更新已有任务，新增新任务）\n\n` +
@@ -923,14 +929,14 @@ export default function GanttToolbar({
     e.target.value = ''
     setImporting(true)
     try {
-      const parsed = await parseExcelFile(file, { isMinute })
+      const parsed = await parseExcelFile(file, { isMinute, customFields: currentProject?.custom_fields })
       await applyParsedImport(parsed, 'Excel')
     } catch (err) {
       alert(`解析 Excel 文件失败：${err instanceof Error ? err.message : '未知错误'}`)
     } finally {
       setImporting(false)
     }
-  }, [applyParsedImport, isMinute])
+  }, [applyParsedImport, isMinute, currentProject?.custom_fields])
 
   const handleImportMpp = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -948,12 +954,14 @@ export default function GanttToolbar({
         dependencies: ImportDep[]
         status_date: string | null
         project_lines?: ImportProjectLine[]
+        custom_fields?: TaskCustomField[]
       }
       await applyParsedImport({
         tasks: v.tasks,
         dependencies: v.dependencies,
         statusDate: v.status_date,
         projectLines: v.project_lines,
+        customFields: v.custom_fields,
       }, 'MS Project')
     } catch (err) {
       alert(`导入 MS Project 文件失败：${err instanceof Error ? err.message : '未知错误'}`)

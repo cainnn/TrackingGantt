@@ -6,6 +6,9 @@ import { updateTasks, addDependency, updateDependency, removeDependency } from '
 import type { Task, Dependency, TaskLifecycleEvent, TaskCustomValues } from '@/types'
 import { normalizeCustomValues } from '@/lib/taskCustomFields'
 import TaskCustomValueInput from './TaskCustomValueInput'
+import TaskCustomFieldsEditor from './TaskCustomFieldsEditor'
+import { setCustomFields } from '@/store/slices/projectSlice'
+import { labelDraftStep } from '@/store/draftHistory'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
@@ -67,6 +70,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [isMilestone, setIsMilestone] = useState(false)
   const [note,        setNote]        = useState('')
   const [customValues, setCustomValues] = useState<TaskCustomValues>({})
+  const [manageFields, setManageFields] = useState(false)
   const [durationIn,  setDurationIn]  = useState('')
   const [formError, setFormError] = useState('')
   const [constraintType, setConstraintType] = useState<string>('asap')
@@ -584,6 +588,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                        placeholder="负责人姓名"
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
               </div>
+              <div className="flex items-center justify-between gap-3 rounded border border-blue-100 bg-blue-50 px-3 py-2.5">
+                <div><div className="text-sm font-medium text-gray-800">任务属性</div><div className="mt-1 text-xs text-gray-500">填写支出金额等信息，也可新增自定义属性</div></div>
+                <button type="button" onClick={() => { setTab('custom'); setManageFields(false) }} className="shrink-0 rounded border border-blue-300 bg-white px-3 py-1.5 text-sm text-blue-600">编辑属性</button>
+              </div>
             </div>
           )}
 
@@ -952,12 +960,15 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
           })()}
 
           {tab === 'custom' && <div className="space-y-4 px-5 py-4">
-            <p className="text-xs text-gray-500">属性由工具栏“任务属性”统一配置，保存后点击“确认更改”才会入库。</p>
-            {!(currentProject?.custom_fields ?? []).some(f => !f.archived) && <p className="py-6 text-center text-sm text-gray-400">尚未配置属性，可先添加“支出金额”等属性。</p>}
+            <div className="flex items-center justify-between gap-3"><p className="text-xs text-gray-500">属性配置供本项目共用。所有修改在“确认变更”后才入库。</p><button type="button" className="shrink-0 text-sm text-blue-600" onClick={() => setManageFields(v => !v)}>{manageFields ? '返回填写' : '管理属性'}</button></div>
+            {manageFields ? <TaskCustomFieldsEditor fields={currentProject?.custom_fields ?? []} onApply={fields => {
+              dispatch(labelDraftStep('配置任务属性')); dispatch(setCustomFields({ projectId, fields })); setManageFields(false)
+            }} /> : <>
+            {!(currentProject?.custom_fields ?? []).some(f => !f.archived) && <div className="py-6 text-center"><p className="mb-3 text-sm text-gray-400">尚未配置任务属性</p><button type="button" onClick={() => setManageFields(true)} className="rounded bg-blue-600 px-4 py-2 text-sm text-white">新增任务属性</button></div>}
             {(currentProject?.custom_fields ?? []).filter(f => !f.archived).map(field => <label key={field.id} className="block text-sm text-gray-700">
               <span className="mb-1 block">{field.name}{field.unit ? `（${field.unit}）` : ''}</span>
               <TaskCustomValueInput field={field} value={customValues[field.id] ?? ''} onChange={value => setCustomValues(v => ({ ...v, [field.id]: value }))} />
-            </label>)}
+            </label>)}</>}
           </div>}
 
           {/* Note tab */}
