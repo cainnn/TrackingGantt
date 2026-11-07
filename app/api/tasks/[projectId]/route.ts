@@ -10,7 +10,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { normalizeDurationMinutes } from '@/lib/taskNumbers'
-import { CustomFieldError, normalizeCustomValues, formatCustomValue } from '@/lib/taskCustomFields'
+import { CustomFieldError, normalizeCustomValues, formatCustomValue, submittedTaskCustomFields, taskCustomFields, customFieldsEqual } from '@/lib/taskCustomFields'
 import type { TaskCustomField } from '@/types'
 import {
   type TaskLike,
@@ -255,13 +255,14 @@ export async function POST(req: NextRequest, { params }: Params) {
         }
       }
 
+      const ownFields = submittedTaskCustomFields(task, {}, customFields)
       const r = await client.query(
         `INSERT INTO tasks
            (id, project_id, parent_id, task_code, name, assignee, start_date, end_date,
             duration, duration_unit, percent_done, is_milestone, note, order_index, auto_schedule,
             constraint_type, constraint_date, deadline, status, rollup, inactive,
-            project_boundary, baseline_end_date, custom_values)
-         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb) RETURNING *`,
+            project_boundary, baseline_end_date, custom_values, custom_fields)
+         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25::jsonb) RETURNING *`,
         [clientId, projectId, null, code, name,
          assignee ?? null, normalizedStart, normalizedEnd,
          normalizedDuration, duration_unit ?? 'day',
@@ -269,7 +270,7 @@ export async function POST(req: NextRequest, { params }: Params) {
          constraint_type ?? 'asap', normalizeDate(constraint_date), normalizeDate(deadline),
          status ?? null, rollup ?? false, inactive ?? false,
          project_boundary ?? 'ask', normalizeDate(baseline_end_date),
-         JSON.stringify(normalizeCustomValues(task.custom_values ?? {}, customFields))]
+         JSON.stringify(normalizeCustomValues(task.custom_values ?? {}, ownFields)), JSON.stringify(ownFields)]
       )
       const newTask = r.rows[0]
       inserted.push(newTask)
@@ -486,6 +487,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
       const hasInactive = 'inactive' in task
       const hasPB = 'project_boundary' in task
       const hasBE = 'baseline_end_date' in task
+      const ownFields = submittedTaskCustomFields(t, old, customFields)
       const r = await client.query(
         `UPDATE tasks SET
            name         = COALESCE($1, name),
@@ -509,6 +511,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
            baseline_end_date = CASE WHEN $30 THEN $31 ELSE baseline_end_date END,
            deadline        = CASE WHEN $32 THEN $33 ELSE deadline END,
            custom_values   = CASE WHEN $38 THEN $39::jsonb ELSE custom_values END,
+           custom_fields   = CASE WHEN $40 THEN $41::jsonb ELSE custom_fields END,
            updated_at   = NOW()
          WHERE id = $12 AND project_id = $15
          RETURNING *`,
@@ -535,7 +538,8 @@ export async function PUT(req: NextRequest, { params }: Params) {
           hasBE, normalizeDate(t.baseline_end_date),
           hasDL, normalizeDate(t.deadline),
           Object.hasOwn(t, 'start_date'), Object.hasOwn(t, 'end_date'), Object.hasOwn(t, 'duration'), Object.hasOwn(t, 'note'),
-          Object.hasOwn(t, 'custom_values'), JSON.stringify(Object.hasOwn(t, 'custom_values') ? normalizeCustomValues(t.custom_values, customFields, old.custom_values ?? {}) : {}),
+          Object.hasOwn(t, 'custom_values'), JSON.stringify(Object.hasOwn(t, 'custom_values') ? normalizeCustomValues(t.custom_values, ownFields, old.custom_values ?? {}) : {}),
+          Object.hasOwn(t, 'custom_fields') || Object.hasOwn(t, 'custom_values'), JSON.stringify(ownFields),
         ]
       )
       if (!r.rows[0]) continue
@@ -648,7 +652,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
         if (f === 'start_date' || f === 'end_date') dateChanged = true
       }
 
-      for (const field of customFields) {
+      const oldFields = taskCustomFields(old, customFields)
+      if (!customFieldsEqual(oldFields, ownFields)) {
+        lifecycleEvents.push({ taskId: id, taskCode: code, projectId, userId: auth.value.userId,
+          event_type: 'updated', field_name: 'custom_fields', old_value: JSON.stringify(oldFields), new_value: JSON.stringify(ownFields),
+          description: `任务「${cur.name}」修改了自定义属性：${ownFields.map(f => f.name).join('、')}`, reason: t._reason,
+        })
+        if (isHistorical) auditEntries.push({ taskId: id, field: '任务属性配置', oldValue: JSON.stringify(oldFields), newValue: JSON.stringify(ownFields), reason: normalizeChangeReason(t._reason) })
+      }
+      for (const field of ownFields) {
         const oldValue = old.custom_values?.[field.id] ?? '', newValue = cur.custom_values?.[field.id] ?? ''
         if (oldValue === newValue) continue
         lifecycleEvents.push({ taskId: id, taskCode: code, projectId, userId: auth.value.userId,

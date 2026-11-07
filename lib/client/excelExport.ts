@@ -3,6 +3,7 @@
 import ExcelJS from 'exceljs'
 import { saveAs } from 'file-saver'
 import type { Task, Dependency, ProjectLine, TaskCustomField } from '@/types'
+import { prepareTaskAttributeTransfer, TASK_FIELDS_SHEET } from '../taskAttributeTransfer'
 import { CUSTOM_FIELDS_SHEET, customFieldExportColumns } from '../taskCustomFields'
 import { computeTaskStatus, STATUS_META } from '@/components/GanttChart/GanttChart'
 import { formatMinDuration, MIN_PER_DAY, toDateTimeStr } from '@/lib/clientTime'
@@ -315,7 +316,9 @@ export async function exportToExcel(
   },
 ) {
   const isMinute = options?.isMinute === true
-  const activeTasks = tasks.filter(t => !t.is_deleted)
+  const transfer = prepareTaskAttributeTransfer(tasks.filter(t => !t.is_deleted), options?.customFields)
+  const activeTasks = transfer.tasks
+  if (transfer.fields.length > 16_000) throw new Error('任务属性列超过 Excel 上限，请分批导出')
   // 用上期快照覆盖 baseline_end_date，保证 computeTaskStatus 的上游检测正确
   const tasksWithBaseline = options?.prevEndMap && options.prevEndMap.size > 0
     ? activeTasks.map(t => {
@@ -372,7 +375,7 @@ export async function exportToExcel(
 
   // ── Main sheet: all tasks ──────────────────────────────────────────
   const wsMain = wb.addWorksheet('任务')
-  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, options?.customFields)
+  populateSheet(wsMain, allFlat, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, transfer.fields)
 
   // ── Per-assignee sheets ────────────────────────────────────────────
   const assignees = new Set<string>()
@@ -384,15 +387,24 @@ export async function exportToExcel(
     // Sheet name max 31 chars, no special chars
     const baseName = assignee.slice(0, 27).replace(/[\\/*?:\[\]]/g, '_')
     let sheetName = baseName, suffix = 2
-    while (wb.getWorksheet(sheetName) || sheetName === CUSTOM_FIELDS_SHEET || sheetName === '项目设置') sheetName = `${baseName} ${suffix++}`
+    while (wb.getWorksheet(sheetName) || sheetName === TASK_FIELDS_SHEET || sheetName === CUSTOM_FIELDS_SHEET || sheetName === '项目设置') sheetName = `${baseName} ${suffix++}`
     const ws = wb.addWorksheet(sheetName)
-    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, options?.customFields)
+    populateSheet(ws, filtered, summaryIds, dependencies, codeMap, parentCodeMap, tasksWithBaseline, sdDate, options?.prevTaskIds, seqMap, isMinute, hasPreviousStatusVersion, transfer.fields)
   }
 
-  if (options?.customFields?.length) {
+  if (transfer.fields.length) {
     const metadata = wb.addWorksheet(CUSTOM_FIELDS_SHEET, { state: 'hidden' })
     metadata.columns = [{ header: '列名', key: 'column' }, { header: '配置', key: 'definition' }]
-    for (const c of customFieldExportColumns(options.customFields)) metadata.addRow({ column: c.header, definition: JSON.stringify(c.field) })
+    for (const c of customFieldExportColumns(transfer.fields)) metadata.addRow({ column: c.header, definition: JSON.stringify(c.field) })
+  }
+
+  const bindings = wb.addWorksheet(TASK_FIELDS_SHEET, { state: 'hidden' })
+  bindings.columns = [{ header: '任务编码', key: 'code' }, { header: '序号', key: 'part' }, { header: '归属', key: 'binding' }]
+  // Excel cells are limited to 32,767 characters. Split large task schemas so
+  // many user-defined choices cannot silently truncate ownership metadata.
+  for (const task of transfer.tasks) {
+    const json = JSON.stringify(task.custom_field_binding)
+    for (let start = 0; start < json.length; start += 20_000) bindings.addRow({ code: task.task_code, part: start / 20_000 + 1, binding: json.slice(start, start + 20_000) })
   }
 
   // ── Project settings sheet ─────────────────────────────────────────

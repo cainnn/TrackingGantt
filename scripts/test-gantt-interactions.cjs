@@ -39,7 +39,7 @@ async function clickElement(page, handle, options = {}) {
   }
 }
 async function button(page, label) {
-  const h = await page.evaluateHandle(label => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === label), label);
+  const h = await page.evaluateHandle(label => [...document.querySelectorAll('button')].find(b => (b.textContent.trim() === label || b.getAttribute('aria-label') === label)), label);
   assert.ok(h.asElement(), `button: ${label}`);
   assert.equal(await h.evaluate(b => b.disabled), false, `${label} disabled`);
   await clickElement(page, h.asElement()); await h.dispose();
@@ -118,7 +118,7 @@ async function main() {
   await page.click(cell('1', 'name'));
   await page.keyboard.down('Shift'); await page.click(cell('3', 'name')); await page.keyboard.up('Shift');
   assert.deepEqual(await selected(page), ['1', '2', '3']);
-  await button(page, '批量修改');
+  await button(page, '任务操作'); await button(page, '批量修改任务');
   await page.click('[role=dialog] input[type=checkbox]');
   await page.type('[aria-label="批量责任人"]', '张三');
   await button(page, '应用到草稿');
@@ -217,13 +217,15 @@ async function main() {
   console.log('PASS status-date line: live progress preview, release to draft, keyboard adjustment, undo; zero writes');
   // Saving and applying views persists only UI preferences.
   await fill(page, 'input[placeholder="搜索任务..."]', '任务1');
-  await button(page, '保存视图');
-  await fill(page, 'input[aria-label="视图名称"]', '我的视图');
-  await button(page, '保存当前视图');
+  await button(page, '显示设置'); await button(page, '常用布局'); await button(page, '保存当前布局');
+  await fill(page, 'input[aria-label="布局名称"]', '我的视图');
+  await button(page, '保存布局');
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('gantt-saved-views-v1-interaction-fixture')));
   assert.equal(stored[0].search, '任务1'); assert.equal('tasks' in stored[0], false);
+  await page.keyboard.press('Escape');
   await fill(page, 'input[placeholder="搜索任务..."]', '');
-  await button(page, '应用');
+  await button(page, '显示设置'); await button(page, '常用布局');
+  await page.select('select[aria-label="已保存布局"]', stored[0].id);
   assert.equal(await page.$eval('input[placeholder="搜索任务..."]', e => e.value), '任务1');
   assert.deepEqual(writes, []);
   await page.screenshot({ path: '/private/tmp/gantt-interactions.png' });

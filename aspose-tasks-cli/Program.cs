@@ -114,6 +114,7 @@ internal static partial class Program
                 AutoSchedule = !t.Get(Tsk.IsManual),
                 Note = NullIfEmpty(t.Get(Tsk.NotesText)),
                 CustomValues = ReadCustomValues(t, customFields),
+                CustomFieldBinding = metadata != null && metadata.TaskFields.TryGetValue(code, out var binding) ? binding : null,
                 PercentDone = t.Get(Tsk.PercentComplete),
                 ConstraintType = MapConstraintType(t.Get(Tsk.ConstraintType)),
                 ConstraintDate = ToDateTimeString(t.Get(Tsk.ConstraintDate)),
@@ -323,6 +324,7 @@ internal static partial class Program
         if (byCode.Count != payload.Tasks.Count) throw new InvalidOperationException("任务编码重复或父级结构无效，无法完整导出 Project");
         var mappings = WriteCustomFields(project, payload, byCode);
         WriteMetadata(project, new FileMetadata { Fields = mappings, TimeGranularity = payload.TimeGranularity,
+            TaskFields = payload.Tasks.Where(t => t.CustomFieldBinding.HasValue).ToDictionary(t => t.TaskCode, t => t.CustomFieldBinding!.Value),
             ProjectLines = payload.ProjectLines,
             InactiveDependencies = payload.Dependencies.Where(d => !d.Active).Select(d => new DepOut { FromTaskCode = d.FromTaskCode, ToTaskCode = d.ToTaskCode, Type = d.Type, Lag = d.Lag, Active = false }).ToList() });
 
@@ -471,6 +473,7 @@ internal static partial class Program
         [JsonPropertyName("auto_schedule")] public bool AutoSchedule { get; set; } = true;
         [JsonPropertyName("note")] public string? Note { get; set; }
         [JsonPropertyName("custom_values")] public Dictionary<string, string> CustomValues { get; set; } = new();
+        [JsonPropertyName("custom_field_binding")] public JsonElement? CustomFieldBinding { get; set; }
         [JsonPropertyName("percent_done")] public int? PercentDone { get; set; }
         [JsonPropertyName("constraint_type")] public string? ConstraintType { get; set; }
         [JsonPropertyName("constraint_date")] public string? ConstraintDate { get; set; }
@@ -522,6 +525,7 @@ internal static partial class Program
         [JsonPropertyName("auto_schedule")] public bool AutoSchedule { get; set; } = true;
         [JsonPropertyName("note")] public string? Note { get; set; }
         [JsonPropertyName("custom_values")] public Dictionary<string, string> CustomValues { get; set; } = new();
+        [JsonPropertyName("custom_field_binding")] public JsonElement? CustomFieldBinding { get; set; }
         [JsonPropertyName("percent_done")] public int? PercentDone { get; set; }
         [JsonPropertyName("constraint_type")] public string? ConstraintType { get; set; }
         [JsonPropertyName("constraint_date")] public string? ConstraintDate { get; set; }

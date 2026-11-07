@@ -1,5 +1,5 @@
 import type { TaskCustomField, TaskCustomValues } from '../types'
-import { formatCustomValue } from './taskCustomFields'
+import { CUSTOM_FIELD_TYPES, formatCustomValue, customFieldsEqual, taskCustomFields } from './taskCustomFields'
 
 export interface SnapshotTask {
   id: string
@@ -13,6 +13,7 @@ export interface SnapshotTask {
   is_milestone: boolean
   auto_schedule?: boolean | null
   note?: string | null
+  custom_fields?: TaskCustomField[]
   custom_values?: TaskCustomValues
   parent_id: string | null
   order_index?: number | null
@@ -129,10 +130,15 @@ export function diffSnapshots(oldTasks: SnapshotTask[], newTasks: SnapshotTask[]
         })
       }
     }
+    const oldFields = taskCustomFields(oldT, opts.customFields), newFields = taskCustomFields(newT, opts.customFields)
+    if ((Array.isArray(oldT.custom_fields) || Array.isArray(newT.custom_fields)) && !customFieldsEqual(oldFields, newFields)) {
+      const describe = (fields: TaskCustomField[]) => fields.map(f => `${f.name}（${CUSTOM_FIELD_TYPES[f.type]}${f.unit ? '，' + f.unit : ''}${f.archived ? '，已停用' : ''}）`).join('、') || '(无)'
+      changes.push({ field: '任务属性配置', old: describe(oldFields), new: describe(newFields) })
+    }
     for (const id of new Set([...Object.keys(oldT.custom_values ?? {}), ...Object.keys(newT.custom_values ?? {})])) {
       const old = oldT.custom_values?.[id] ?? '', next = newT.custom_values?.[id] ?? ''
       if (old === next) continue
-      const field = opts.customFields?.find(f => f.id === id)
+      const field = newFields.find(f => f.id === id) ?? oldFields.find(f => f.id === id)
       changes.push({ field: `属性：${field?.name ?? id}`, old: formatCustomValue(old, field) || '(空)', new: formatCustomValue(next, field) || '(空)' })
     }
     if (changes.length > 0) {

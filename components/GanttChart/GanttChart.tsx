@@ -10,6 +10,7 @@ import {
 import { setStatusDate } from '@/store/slices/projectSlice'
 import type { Task, Dependency } from '@/types'
 import EditTaskModal from './EditTaskModal'
+import DependencyTaskPicker from './DependencyTaskPicker'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import {
@@ -18,6 +19,7 @@ import {
   rollupSummaryTasks,
   findUpperConstraintViolations,
   snapTaskUpdatesToDayLevel,
+  wouldCreateCycle,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
 import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
@@ -246,7 +248,7 @@ export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number
   { key: 'duration',   label: '持续时间', width: COL_DUR },
   { key: 'start',      label: '开始时间', width: COL_START },
   { key: 'end',        label: '完成时间', width: COL_END },
-  { key: 'pred',       label: '前导',     width: COL_PRED },
+  { key: 'pred',       label: '前置',     width: COL_PRED },
   { key: 'succ',       label: '后继',     width: COL_SUCC },
   { key: 'lag',        label: '延迟',     width: 60 },
   { key: 'taskType',   label: '任务类型', width: COL_TASK_TYPE },
@@ -664,9 +666,7 @@ export default function GanttChart({
 
   // ── Predecessor popup ────────────────────────────────────────────────────
   const [predPopup, setPredPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
-  const [predFilter, setPredFilter] = useState('')
   const [succPopup, setSuccPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
-  const [succFilter, setSuccFilter] = useState('')
   const [selectedCell, setSelectedCell] = useState<{ taskId: string; col: OptionalCol | 'name' } | null>(null)
   const [activeEditor, setActiveEditor] = useState<{ taskId: string; col: OptionalCol } | null>(null)
 
@@ -2193,16 +2193,18 @@ export default function GanttChart({
   }, [tasks, deps, dispatch, projectStartDate, recascade])
 
   // ── Toggle predecessor via popup（本地操作）────────────────
-  const togglePredecessor = useCallback(async (fromTaskId: string, toTaskId: string) => {
+  const togglePredecessor = useCallback((fromTaskId: string, toTaskId: string) => {
+    if (readOnly) return
     const existing = deps.find(d => d.from_task_id === fromTaskId && d.to_task_id === toTaskId)
     if (existing) {
       dispatch(removeDependency(existing.id))
-      setPredPopup(null)
       const remainDeps = deps.filter(d => d.id !== existing.id)
       recascade(remainDeps)
       return
     }
 
+    if (wouldCreateCycle(fromTaskId, toTaskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
+    dispatch(labelDraftStep('修改任务依赖'))
     const newDep: Dependency = {
       id: uuid(), project_id: projectId,
       from_task_id: fromTaskId, to_task_id: toTaskId,
@@ -2217,9 +2219,8 @@ export default function GanttChart({
       dispatch(markDirty([toTaskId]))
       nextTasks = tasks.map(t => t.id === toTaskId ? updatedTo : t)
     }
-    setPredPopup(null)
     recascade([...deps, newDep], nextTasks)
-  }, [deps, tasks, dispatch, projectId, recascade])
+  }, [deps, tasks, dispatch, projectId, recascade, readOnly])
 
   // ── Delete selected dependency ──────────────────────────────────────────
   useEffect(() => {
@@ -2555,7 +2556,7 @@ export default function GanttChart({
       end:        Math.max(headerW('完成时间'), contentW(t => isMinute
         ? (t.end_date ?? '').slice(0, 16).replace('T', ' ')
         : (t.end_date ?? '').split('T')[0])),
-      pred:       headerW('前导'),
+      pred:       headerW('前置'),
       succ:       headerW('后继'),
       lag:        headerW('延迟'),
       taskType:   Math.max(headerW('任务类型'), contentW(t => t.auto_schedule === false ? '手动' : '自动')),
@@ -2776,8 +2777,8 @@ export default function GanttChart({
       const rect = el?.getBoundingClientRect()
       if (rect) {
         const popup = { taskId: task.id, x: rect.left, y: Math.min(rect.bottom, window.innerHeight - 330) }
-        if (cell.col === 'pred') { setPredFilter(''); setPredPopup(popup) }
-        else { setSuccFilter(''); setSuccPopup(popup) }
+        if (cell.col === 'pred') { setPredPopup(popup) }
+        else { setSuccPopup(popup) }
       }
     } else if (cell.col === 'inactive') handleTaskFieldChange(task.id, { inactive: !task.inactive })
     else setActiveEditor({ taskId: task.id, col: cell.col })
@@ -2991,7 +2992,7 @@ export default function GanttChart({
           {renderColHeader('duration', '持续时间', colDurW)}
           {renderColHeader('start', '开始', colStartW)}
           {renderColHeader('end', '完成时间', colEndW)}
-          {renderColHeader('pred', '前导', colPredW)}
+          {renderColHeader('pred', '前置', colPredW)}
           {renderColHeader('succ', '后继', colSuccW)}
           {renderColHeader('lag', '延迟', colLagW)}
           {renderColHeader('taskType', '任务类型', colTaskTypeW)}
@@ -3332,9 +3333,8 @@ export default function GanttChart({
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'pred' }) }}
                        onDoubleClick={e => {
                          e.stopPropagation()
-                         if (row.hasChildren) return
+                         if (row.hasChildren || readOnly) return
                          const rect = e.currentTarget.getBoundingClientRect()
-                         setPredFilter('')
                          const popupH = 320
                          const spaceBelow = window.innerHeight - rect.bottom
                          const yPos = spaceBelow < popupH ? rect.top - popupH : rect.bottom
@@ -3352,9 +3352,8 @@ export default function GanttChart({
                        onClick={e => { e.stopPropagation(); setSelectedCell({ taskId: t.id, col: 'succ' }) }}
                        onDoubleClick={e => {
                          e.stopPropagation()
-                         if (row.hasChildren) return
+                         if (row.hasChildren || readOnly) return
                          const rect = e.currentTarget.getBoundingClientRect()
-                         setSuccFilter('')
                          const popupH = 320
                          const spaceBelow = window.innerHeight - rect.bottom
                          const yPos = spaceBelow < popupH ? rect.top - popupH : rect.bottom
@@ -4544,7 +4543,6 @@ export default function GanttChart({
           const y = Math.min(Math.max(pad, top), window.innerHeight - popupH - pad)
           setCtxMenu(null)
           setPredPopup(null)
-          setSuccFilter('')
           setSuccPopup({ taskId: ctxMenu.taskId, x, y })
         }
 
@@ -4663,122 +4661,29 @@ export default function GanttChart({
         document.body,
       )}
 
-      {/* ── Predecessor popup ────────────────────────────────────────── */}
-      {predPopup && !summarySet.has(predPopup.taskId) && (() => {
-        // 排序与左侧任务列表一致（按序号升序）
-        const candidateTasks = tasks
-          .filter(t => t.id !== predPopup.taskId && !t.is_deleted && !summarySet.has(t.id))
-          .sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
-        const filterLower = predFilter.toLowerCase()
-        const filtered = filterLower
-          ? candidateTasks.filter(t =>
-              t.name.toLowerCase().includes(filterLower)
-              || (flatRowIdx[t.id] ?? '').includes(filterLower)
-            )
-          : candidateTasks
-        return (
-          <>
-            <div
-              className="fixed inset-0 z-[49]"
-              onClick={() => setPredPopup(null)}
-              aria-hidden
-            />
-            <div
-              className="fixed z-[50] bg-white border border-gray-200 rounded-lg shadow-2xl"
-              style={{ left: predPopup.x, top: predPopup.y, width: 300, maxHeight: 320 }}
-              onClick={e => e.stopPropagation()}
-            >
-            {/* Filter input */}
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
-              <span className="text-gray-400 text-xs">▼</span>
-              <input
-                autoFocus
-                placeholder="搜索任务..."
-                value={predFilter}
-                onChange={e => setPredFilter(e.target.value)}
-                className="flex-1 text-[12px] outline-none text-gray-700 placeholder-gray-400"
-              />
+      {/* Shared, bounded task search for both dependency directions. */}
+      {(predPopup || succPopup) && (() => {
+        const popup = predPopup ?? succPopup!
+        if (summarySet.has(popup.taskId)) return null
+        const predecessor = !!predPopup
+        const label = predecessor ? '前置任务' : '后续任务'
+        const close = () => { setPredPopup(null); setSuccPopup(null) }
+        const linkedIds = predecessor
+          ? deps.filter(d => d.to_task_id === popup.taskId).map(d => d.from_task_id)
+          : deps.filter(d => d.from_task_id === popup.taskId).map(d => d.to_task_id)
+        return <>
+          <div className="fixed inset-0 z-[49]" onClick={close} aria-hidden />
+          <div role="dialog" aria-label={label} className="fixed z-[50] overflow-y-auto rounded-lg border border-gray-200 bg-white p-3 shadow-2xl"
+            style={{ left: Math.max(8, Math.min(popup.x, window.innerWidth - 336)), top: Math.max(8, Math.min(popup.y, window.innerHeight - 364)), width: 320, maxWidth: 'calc(100vw - 16px)', maxHeight: 'calc(100vh - 16px)' }}
+            onClick={e => e.stopPropagation()}>
+            <div className="mb-2 flex items-center justify-between"><h3 className="text-sm font-medium">{label}</h3>
+              <button type="button" aria-label={`关闭${label}选择`} onClick={close} className="text-xl leading-none text-gray-400">×</button>
             </div>
-            {/* Task list */}
-            <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
-              {filtered.map(task => {
-                const isPred = deps.some(d => d.from_task_id === task.id && d.to_task_id === predPopup.taskId)
-                const rowNum = flatRowIdx[task.id]
-                return (
-                  <div
-                    key={task.id}
-                    role="button"
-                    tabIndex={0}
-                    className="flex items-center gap-2.5 px-3 py-2 hover:bg-blue-50 cursor-pointer"
-                    onClick={() => togglePredecessor(task.id, predPopup.taskId)}
-                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePredecessor(task.id, predPopup.taskId) } }}
-                  >
-                    <span className="flex-none w-3.5 h-3.5 rounded border flex items-center justify-center"
-                          style={{ background: isPred ? '#3b82f6' : 'transparent', borderColor: isPred ? '#3b82f6' : '#9ca3af' }}>
-                      {isPred && <span className="text-white text-[10px]">✓</span>}
-                    </span>
-                    <span className="text-[11px] text-gray-400 flex-none w-6 text-right">{rowNum}</span>
-                    <span className="text-[12px] text-gray-700 truncate">{task.name}</span>
-                  </div>
-                )
-              })}
-              {filtered.length === 0 && (
-                <div className="px-3 py-4 text-[12px] text-gray-400 text-center">无匹配任务</div>
-              )}
-            </div>
+            <DependencyTaskPicker tasks={tasks} numbers={seqMap} taskId={popup.taskId} selectedIds={linkedIds}
+              label={`${label}编号`} mode="toggle" readOnly={!!readOnly} onCancel={close}
+              onPick={id => predecessor ? togglePredecessor(id, popup.taskId) : togglePredecessor(popup.taskId, id)} />
           </div>
-          </>
-        )
-      })()}
-      {/* ── Successor popup ──────────────────────────────────────────── */}
-      {succPopup && !summarySet.has(succPopup.taskId) && (() => {
-        const candidateTasks = tasks
-          .filter(t => t.id !== succPopup.taskId && !t.is_deleted && !summarySet.has(t.id))
-          .sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
-        const filterLower = succFilter.toLowerCase()
-        const filtered = filterLower
-          ? candidateTasks.filter(t =>
-              t.name.toLowerCase().includes(filterLower)
-              || (flatRowIdx[t.id] ?? '').includes(filterLower)
-            )
-          : candidateTasks
-        return (
-          <>
-            <div className="fixed inset-0 z-[49]" onClick={() => setSuccPopup(null)} aria-hidden />
-            <div className="fixed z-[50] bg-white border border-gray-200 rounded-lg shadow-2xl"
-                 style={{ left: succPopup.x, top: succPopup.y, width: 300, maxHeight: 320 }}
-                 onClick={e => e.stopPropagation()}>
-              <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100">
-                <span className="text-gray-400 text-xs">▼</span>
-                <input autoFocus placeholder="搜索任务..." value={succFilter}
-                       onChange={e => setSuccFilter(e.target.value)}
-                       className="flex-1 text-[12px] outline-none text-gray-700 placeholder-gray-400" />
-              </div>
-              <div className="overflow-y-auto" style={{ maxHeight: 260 }}>
-                {filtered.map(task => {
-                  const isSucc = deps.some(d => d.from_task_id === succPopup.taskId && d.to_task_id === task.id)
-                  const rowNum = flatRowIdx[task.id]
-                  return (
-                    <div key={task.id} role="button" tabIndex={0}
-                         className="flex items-center gap-2.5 px-3 py-2 hover:bg-blue-50 cursor-pointer"
-                         onClick={() => togglePredecessor(succPopup.taskId, task.id)}
-                         onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePredecessor(succPopup.taskId, task.id) } }}>
-                      <span className="flex-none w-3.5 h-3.5 rounded border flex items-center justify-center"
-                            style={{ background: isSucc ? '#3b82f6' : 'transparent', borderColor: isSucc ? '#3b82f6' : '#9ca3af' }}>
-                        {isSucc && <span className="text-white text-[10px]">✓</span>}
-                      </span>
-                      <span className="text-[11px] text-gray-400 flex-none w-6 text-right">{rowNum}</span>
-                      <span className="text-[12px] text-gray-700 truncate">{task.name}</span>
-                    </div>
-                  )
-                })}
-                {filtered.length === 0 && (
-                  <div className="px-3 py-4 text-[12px] text-gray-400 text-center">无匹配任务</div>
-                )}
-              </div>
-            </div>
-          </>
-        )
+        </>
       })()}
       {/* ── Post-create edit modal ───────────────────────────────────── */}
       {editModalTaskId && (

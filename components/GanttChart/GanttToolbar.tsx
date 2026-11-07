@@ -10,13 +10,15 @@ import {
   setSelectedIds, setTasks,
   markDirty, setComparison, clearComparison, setViewSnapshot, clearViewSnapshot, clearDiffFilter,
 } from '@/store/slices/tasksSlice'
-import { setStatusDate, setPlanningStatus, setCustomFields } from '@/store/slices/projectSlice'
-import { customFieldsEqual, CUSTOM_FIELD_TYPES, mergeImportedCustomFields } from '@/lib/taskCustomFields'
-import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
+import { setStatusDate, setPlanningStatus } from '@/store/slices/projectSlice'
+import { customFieldsEqual, CUSTOM_FIELD_TYPES, mergeTaskAttributes, taskCustomFields } from '@/lib/taskCustomFields'
+import GanttDisplaySettings from './GanttDisplaySettings'
+import ToolbarActionMenu from './ToolbarActionMenu'
 import { normalizePlanningStatus, planningStatusLabel, changeReasonsComplete } from '@/lib/planningStatus'
 import { setVersions } from '@/store/slices/versionsSlice'
 import type { Task, TaskCustomField } from '@/types'
 import EditTaskModal from './EditTaskModal'
+import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
 import BulkEditPanel from './BulkEditPanel'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
@@ -26,7 +28,7 @@ import { exportToExcel } from '@/lib/client/excelExport'
 import { exportToJpeg, exportToPdf } from '@/lib/client/chartExport'
 import { parseExcelFile, validateImportData, type ImportTask, type ImportDep, type ImportProjectLine } from '@/lib/client/excelImport'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
-import { OPTIONAL_COL_META, type OptionalCol, INDICATOR_META, type IndicatorsConfig } from './GanttChart'
+import type { OptionalCol, IndicatorsConfig } from './GanttChart'
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
@@ -91,8 +93,8 @@ const Ic = ({ children, title, onClick, disabled, active, variant = 'default' }:
 }
 
 // ── Labeled icon button (for CREATE / EDIT) ───────────────────────────────
-const LabelIc = ({ icon, label, onClick, disabled, variant = 'default' }: {
-  icon: React.ReactNode; label: string
+const LabelIc = ({ icon, label, title, onClick, disabled, variant = 'default' }: {
+  icon: React.ReactNode; label: string; title?: string
   onClick?: () => void; disabled?: boolean
   variant?: 'green' | 'blue' | 'default'
 }) => {
@@ -105,7 +107,7 @@ const LabelIc = ({ icon, label, onClick, disabled, variant = 'default' }: {
                       : 'border-gray-300 text-gray-600 hover:bg-gray-50 bg-white cursor-pointer',
   }
   return (
-    <button className={`${base} ${colors[variant]}`}
+    <button className={`${base} ${colors[variant]} whitespace-nowrap`} title={title ?? label}
             onClick={!disabled ? onClick : undefined} disabled={disabled}>
       {icon}
       <span>{label}</span>
@@ -118,13 +120,8 @@ const IcoPlus    = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="n
 const IcoPencil  = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M11 2l3 3-8 8H3v-3L11 2z"/></svg>
 const IcoUndo    = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M3 7V3l-2 2 2 2z" fill="currentColor"/><path d="M3 5a7 7 0 1 1 0 6" strokeLinecap="round"/></svg>
 const IcoRedo    = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M13 7V3l2 2-2 2z" fill="currentColor"/><path d="M13 5a7 7 0 1 0 0 6" strokeLinecap="round"/></svg>
-const IcoExpand  = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 5l4 4 4-4M4 9l4 4 4-4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-const IcoCollapse= () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 11l4-4 4 4M4 7l4-4 4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoZoomIn  = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="6.5" cy="6.5" r="4"/><path d="M10 10l3.5 3.5M5 6.5h3M6.5 5v3" strokeLinecap="round"/></svg>
 const IcoZoomOut = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="6.5" cy="6.5" r="4"/><path d="M10 10l3.5 3.5M5 6.5h3" strokeLinecap="round"/></svg>
-const IcoFocus   = () => <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M1 5V2h3M12 2h3v3M1 11v3h3M12 14h3v-3M6 8h4M8 6v4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-const IcoPrev    = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 3L5 8l5 5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-const IcoNext    = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 3l5 5-5 5" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoSearch  = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="6.5" cy="6.5" r="4"/><path d="M10 10l3.5 3.5" strokeLinecap="round"/></svg>
 const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M14 8a6 6 0 0 0-10-4.5M2 8a6 6 0 0 1 10 4.5" strokeLinecap="round"/><path d="M14 2v4h-4M2 14v-4h4" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -246,30 +243,7 @@ export default function GanttToolbar({
     return normalized ?? null
   }, [isMinute])
 
-  // Column settings dropdown
-  const [colSettingsOpen, setColSettingsOpen] = useState(false)
-  const colSettingsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!colSettingsOpen) return
-    const close = (e: MouseEvent) => {
-      if (colSettingsRef.current && !colSettingsRef.current.contains(e.target as Node)) setColSettingsOpen(false)
-    }
-    window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
-  }, [colSettingsOpen])
-
-  // Indicators dropdown
-  const [indicatorsOpen, setIndicatorsOpen] = useState(false)
-  const indicatorsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!indicatorsOpen) return
-    const close = (e: MouseEvent) => {
-      if (indicatorsRef.current && !indicatorsRef.current.contains(e.target as Node)) setIndicatorsOpen(false)
-    }
-    window.addEventListener('mousedown', close)
-    return () => window.removeEventListener('mousedown', close)
-  }, [indicatorsOpen])
-
+  const [attributeViewTask, setAttributeViewTask] = useState<Task | null>(null)
   const hasSelection = selectedIds.length > 0
 
 
@@ -322,7 +296,6 @@ export default function GanttToolbar({
   const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(initialBaseline.statusDate)
   const [baselinePlanningStatus, setBaselinePlanningStatus] = useState(() => normalizePlanningStatus(initialBaseline.planningStatus))
   const [baselineCustomFields, setBaselineCustomFields] = useState(initialBaseline.customFields ?? [])
-  const [customFieldsOpen, setCustomFieldsOpen] = useState(false)
   const [customFieldsReason, setCustomFieldsReason] = useState('')
   const customFields = currentProject?.custom_fields ?? []
   const customFieldsChanged = !customFieldsEqual(baselineCustomFields, customFields)
@@ -343,7 +316,7 @@ export default function GanttToolbar({
       start_date: t.start_date, end_date: t.end_date,
       duration: t.duration, assignee: t.assignee,
       percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-      auto_schedule: t.auto_schedule, note: t.note, custom_values: t.custom_values,
+      auto_schedule: t.auto_schedule, note: t.note, custom_fields: t.custom_fields, custom_values: t.custom_values,
       parent_id: t.parent_id,
     }))
     return diffSnapshots(baseline, currentSnap, { isMinute, customFields: currentProject?.custom_fields })
@@ -715,6 +688,7 @@ export default function GanttToolbar({
             auto_schedule: t.auto_schedule !== false,
             note: t.note ?? null,
             assignee: t.assignee,
+            custom_fields: t.custom_fields,
             custom_values: t.custom_values ?? {},
             constraint_type: t.constraint_type ?? null,
             constraint_date: exportDate(t.constraint_date),
@@ -814,7 +788,6 @@ export default function GanttToolbar({
       }
 
       setImporting(true)
-      const importedFields = mergeImportedCustomFields(currentProject?.custom_fields ?? [], parsed.customFields ?? [])
       const safeDateRe = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$/
       const safeTasks = parsed.tasks.map((t: ImportTask) => ({
         ...t,
@@ -837,6 +810,7 @@ export default function GanttToolbar({
         else codeToId.set(it.task_code, uuid())
       }
 
+      const attributePrevious = new Map(tasks.map(t => [t.task_code, t]))
       const importedTasks: Task[] = safeTasks.map((it, i) => {
         const id = codeToId.get(it.task_code)!
         const parent = it.parent_task_code ? codeToId.get(it.parent_task_code) ?? null : null
@@ -851,9 +825,7 @@ export default function GanttToolbar({
           percent_done: it.percent_done ?? 0,
           is_milestone: it.is_milestone,
           note: it.note,
-          custom_values: { ...(tasks.find(t => t.task_code === it.task_code)?.custom_values ?? {}),
-            ...Object.fromEntries(Object.entries(it.custom_values ?? {}).map(([id, value]) => [importedFields.idMap.get(id) ?? id, value])),
-          },
+          ...mergeTaskAttributes(it, attributePrevious.get(it.task_code), parsed.customFields ?? currentProject?.custom_fields ?? []),
           order_index: existing?.order_index ?? (baseOrder + i),
           auto_schedule: it.auto_schedule,
           constraint_type: it.constraint_type ?? 'asap',
@@ -902,7 +874,6 @@ export default function GanttToolbar({
       }
 
       dispatch(labelDraftStep(`${sourceLabel} ${mode === 'replace' ? '替换' : '合并'}导入`))
-      dispatch(setCustomFields({ projectId, fields: importedFields.fields }))
       dispatch(setTasks({ tasks: nextTasks, dependencies: nextDeps }))
       dispatch(markDirty(nextTasks.map(t => t.id)))
 
@@ -1389,7 +1360,7 @@ export default function GanttToolbar({
           id: t.id, name: t.name, start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, duration_unit: t.duration_unit, percent_done: t.percent_done, parent_id: t.parent_id,
           order_index: t.order_index, is_milestone: t.is_milestone, auto_schedule: t.auto_schedule,
-          assignee: t.assignee, note: t.note, custom_values: t.custom_values,
+          assignee: t.assignee, note: t.note, custom_fields: t.custom_fields, custom_values: t.custom_values,
           constraint_type: t.constraint_type, constraint_date: t.constraint_date,
           status: t.status, deadline: t.deadline,
           rollup: t.rollup, inactive: t.inactive, project_boundary: t.project_boundary,
@@ -1509,7 +1480,7 @@ export default function GanttToolbar({
         start_date: t.start_date, end_date: t.end_date,
         duration: t.duration, assignee: t.assignee,
         percent_done: t.percent_done, is_milestone: t.is_milestone, order_index: t.order_index,
-        auto_schedule: t.auto_schedule, note: t.note, custom_values: t.custom_values,
+        auto_schedule: t.auto_schedule, note: t.note, custom_fields: t.custom_fields, custom_values: t.custom_values,
         parent_id: t.parent_id,
       })))
       setBaselineTasks(livingTasks.map(t => ({ ...t })))
@@ -1594,7 +1565,8 @@ export default function GanttToolbar({
 
   return (
     <>
-      <div className="relative z-20 flex items-center gap-1.5 px-3 py-2 bg-white border-b border-gray-200 flex-wrap">
+      <div className="relative z-20 border-b border-gray-200 bg-white">
+      <div data-toolbar-row="tasks" className="flex flex-wrap items-center gap-1.5 px-3 py-2">
 
         {readOnly && (
           <span className="text-[11px] text-orange-600 bg-orange-50 border border-orange-200 rounded px-2 py-1 font-medium whitespace-nowrap">
@@ -1607,11 +1579,9 @@ export default function GanttToolbar({
             <Ic title={`撤销${history.past.at(-1) ? '：' + history.past.at(-1)!.label : ''} (Ctrl+Z)`} disabled={!history.past.length || history.saving || history.uncertain} onClick={() => dispatch(undoDraft())}><IcoUndo /></Ic>
             <Ic title="重做 (Ctrl+Shift+Z / Ctrl+Y)" disabled={!history.future.length || history.saving || history.uncertain} onClick={() => dispatch(redoDraft())}><IcoRedo /></Ic>
             {/* Group 1: Create + Edit */}
-            <Ic title="创建任务" onClick={handleAddTask}><IcoPlus /></Ic>
-            <Ic title="编辑任务" disabled={selectedIds.length !== 1}
-                     onClick={() => selectedIds.length === 1 && setEditModalOpen(true)}>
-              <IcoPencil />
-            </Ic>
+            <LabelIc title="创建任务" icon={<IcoPlus />} label="新建任务" onClick={handleAddTask} />
+            <LabelIc title="编辑任务" icon={<IcoPencil />} label="编辑任务" disabled={selectedIds.length !== 1}
+                     onClick={() => selectedIds.length === 1 && setEditModalOpen(true)} />
 
             {sep}
           </>
@@ -1619,9 +1589,18 @@ export default function GanttToolbar({
 
         {readOnly && sep}
 
-        {/* Group 3: Expand / Collapse all */}
-        <Ic title="全部展开" onClick={onExpandAll}><IcoExpand /></Ic>
-        <Ic title="全部折叠" onClick={onCollapseAll}><IcoCollapse /></Ic>
+        <ToolbarActionMenu label="任务操作" actions={[
+          ...(!readOnly ? [
+            { label: '批量修改任务', disabled: !hasSelection, onSelect: () => setBulkEditOpen(true) },
+            { label: '复制选中任务', disabled: !hasSelection, shortcut: 'Ctrl/Cmd+C', divider: true, onSelect: handleCopy },
+            { label: '粘贴任务', disabled: clipboard.length === 0, shortcut: 'Ctrl/Cmd+V', onSelect: handlePaste },
+            { label: '提升任务层级', disabled: !hasSelection, divider: true, onSelect: handlePromote },
+            { label: '降为子任务', disabled: !hasSelection, onSelect: handleDemote },
+          ] : []),
+          ...(readOnly ? [{ label: '查看任务属性', disabled: selectedIds.length !== 1, onSelect: () => setAttributeViewTask((viewSnapshot?.tasks ?? tasks).find(t => t.id === selectedIds[0]) ?? null) }] : []),
+          { label: '定位到选中任务', disabled: !hasSelection, onSelect: onFocusTask },
+          ...(!readOnly ? [{ label: '删除选中任务', disabled: !hasSelection, danger: true, divider: true, onSelect: handleDeleteTasks }] : []),
+        ]} />
 
         {sep}
 
@@ -1631,18 +1610,15 @@ export default function GanttToolbar({
         <button className="border border-gray-300 rounded px-2 h-8 text-xs" onClick={() => onTimelineNavigate?.('all')}>显示全部</button>
         <button className="border border-gray-300 rounded px-2 h-8 text-xs disabled:opacity-40" disabled={!hasSelection} onClick={() => onTimelineNavigate?.('selection')}>适配所选</button>
         <button className="border border-gray-300 rounded px-2 h-8 text-xs" onClick={() => onTimelineNavigate?.('status')}>回到状态日期</button>
-        <Ic title="聚焦到选中任务" disabled={!hasSelection} onClick={onFocusTask}><IcoFocus /></Ic>
-        {!readOnly && <Ic title="升级 (Outdent)" disabled={!hasSelection} onClick={handlePromote}><IcoPrev /></Ic>}
-        {!readOnly && <Ic title="降级 (Indent)"  disabled={!hasSelection} onClick={handleDemote}><IcoNext /></Ic>}
 
         {sep}
 
-        <span className="text-xs text-gray-500 whitespace-nowrap">已选 {selectedIds.length} 项</span>
-        {selectedIds.length > 0 && <button className="text-xs text-blue-600" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>}
+        {selectedIds.length > 0 && <div className="flex items-center gap-2 rounded bg-blue-50 px-2 py-1.5 text-xs">
+          <span className="whitespace-nowrap text-blue-700">已选 {selectedIds.length} 个任务</span>
+          <button className="text-blue-600 hover:underline" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>
+        </div>}
         {history.uncertain && <span className="text-xs text-amber-700">上次保存结果待核对，请重试保存或放弃全部更改</span>}
-        {viewControls}
         {/* Search */}
-        <button onClick={() => setCustomFieldsOpen(true)} className="h-8 rounded border border-gray-300 px-2 text-[13px]">任务属性</button>
         <div className="flex items-center gap-1 border border-gray-300 rounded px-2 h-8 bg-white">
           <IcoSearch />
           <input
@@ -1657,6 +1633,11 @@ export default function GanttToolbar({
           )}
         </div>
 
+        <GanttDisplaySettings visibleCols={visibleCols} onVisibleColsChange={onVisibleColsChange}
+          indicators={indicators} onIndicatorsChange={onIndicatorsChange}
+          onExpandAll={onExpandAll} onCollapseAll={onCollapseAll} viewControls={viewControls} />
+      </div>
+      <div data-toolbar-row="progress" className="flex flex-wrap items-center gap-1.5 border-t border-gray-100 bg-gray-50/60 px-3 py-2">
         <label className="inline-flex items-center gap-1.5 text-xs text-gray-500 whitespace-nowrap">
           计划状态
           <select aria-label="计划状态" value={displayedPlanningStatus} disabled={readOnly || statusDateSaving}
@@ -1676,29 +1657,8 @@ export default function GanttToolbar({
           <>
             {sep}
 
-            <button disabled={!hasSelection} onClick={() => setBulkEditOpen(true)} className="border border-gray-300 rounded px-2 h-8 text-[13px] disabled:opacity-40">批量修改</button>
-            {/* Secondary: Copy / Paste / Delete */}
-            <Ic title="复制 (Ctrl+C)" disabled={!hasSelection} onClick={handleCopy}>
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <rect x="5" y="5" width="8" height="9" rx="1"/><path d="M3 11V3h8" strokeLinecap="round"/>
-              </svg>
-            </Ic>
-            <Ic title="粘贴 (Ctrl+V)" disabled={clipboard.length === 0} onClick={handlePaste}>
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M5 3h6v2H5V3z"/><rect x="3" y="4" width="10" height="10" rx="1"/>
-              </svg>
-            </Ic>
-            <Ic title="删除选中任务" disabled={!hasSelection} onClick={handleDeleteTasks}>
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8">
-                <path d="M3 5h10M6 5V3h4v2M7 8v4M9 8v4" strokeLinecap="round"/>
-                <path d="M4 5l1 9h6l1-9H4z"/>
-              </svg>
-            </Ic>
-
-            {sep}
-
             {/* Status date */}
-            <div className="flex items-center gap-1.5 relative">
+            <div className="relative flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-gray-500 whitespace-nowrap">{isMinute ? '状态时间' : '状态日期'}</span>
               {(() => {
                 const v = currentProject?.status_date ?? ''
@@ -2036,87 +1996,6 @@ export default function GanttToolbar({
           </svg>
         </Ic>
 
-        {/* Column settings */}
-        {visibleCols && onVisibleColsChange && (
-          <div ref={colSettingsRef} className="relative">
-            <Ic title="列设置" onClick={() => setColSettingsOpen(v => !v)} active={colSettingsOpen}>
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-              </svg>
-            </Ic>
-            {colSettingsOpen && (
-              <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[180px] whitespace-nowrap">
-                <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold flex items-center justify-between gap-2">
-                <span>显示列</span>
-                <span className="flex gap-1">
-                  {[
-                    { label: '全选', action: () => onVisibleColsChange(OPTIONAL_COL_META.map(c => c.key)) },
-                    { label: '全不选', action: () => onVisibleColsChange([]) },
-                    { label: '反选', action: () => onVisibleColsChange(OPTIONAL_COL_META.filter(c => !visibleCols.includes(c.key)).map(c => c.key)) },
-                  ].map(b => (
-                    <button key={b.label} onClick={b.action}
-                            className="px-1.5 py-0.5 text-[10px] text-blue-600 hover:bg-blue-100 rounded">
-                      {b.label}
-                    </button>
-                  ))}
-                </span>
-              </div>
-                {OPTIONAL_COL_META.map(col => (
-                  <label key={col.key}
-                         className="flex items-center gap-2 px-3 py-1.5 text-[12px] cursor-pointer hover:bg-blue-50">
-                    <input
-                      type="checkbox"
-                      className="w-3.5 h-3.5 accent-blue-500"
-                      checked={visibleCols.includes(col.key)}
-                      onChange={() => {
-                        onVisibleColsChange(
-                          visibleCols.includes(col.key)
-                            ? visibleCols.filter(k => k !== col.key)
-                            : [...visibleCols, col.key]
-                        )
-                      }}
-                    />
-                    {col.label}
-                  </label>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Indicators settings */}
-        {indicators && onIndicatorsChange && (
-          <div ref={indicatorsRef} className="relative">
-            <Ic title="指示器" onClick={() => setIndicatorsOpen(v => !v)} active={indicatorsOpen}>
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 4v16"/>
-                <path d="M4 4h12l-3 4 3 4H4"/>
-                <circle cx="18" cy="18" r="2" fill="currentColor"/>
-              </svg>
-            </Ic>
-            {indicatorsOpen && (
-              <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-300 rounded-lg shadow-lg py-1.5 min-w-[160px] whitespace-nowrap">
-                <div className="px-3 py-1 text-[11px] text-gray-500 border-b border-gray-100 font-semibold">
-                  指示器
-                </div>
-                {INDICATOR_META.map(item => (
-                  <label key={item.key}
-                         className="flex items-center gap-2 px-3 py-1.5 text-[12px] cursor-pointer hover:bg-blue-50">
-                    <input
-                      type="checkbox"
-                      className="w-3.5 h-3.5 accent-blue-500"
-                      checked={!!indicators[item.key]}
-                      onChange={() => onIndicatorsChange({ ...indicators, [item.key]: !indicators[item.key] })}
-                    />
-                    {item.label}
-                  </label>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {onToggleAI && (
           <LabelIc
             icon={
@@ -2131,19 +2010,14 @@ export default function GanttToolbar({
           />
         )}
       </div>
+      </div>
 
       {retroLogOpen && (
         <RetroLogPanel projectId={projectId} onClose={() => setRetroLogOpen(false)} />
       )}
 
+      {attributeViewTask && <TaskCustomFieldsPanel task={attributeViewTask} fields={taskCustomFields(attributeViewTask, viewSnapshot?.customFields ?? currentProject?.custom_fields)} onClose={() => setAttributeViewTask(null)} />}
       {bulkEditOpen && !readOnly && <BulkEditPanel onClose={() => setBulkEditOpen(false)} />}
-      {customFieldsOpen && <TaskCustomFieldsPanel
-        fields={viewSnapshot ? viewSnapshot.customFields ?? [] : customFields}
-        tasks={viewSnapshot ? viewSnapshot.tasks : tasks} readOnly={!!readOnly}
-        onClose={() => setCustomFieldsOpen(false)}
-        onFieldsChange={fields => { dispatch(labelDraftStep('配置任务属性')); dispatch(setCustomFields({ projectId, fields })) }}
-        onTaskChange={task => { dispatch(labelDraftStep(`填报「${task.name}」的属性`)); dispatch(updateTasks([task])); dispatch(markDirty([task.id])) }}
-      />}
       {/* Edit Task Modal */}
       {editModalOpen && selectedIds.length === 1 && (
         <EditTaskModal

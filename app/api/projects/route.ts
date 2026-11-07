@@ -169,14 +169,14 @@ export async function POST(req: NextRequest) {
         await pool.query(
           `INSERT INTO tasks (id, project_id, parent_id, task_code, name, assignee,
            start_date, end_date, duration, is_milestone, auto_schedule, note, order_index,
-           is_deleted, percent_done, duration_unit, custom_values)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)`,
+           is_deleted, percent_done, duration_unit, custom_values, custom_fields)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb)`,
           [
             newId, newProject.id, newParentId, t.task_code, t.name, t.assignee,
             t.start_date, t.end_date, t.duration, t.is_milestone,
             t.auto_schedule, t.note, t.order_index,
             false, 0, t.duration_unit ?? 'day',
-            JSON.stringify(t.custom_values ?? {}),
+            JSON.stringify(t.custom_values ?? {}), t.custom_fields == null ? null : JSON.stringify(t.custom_fields),
           ]
         )
       }

@@ -30,7 +30,9 @@ test('ordinary Excel columns become typed attributes and retain formatted identi
   const [money, text, date] = fields
   assert.equal(result.tasks[0].custom_values![money.id], '999999999999999999.99')
   assert.equal(result.tasks[1].custom_values![money.id], '0.00')
-  assert.equal(result.tasks[2].custom_values![money.id], '')
+  assert.equal(result.tasks[2].custom_values![money.id], undefined)
+  assert.deepEqual(result.tasks[2].custom_fields, [], 'blank ordinary cells do not define attributes on unrelated tasks')
+  assert.deepEqual(result.tasks[1].custom_fields, [money], 'zero is a filled monetary attribute')
   assert.equal(result.tasks[0].custom_values![text.id], '000123')
   assert.equal(result.tasks[0].custom_values![date.id], '2026-11-07')
 })

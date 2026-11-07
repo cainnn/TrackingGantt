@@ -28,7 +28,7 @@ async function screenshot(name) {
 }
 async function button(label, scope = 'body', enabled = true) {
   const h = await page.evaluateHandle(({ label, scope }) => [...document.querySelectorAll(`${scope} button`)]
-    .find(e => e.textContent.trim() === label && e.getClientRects().length), { label, scope });
+    .find(e => (e.textContent.trim() === label || e.getAttribute('aria-label') === label) && e.getClientRects().length), { label, scope });
   assert.ok(h.asElement(), `Visible button: ${label}`);
   if (enabled) assert.equal(await h.evaluate(e => e.disabled), false, `${label} enabled`);
   return h;
@@ -102,8 +102,12 @@ async function main() {
   token = (await api('/auth/login', 'POST', { login, password })).token;
   project = await api('/projects', 'POST', { name: `属性点击验收-${randomUUID().slice(0, 8)}`, start_date: '2026-11-01',
     status_date: '2026-11-03', planning_status: 'draft', time_granularity: 'day', use_template: false });
-  [task] = await api(`/tasks/${project.id}`, 'POST', [{ id: randomUUID(), task_code: '31', name: '验收用采购任务',
-    start_date: '2026-11-01', end_date: '2026-11-06', duration: 7200, auto_schedule: false, assignee: '验收人员' }]);
+  const taskCount = Number(process.env.ATTR_UI_TASK_COUNT || 2);
+  assert.ok(Number.isInteger(taskCount) && taskCount >= 2 && taskCount <= 1000);
+  [task] = await api(`/tasks/${project.id}`, 'POST', Array.from({ length: taskCount }, (_, i) => ({ id: randomUUID(),
+    task_code: String(31 + i), name: i === 0 ? '验收用采购任务' : `验收用其他任务${i + 1}`, order_index: i,
+    start_date: '2026-11-01', end_date: '2026-11-06', duration: 7200, auto_schedule: false, assignee: '验收人员' })));
+  report.taskCount = taskCount;
   report.fixture = { id: project.id, name: project.name };
   browser = await puppeteer.launch({ headless: process.env.ATTR_UI_HEADLESS === '1',
     ...(process.env.ATTR_UI_CHROME ? { executablePath: process.env.ATTR_UI_CHROME } : {}),
@@ -140,7 +144,10 @@ async function main() {
   assert.equal(report.writes.length, 0, 'Entering project must not write');
   await openEditor(); await button('编辑属性', modal); await screenshot('01-general-entry');
   await click('编辑属性', modal); await click('新增任务属性', modal);
-  await click('＋ 支出金额（元）', modal); await click('应用属性配置', modal);
+  assert.equal(await page.$eval(modal, e => e.textContent.includes('＋ 支出金额')), false, 'No preset common property');
+  await click('＋ 新增属性', modal); await fill(`${modal} input[aria-label="属性名称"]`, '支出金额');
+  await page.select(`${modal} select[aria-label="支出金额类型"]`, 'money');
+  await fill(`${modal} input[aria-label="支出金额单位"]`, '元'); await click('完成设置', modal);
   await page.waitForSelector(`${modal} input[aria-label="支出金额"]`);
   assert.deepEqual((await persisted()).p.custom_fields, []);
   pass('通用页有编辑属性入口；同一任务窗口可新增金额属性，尚未写入后台');
@@ -149,7 +156,7 @@ async function main() {
   await click('管理属性', modal); await click('＋ 新增属性', modal);
   const names = await page.$$(`${modal} input[aria-label="属性名称"]`);
   await names.at(-1).type('合同编号', { delay: 30 });
-  await click('应用属性配置', modal);
+  await click('完成设置', modal);
   assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '123.45', 'Managing definitions preserves current form values');
   await fill(`${modal} input[aria-label="合同编号"]`, 'HT-000123');
   await fill(`${modal} input[aria-label="支出金额"]`, '12.345'); await click('保存', modal);
@@ -165,17 +172,30 @@ async function main() {
   assert.equal(report.writes.length, 0);
   assert.deepEqual((await persisted()).task.custom_values, {});
   await page.click('button[title^="撤销"]'); await openValues();
-  assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '');
+  assert.equal(await page.$(`${modal} input[aria-label="支出金额"]`), null, 'Undo removes the task definitions and values together');
   await closeEditor(); await page.click('button[title^="重做"]'); await openValues();
   assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), exact);
   await closeEditor(); assert.equal(report.writes.length, 0);
-  pass('任务保存只进入草稿；撤销、重做分别恢复属性值，后台保持未修改');
+  pass('任务保存只进入草稿；撤销、重做恢复当前任务的属性定义和值，后台保持未修改');
+
+  const primaryTask = task;
+  const secondTask = (await api(`/tasks/${project.id}`)).tasks.find(t => t.id !== primaryTask.id);
+  task = secondTask; await openValues();
+  assert.equal(await page.$(`${modal} input[aria-label="支出金额"]`), null, 'Another task has no inherited attributes');
+  await click('新增任务属性', modal); await click('＋ 新增属性', modal);
+  await fill(`${modal} input[aria-label="属性名称"]`, '支出金额'); await click('完成设置', modal);
+  await fill(`${modal} input[aria-label="支出金额"]`, '暂未报支'); await click('保存', modal);
+  await page.waitForSelector(modal, { hidden: true }); task = primaryTask;
+  await openValues(); assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), exact); await closeEditor();
+  assert.equal(report.writes.length, 0);
+  pass('另一任务从空属性开始，可以自定义同名文本属性；两个任务的类型和值互不影响');
 
   await click('确认变更'); const save = await button('确认并保存'); await save.dispose();
   await screenshot('04-draft-confirmation'); await click('确认并保存'); await waitSave();
   let saved = await persisted();
-  const money = saved.p.custom_fields.find(f => f.name === '支出金额');
-  const contract = saved.p.custom_fields.find(f => f.name === '合同编号');
+  const money = saved.task.custom_fields.find(f => f.name === '支出金额');
+  const contract = saved.task.custom_fields.find(f => f.name === '合同编号');
+  assert.deepEqual(saved.p.custom_fields, [], 'Task configuration must not create project-wide properties');
   assert.equal(saved.task.custom_values[money.id], exact); assert.equal(saved.task.custom_values[contract.id], 'HT-000123');
   assert.equal(saved.versions.length, 0); assert.equal(saved.p.planning_status, 'draft');
   assert.equal(saved.task.start_date, task.start_date); assert.equal(saved.task.end_date, task.end_date);
@@ -242,6 +262,10 @@ async function main() {
     assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '50.00');
     assert.equal(await page.$eval(`${modal} input[aria-label="合同编号"]`, e => e.value), 'HT-000123');
     await screenshot(`06-import-${i}`); await closeEditor();
+    task = secondTask; await openValues();
+    assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '暂未报支', `${label} retains per-task definitions`);
+    assert.equal(await page.$(`${modal} input[aria-label="合同编号"]`), null, `${label} must not globalize another task's attributes`);
+    await closeEditor(); task = primaryTask;
     assert.equal((await persisted()).task.custom_values[money.id], '', `${label} import remains local`);
     await page.click('button[title^="撤销"]'); await openValues();
     assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '');
@@ -292,8 +316,103 @@ async function main() {
   assert.equal((await persisted()).p.status_date.slice(0, 10), '2026-11-03');
   await screenshot('06-finished');
   assert.deepEqual(report.pageErrors, []);
-  report.trustedClicks = await page.evaluate(() => window.__trustedClicks);
   pass('状态日期线键盘调整和撤销仍不落盘');
+
+  const settings = '[role="dialog"][aria-label="显示设置"]';
+  const writesBeforeSettings = report.writes.length;
+  await click('清除选择'); await screenshot('07-toolbar');
+  assert.equal(await page.$eval('[data-toolbar-row="tasks"]', e => e.textContent.includes('已选 0')), false);
+  await click('任务操作');
+  assert.equal(await page.$eval('[role="menu"] button', e => e.disabled), true);
+  await page.keyboard.press('Escape'); await page.waitForSelector('[role="menu"]', { hidden: true });
+  assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), '任务操作');
+  await fill('input[placeholder="搜索任务..."]', '采购');
+  await click('显示设置'); await click('显示内容', settings);
+  const toggleAssignee = async () => {
+    const label = await page.evaluateHandle(selector => [...document.querySelectorAll(`${selector} label`)].find(e => e.textContent.trim() === '责任人'), settings);
+    assert.ok(label.asElement()); await label.asElement().click(); await label.dispose();
+  };
+  await toggleAssignee(); await click('常用布局', settings); await click('保存当前布局', settings);
+  await fill('input[aria-label="布局名称"]', '采购跟踪'); await click('保存布局', settings);
+  const layouts = await page.evaluate(id => JSON.parse(localStorage.getItem(`gantt-saved-views-v1-${id}`)), project.id);
+  assert.equal(layouts[0].search, '采购'); assert.equal(layouts[0].columns.includes('assignee'), false); assert.equal('tasks' in layouts[0], false);
+  assert.equal((await page.$$('[role="dialog"]')).length, 1, 'Saving a layout must not stack dialogs');
+  await screenshot('08-layout-settings'); await page.keyboard.press('Escape');
+  await fill('input[placeholder="搜索任务..."]', '');
+  await click('显示设置'); await click('显示内容', settings); await toggleAssignee(); await click('常用布局', settings);
+  await page.select('select[aria-label="已保存布局"]', layouts[0].id);
+  await page.waitForFunction(() => document.querySelector('input[placeholder="搜索任务..."]').value === '采购');
+  assert.equal(await page.$(`[data-task-cell="${task.id}"][data-col="assignee"]`), null);
+  await page.keyboard.press('Escape'); await fill('input[placeholder="搜索任务..."]', '');
+  await page.setViewport({ width: 1024, height: 800 }); await click('显示设置'); await click('显示内容', settings); await toggleAssignee();
+  assert.equal(await page.$eval(settings, e => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }), true);
+  await screenshot('09-narrow-settings'); await page.keyboard.press('Escape'); await page.setViewport({ width: 1440, height: 1000 });
+  assert.equal(report.writes.length, writesBeforeSettings);
+  assert.equal(await page.$eval('button[title^="撤销"]', e => e.disabled), true);
+  pass('任务操作按选中状态启用；显示设置统一管理列和布局，保存/恢复不改任务；1024 宽度无弹层越界');
+
+  await click('任务操作');
+  assert.equal(await page.$eval('[role="menu"]', e => /批量填报属性|属性配置/.test(e.textContent)), false);
+  await page.keyboard.press('Escape');
+  task = secondTask; await openValues();
+  assert.equal(await page.$eval(`${modal} input[aria-label="支出金额"]`, e => e.value), '暂未报支');
+  await click('管理属性', modal); await click('＋ 新增属性', modal);
+  const canceledNames = await page.$$(`${modal} input[aria-label="属性名称"]`);
+  await canceledNames.at(-1).type('取消的属性'); await closeEditor(); await openValues();
+  assert.equal(await page.$(`${modal} input[aria-label="取消的属性"]`), null);
+  await closeEditor(); task = primaryTask;
+  assert.equal(report.writes.length, writesBeforeSettings);
+  assert.deepEqual((await persisted()).p.custom_fields, []);
+  pass('工具栏不提供通用属性配置；取消新增属性不生效，同名属性在其他任务上保持独立');
+
+  report.pickerOpenMs = [];
+  for (const direction of ['前置', '后续']) {
+    await openEditor(); const started = Date.now(); await click(direction, modal);
+    const input = `${modal} input[aria-label="${direction}任务编号"]`;
+    await page.waitForSelector(input); report.pickerOpenMs.push(Date.now() - started);
+    assert.ok((await page.$$(`${modal} [role="option"]`)).length <= 30);
+    await fill(input, '999999'); await page.keyboard.press('Enter');
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('未找到可关联任务'), {}, modal);
+    await fill(input, '2'); await page.keyboard.press('Enter');
+    await page.waitForSelector(`${modal} [role="option"][aria-selected="true"]`);
+    await screenshot(`11-${direction}-number`);
+    if (direction === '前置') {
+      await click('后续', modal); await fill(`${modal} input[aria-label="后续任务编号"]`, '2'); await page.keyboard.press('Enter');
+      await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('循环依赖'), {}, modal);
+    }
+    await closeEditor(); await page.click('button[title^="撤销"]'); await expectStart('11-01');
+    assert.equal(await page.$eval('button[title^="撤销"]', e => e.disabled), true);
+  }
+  for (const [col, direction] of [['pred', '前置'], ['succ', '后续']]) {
+    await page.click(`[data-task-cell="${task.id}"][data-col="${col}"]`, { count: 2, delay: 60 });
+    const popup = `[role="dialog"][aria-label="${direction}任务"]`, input = `${popup} input[aria-label="${direction}任务编号"]`;
+    await fill(input, '#2'); await page.keyboard.press('Enter');
+    await page.waitForSelector(`${popup} [role="option"][aria-selected="true"]`);
+    await fill(input, '2'); await page.keyboard.press('Enter');
+    await page.waitForFunction(selector => document.querySelectorAll(`${selector} [role="option"][aria-selected="true"]`).length === 0, {}, popup);
+    await page.keyboard.press('Escape'); await page.click('button[title^="撤销"]'); await page.click('button[title^="撤销"]'); await expectStart('11-01');
+  }
+  assert.equal(report.writes.length, writesBeforeSettings);
+  assert.equal((await api(`/tasks/${project.id}`)).dependencies.length, 0);
+  assert.deepEqual(report.pageErrors, []);
+  pass('编辑窗口及前置/后续单元格均可输入列表编号回车关联；无效编号和循环被拦截；选择列表最多 30 项且全部可撤销');
+  const writesBeforeHistory = report.writes.length;
+  const latest = (await persisted()).versions[0];
+  await click('查看历史');
+  const versionButton = await page.evaluateHandle(label => [...document.querySelectorAll('button')].find(b => b.getClientRects().length && b.querySelector('span.font-medium')?.textContent.trim() === label), latest.name || latest.status_date.slice(0, 10));
+  assert.ok(versionButton.asElement()); await versionButton.asElement().click({ delay: 60 }); await versionButton.dispose();
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === '退出查看'));
+  await button('退出查看'); await page.click(`[data-task-cell="${task.id}"][data-col="name"]`);
+  await click('任务操作'); await click('查看任务属性');
+  const readOnlyAttributes = '[role="dialog"][aria-label="任务属性"]';
+  await page.waitForSelector(readOnlyAttributes);
+  assert.ok(await page.$eval(readOnlyAttributes, e => e.textContent.includes('HT-000123') && e.textContent.includes('只读')));
+  assert.equal((await page.$$(`${readOnlyAttributes} input, ${readOnlyAttributes} select`)).length, 0);
+  await screenshot('12-history-attributes'); await page.keyboard.press('Escape'); await click('退出查看');
+  assert.equal(report.writes.length, writesBeforeHistory);
+  assert.deepEqual(report.pageErrors, []);
+  pass('历史版本可按任务查看自定义属性，只读查看不产生后台写入');
+  report.trustedClicks = await page.evaluate(() => window.__trustedClicks);
   report.passed = true;
 }
 main().catch(async error => {

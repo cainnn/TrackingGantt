@@ -3,7 +3,8 @@
 import * as XLSX from 'xlsx'
 import { MIN_PER_DAY } from '../clientTime'
 import type { TaskCustomField, TaskCustomValues } from '../../types'
-import { CUSTOM_FIELDS_SHEET, normalizeCustomFields, normalizeCustomValues } from '../taskCustomFields'
+import { CUSTOM_FIELDS_SHEET, normalizeCustomValue } from '../taskCustomFields'
+import { restoreTaskAttributes, TASK_FIELDS_SHEET, type TaskFieldBinding } from '../taskAttributeTransfer'
 import { excelCustomColumns } from './excelCustomFields'
 
 const DEP_TYPE_MAP: Record<string, number> = { SS: 0, SF: 1, FS: 2, FF: 3 }
@@ -34,6 +35,7 @@ export interface ImportTask {
   is_milestone: boolean
   auto_schedule: boolean
   note: string | null
+  custom_fields?: TaskCustomField[]
   custom_values?: TaskCustomValues
   percent_done?: number | null
   constraint_type?: string | null
@@ -334,7 +336,24 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean; 
   const metadataColumns = metadata ? XLSX.utils.sheet_to_json<{ '列名': string; '配置': string }>(metadata) : []
   const headers = Array.from(XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 })[0] ?? [], cell => String(cell ?? ''))
   const columns = excelCustomColumns(headers, metadataColumns, options.customFields)
-  const customFields = columns.length ? normalizeCustomFields(columns.map(c => c.field)) : undefined
+  const customFields = columns.length ? columns.map(c => c.field) : undefined
+  const bindingSheet = wb.Sheets[TASK_FIELDS_SHEET]
+  const bindingRows = bindingSheet ? XLSX.utils.sheet_to_json<{ '任务编码': string; '序号'?: number; '归属': string }>(bindingSheet) : []
+  const bindings = new Map<string, TaskFieldBinding>()
+  const parts = new Map<string, Map<number, string>>()
+  for (const row of bindingRows) {
+    const code = String(row['任务编码'])
+    const part = Number(row['序号'] ?? 1)
+    if (!Number.isSafeInteger(part) || part < 1) throw new Error('Excel 任务属性归属的序号无效')
+    if (!parts.has(code)) parts.set(code, new Map())
+    if (parts.get(code)!.has(part)) throw new Error('Excel 任务属性归属中的任务编码和序号重复')
+    parts.get(code)!.set(part, row['归属'])
+  }
+  for (const [code, chunks] of parts) {
+    const sorted = [...chunks].sort((a, b) => a[0] - b[0])
+    if (sorted.some(([part], i) => part !== i + 1)) throw new Error('Excel 任务属性归属信息不完整')
+    bindings.set(code, JSON.parse(sorted.map(([, value]) => value).join('')))
+  }
   // 未指定项目粒度时，延迟列沿用文件的分钟标注，否则默认天。
   const isMinute = options.isMinute ?? rows.some(row =>
     row['工期(分钟)'] != null || row['工期（分钟）'] != null)
@@ -363,14 +382,14 @@ export async function parseExcelFile(file: File, options: { isMinute?: boolean; 
       is_milestone: String(row['里程碑'] ?? '').trim() === '是',
       auto_schedule: String(row['自动排程'] ?? '是').trim() !== '否',
       note: String(row['备注'] ?? '').trim() || null,
-      ...(customFields ? { custom_values: normalizeCustomValues(Object.fromEntries(columns.map(column => {
+      ...((customFields || bindings.has(taskCode)) ? restoreTaskAttributes(Object.fromEntries(columns.map(column => {
         const raw = row[column.header]
         const field = column.field
         if (field.type === 'money' && typeof raw === 'number' && Math.abs(raw) >= 1e13) throw new Error(`任务「${name}」的「${field.name}」金额较大，请在 Excel 中改为文本以保留精度`)
         const value = field.type === 'date' && raw instanceof Date ? fmtDt(raw).slice(0, 10)
           : field.type === 'text' ? displayRows[rowIndex]?.[column.header] ?? '' : raw ?? ''
-        return [field.id, value]
-      })), customFields) } : {}),
+        return [field.id, normalizeCustomValue(value, field)]
+      })), customFields ?? [], bindings.get(taskCode), !bindingSheet && !!metadata) : {}),
       percent_done: row['完成度'] != null && String(row['完成度']).trim() !== '' ? Number(row['完成度']) || 0 : null,
       constraint_type: (() => {
         const v = String(row['限制类型'] ?? '').trim()

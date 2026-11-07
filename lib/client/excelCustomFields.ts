@@ -13,7 +13,7 @@ export interface ExcelCustomColumn { header: string; field: TaskCustomField }
 
 export function excelCustomColumns(headers: string[], metadata: Array<{ '列名': string; '配置': string }>, existing: TaskCustomField[] = []): ExcelCustomColumn[] {
   if (new Set(headers.filter(Boolean)).size !== headers.filter(Boolean).length) throw new Error('Excel 列名重复，请为每列使用不同名称')
-  const definitions = metadata.length ? normalizeCustomFields(metadata.map(row => JSON.parse(row['配置']))) : []
+  const definitions = metadata.length ? metadata.map(row => normalizeCustomFields([JSON.parse(row['配置'])])[0]) : []
   const columns = metadata.map((row, i) => ({ header: row['列名'], field: definitions[i] }))
   if (new Set(columns.map(c => c.header)).size !== columns.length) throw new Error('Excel 属性列名重复，请重新导出')
   if (columns.some(c => !headers.includes(c.header))) throw new Error('Excel 缺少属性列，请保留导出文件中的属性列后重试')
@@ -33,6 +33,7 @@ export function excelCustomColumns(headers: string[], metadata: Array<{ '列名'
     }
     columns.push({ header, field })
   }
-  normalizeCustomFields(columns.map(c => c.field))
+  for (const column of columns) normalizeCustomFields([column.field])
+  if (new Set(columns.map(c => c.field.id)).size !== columns.length) throw new Error('Excel 属性 ID 重复，请重新导出')
   return columns
 }

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAuthUser } from '@/lib/middleware'
 import { failure } from '@/lib/result'
 import { exportMpp, type ExportPayload } from '@/lib/asposeTasksRunner'
-import { normalizeCustomFields, normalizeCustomValues, CustomFieldError } from '@/lib/taskCustomFields'
+import { CustomFieldError } from '@/lib/taskCustomFields'
 
 const MAX_TASKS = 10_000
 
@@ -33,8 +33,6 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    payload.custom_fields = normalizeCustomFields(payload.custom_fields ?? [])
-    payload.tasks = payload.tasks.map(task => ({ ...task, custom_values: normalizeCustomValues(task.custom_values ?? {}, payload.custom_fields!) }))
     const mpp = await exportMpp(payload)
     const filename = encodeURIComponent((payload.name || 'project') + '.mpp')
     return new NextResponse(new Uint8Array(mpp), {

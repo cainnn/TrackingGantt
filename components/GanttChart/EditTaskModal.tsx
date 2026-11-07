@@ -3,16 +3,16 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { updateTasks, addDependency, updateDependency, removeDependency } from '@/store/slices/tasksSlice'
-import type { Task, Dependency, TaskLifecycleEvent, TaskCustomValues } from '@/types'
-import { normalizeCustomValues } from '@/lib/taskCustomFields'
+import type { Task, Dependency, TaskLifecycleEvent, TaskCustomValues, TaskCustomField } from '@/types'
+import { normalizeCustomFields, normalizeCustomValues, taskCustomFields } from '@/lib/taskCustomFields'
 import TaskCustomValueInput from './TaskCustomValueInput'
 import TaskCustomFieldsEditor from './TaskCustomFieldsEditor'
-import { setCustomFields } from '@/store/slices/projectSlice'
+import DependencyTaskPicker from './DependencyTaskPicker'
 import { labelDraftStep } from '@/store/draftHistory'
 import { authFetch } from '@/lib/client/authFetch'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
-import { runFullCascade, snapTaskUpdatesToDayLevel } from '@/lib/clientScheduling'
+import { runFullCascade, snapTaskUpdatesToDayLevel, wouldCreateCycle } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
@@ -48,7 +48,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const incomingDeps = deps.filter(d => d.to_task_id === taskId)
   const outgoingDeps = deps.filter(d => d.from_task_id === taskId)
   const isSummary = allTasks.some(t => t.parent_id === taskId)
-  const summaryIds = new Set(allTasks.filter(t => !t.is_deleted).map(t => t.parent_id).filter(Boolean) as string[])
   const currentProject = useAppSelector(s => s.project.currentProject)
   // 项目精度：天级 vs 分钟级（创建时固定）
   const isMinute = currentProject?.time_granularity === 'minute'
@@ -70,6 +69,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [isMilestone, setIsMilestone] = useState(false)
   const [note,        setNote]        = useState('')
   const [customValues, setCustomValues] = useState<TaskCustomValues>({})
+  const [customFields, setCustomFields] = useState<TaskCustomField[]>([])
+  const [pendingCustomFields, setPendingCustomFields] = useState<TaskCustomField[] | undefined>()
   const [manageFields, setManageFields] = useState(false)
   const [durationIn,  setDurationIn]  = useState('')
   const [formError, setFormError] = useState('')
@@ -89,20 +90,14 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const [lcError, setLcError] = useState('')
 
   // Adding predecessor UI
-  const [showAddPred, setShowAddPred] = useState(false)
-  const [predSearch,  setPredSearch]  = useState('')
   const [addingPred,  setAddingPred]  = useState(false)
 
   // Adding successor UI
-  const [showAddSucc, setShowAddSucc] = useState(false)
-  const [succSearch,  setSuccSearch]  = useState('')
   const [addingSucc,  setAddingSucc]  = useState(false)
 
   // Table selection & pending-row state (advance-style)
   const [selectedPredId, setSelectedPredId] = useState<string | null>(null)
   const [selectedSuccId, setSelectedSuccId] = useState<string | null>(null)
-  const [pendingPredRow, setPendingPredRow] = useState(false)
-  const [pendingSuccRow, setPendingSuccRow] = useState(false)
   const [activeEdits, setActiveEdits] = useState<Record<string, boolean>>({})
 
   // Sequential number map (same logic as GanttChart)
@@ -141,6 +136,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     setIsMilestone(task.is_milestone)
     setNote(task.note ?? '')
     setCustomValues(task.custom_values ?? {})
+    setCustomFields(taskCustomFields(task, currentProject?.custom_fields))
+    setPendingCustomFields(undefined)
     // 工期：DB 总是分钟；天级 UI 展示为天数
     setDurationIn(task.duration != null ? String(Math.round((task.duration / durMul) * 100) / 100) : '')
     setConstraintType(task.constraint_type ?? 'asap')
@@ -259,6 +256,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   // ── Add predecessor ──────────────────────────────────────────────────
   const handleAddPredecessor = useCallback((fromTaskId: string) => {
     if (addingPred) return
+    if (deps.some(d => d.from_task_id === fromTaskId && d.to_task_id === taskId)) return '已经关联此任务'
+    if (wouldCreateCycle(fromTaskId, taskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
+    dispatch(labelDraftStep('添加前置任务'))
     setAddingPred(true)
     try {
       const newDep: Dependency = {
@@ -279,8 +279,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       recascadeAndUpdate([...deps, newDep], nextTasks)
     } finally {
       setAddingPred(false)
-      setShowAddPred(false)
-      setPredSearch('')
     }
   }, [addingPred, dispatch, projectId, taskId, deps, task, allTasks, recascadeAndUpdate])
 
@@ -295,6 +293,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   // ── Add successor ─────────────────────────────────────────────────
   const handleAddSuccessor = useCallback((toTaskId: string) => {
     if (addingSucc) return
+    if (deps.some(d => d.from_task_id === taskId && d.to_task_id === toTaskId)) return '已经关联此任务'
+    if (wouldCreateCycle(taskId, toTaskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
+    dispatch(labelDraftStep('添加后续任务'))
     setAddingSucc(true)
     try {
       const newDep: Dependency = {
@@ -314,8 +315,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       recascadeAndUpdate([...deps, newDep], nextTasks)
     } finally {
       setAddingSucc(false)
-      setShowAddSucc(false)
-      setSuccSearch('')
     }
   }, [addingSucc, dispatch, projectId, taskId, deps, allTasks, recascadeAndUpdate])
 
@@ -428,8 +427,11 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   }
 
   const handleSave = async () => {
+    let normalizedFields: TaskCustomField[]
+    try { normalizedFields = normalizeCustomFields(pendingCustomFields ?? customFields, taskCustomFields(task, currentProject?.custom_fields)) }
+    catch (err) { setFormError(err instanceof Error ? err.message : '属性设置无效'); setTab('custom'); setManageFields(true); return }
     let normalizedValues: TaskCustomValues
-    try { normalizedValues = normalizeCustomValues(customValues, currentProject?.custom_fields ?? [], task.custom_values) }
+    try { normalizedValues = normalizeCustomValues(customValues, normalizedFields, task.custom_values) }
     catch (err) { setFormError(err instanceof Error ? err.message : '任务属性填写无效'); setTab('custom'); return }
     const clampedStart = (startDate && projStart && startDate < projStart) ? projStart : startDate
     if (!isMilestone && durationIn.trim() !== '' && (!Number.isSafeInteger(Number(durationIn) * durMul) || Number(durationIn) < 0 || (!isMinute && !Number.isInteger(Number(durationIn))))) {
@@ -452,7 +454,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       percent_done: isMilestone ? 100 : task.percent_done,
       is_milestone: isMilestone,
       note: note || null,
-      custom_values: normalizedValues,
+      custom_fields: normalizedFields, custom_values: normalizedValues,
       constraint_type: constraintType || null,
       constraint_date: CONSTRAINT_NEEDS_DATE.has(constraintType) ? (constraintDate || null) : null,
       deadline: deadline || null,
@@ -497,35 +499,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     onClose()
   }
 
-  // ── Candidate tasks for predecessor selection ────────────────────────
-  // 排序与左侧任务列表保持一致（按 seqMap 升序，#N 即列表中的"编号"列）
-  const existingFromIds = new Set(incomingDeps.map(d => d.from_task_id))
-  const candidateTasks = allTasks.filter(t => {
-    if (t.id === taskId) return false          // not self
-    if (t.is_deleted) return false
-    if (summaryIds.has(t.id)) return false     // 摘要任务不能作为前置
-    if (existingFromIds.has(t.id)) return false // not already a predecessor
-    if (predSearch) {
-      const q = predSearch.toLowerCase()
-      return (t.name.toLowerCase().includes(q) || String(seqMap.get(t.id) ?? '').includes(q))
-    }
-    return true
-  }).sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
-
-  // ── Candidate tasks for successor selection ─────────────────────────
-  const existingToIds = new Set(outgoingDeps.map(d => d.to_task_id))
-  const succCandidateTasks = allTasks.filter(t => {
-    if (t.id === taskId) return false
-    if (t.is_deleted) return false
-    if (summaryIds.has(t.id)) return false     // 摘要任务不能作为后续
-    if (existingToIds.has(t.id)) return false
-    if (succSearch) {
-      const q = succSearch.toLowerCase()
-      return (t.name.toLowerCase().includes(q) || String(seqMap.get(t.id) ?? '').includes(q))
-    }
-    return true
-  }).sort((a, b) => (seqMap.get(a.id) ?? 99999) - (seqMap.get(b.id) ?? 99999))
-
   const fmtDate = (s: string) => {
     const d = new Date(s)
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
@@ -534,7 +507,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   return (
     <div role="dialog" aria-modal="true" aria-label="编辑任务" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
          onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl w-[540px] max-h-[90vh] flex flex-col"
+      <div className={`bg-white rounded-lg shadow-xl ${tab === 'pred' || tab === 'succ' ? 'w-[720px]' : 'w-[540px]'} max-w-[calc(100vw-32px)] max-h-[90vh] flex flex-col`}
            onClick={e => e.stopPropagation()}>
 
         {/* Header */}
@@ -554,7 +527,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
         <div className="flex border-b flex-none overflow-x-auto">
           {([
             ['general',    '通用'],
-            ['pred',       '前导'],
+            ['pred',       '前置'],
             ['succ',       '后续'],
             ['constraint', '限制'],
             ['note',       '注释'],
@@ -589,7 +562,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                        className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
               </div>
               <div className="flex items-center justify-between gap-3 rounded border border-blue-100 bg-blue-50 px-3 py-2.5">
-                <div><div className="text-sm font-medium text-gray-800">任务属性</div><div className="mt-1 text-xs text-gray-500">填写支出金额等信息，也可新增自定义属性</div></div>
+                <div><div className="text-sm font-medium text-gray-800">任务属性</div><div className="mt-1 text-xs text-gray-500">自行定义属性名称，填写当前任务的信息</div></div>
                 <button type="button" onClick={() => { setTab('custom'); setManageFields(false) }} className="shrink-0 rounded border border-blue-300 bg-white px-3 py-1.5 text-sm text-blue-600">编辑属性</button>
               </div>
             </div>
@@ -605,7 +578,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   <div className="px-3 py-2">延迟</div>
                   <div className="px-3 py-2 text-center">激活</div>
                 </div>
-                {incomingDeps.length === 0 && !pendingPredRow && (
+                {incomingDeps.length === 0 && (
                   <div className="px-3 py-6 text-xs text-gray-400 text-center">暂无前置任务</div>
                 )}
                 {incomingDeps.map(dep => {
@@ -646,51 +619,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                     </div>
                   )
                 })}
-                {pendingPredRow && (
-                  <div className="grid grid-cols-[1fr_160px_80px_60px] items-center border-b border-gray-100 text-sm bg-blue-50/40">
-                    <div className="px-2 py-1">
-                      <select
-                        autoFocus
-                        defaultValue=""
-                        onChange={e => {
-                          const id = e.target.value
-                          if (id) {
-                            handleAddPredecessor(id)
-                            setPendingPredRow(false)
-                          }
-                        }}
-                        className="w-full border border-gray-300 rounded px-2 py-0.5 text-xs bg-white focus:outline-none focus:border-blue-400">
-                        <option value="">— 选择任务 —</option>
-                        {candidateTasks.map(ct => (
-                          <option key={ct.id} value={ct.id}>
-                            #{seqMap.get(ct.id) ?? '—'}  {ct.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="px-3 py-1 text-xs text-gray-400">结束到开始</div>
-                    <div className="px-3 py-1 text-xs text-gray-400">0 天</div>
-                    <div className="px-2 py-1 flex justify-center">
-                      <input type="checkbox" checked disabled className="w-4 h-4 accent-blue-500 opacity-60" />
-                    </div>
-                  </div>
-                )}
               </div>
-              {/* Toolbar */}
-              <div className="flex items-center gap-3 mt-3">
-                <button
-                  onClick={() => { setPendingPredRow(true); setSelectedPredId(null) }}
-                  disabled={pendingPredRow || addingPred}
-                  className="text-blue-600 hover:text-blue-800 disabled:opacity-40 text-lg leading-none"
-                  title="添加前置任务">＋</button>
-                <button
-                  onClick={() => {
-                    if (pendingPredRow) { setPendingPredRow(false); return }
-                    if (selectedPredId) { handleRemovePredecessor(selectedPredId); setSelectedPredId(null) }
-                  }}
-                  disabled={!selectedPredId && !pendingPredRow}
-                  className="text-red-500 hover:text-red-600 disabled:opacity-40"
-                  title="删除选中">🗑</button>
+              {!isSummary && <div className="mt-4">
+                <DependencyTaskPicker tasks={allTasks} numbers={seqMap} taskId={taskId}
+                  selectedIds={incomingDeps.map(d => d.from_task_id)} label="前置任务编号"
+                  onPick={handleAddPredecessor} />
+              </div>}
+              <div className="mt-3 flex items-center justify-between">
+                <span className="text-xs text-gray-400">修改先进入草稿，可在关闭窗口后撤销。</span>
+                <button type="button" onClick={() => { if (selectedPredId) { handleRemovePredecessor(selectedPredId); setSelectedPredId(null) } }}
+                  disabled={!selectedPredId} className="text-xs text-red-500 disabled:opacity-40">删除选中的前置关系</button>
               </div>
             </div>
           )}
@@ -709,7 +647,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   <div className="px-3 py-2">延迟</div>
                   <div className="px-3 py-2 text-center">激活</div>
                 </div>
-                {outgoingDeps.length === 0 && !pendingSuccRow && (
+                {outgoingDeps.length === 0 && (
                   <div className="px-3 py-6 text-xs text-gray-400 text-center">暂无后续任务</div>
                 )}
                 {outgoingDeps.map(dep => {
@@ -750,51 +688,16 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                     </div>
                   )
                 })}
-                {pendingSuccRow && (
-                  <div className="grid grid-cols-[1fr_160px_80px_60px] items-center border-b border-gray-100 text-sm bg-blue-50/40">
-                    <div className="px-2 py-1">
-                      <select
-                        autoFocus
-                        defaultValue=""
-                        onChange={e => {
-                          const id = e.target.value
-                          if (id) {
-                            handleAddSuccessor(id)
-                            setPendingSuccRow(false)
-                          }
-                        }}
-                        className="w-full border border-gray-300 rounded px-2 py-0.5 text-xs bg-white focus:outline-none focus:border-blue-400">
-                        <option value="">— 选择任务 —</option>
-                        {succCandidateTasks.map(ct => (
-                          <option key={ct.id} value={ct.id}>
-                            #{seqMap.get(ct.id) ?? '—'}  {ct.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="px-3 py-1 text-xs text-gray-400">结束到开始</div>
-                    <div className="px-3 py-1 text-xs text-gray-400">0 天</div>
-                    <div className="px-2 py-1 flex justify-center">
-                      <input type="checkbox" checked disabled className="w-4 h-4 accent-blue-500 opacity-60" />
-                    </div>
-                  </div>
-                )}
               </div>
-              {/* Toolbar */}
-              <div className="flex items-center gap-3 mt-3">
-                <button
-                  onClick={() => { setPendingSuccRow(true); setSelectedSuccId(null) }}
-                  disabled={pendingSuccRow || addingSucc}
-                  className="text-blue-600 hover:text-blue-800 disabled:opacity-40 text-lg leading-none"
-                  title="添加后续任务">＋</button>
-                <button
-                  onClick={() => {
-                    if (pendingSuccRow) { setPendingSuccRow(false); return }
-                    if (selectedSuccId) { handleRemoveSuccessor(selectedSuccId); setSelectedSuccId(null) }
-                  }}
-                  disabled={!selectedSuccId && !pendingSuccRow}
-                  className="text-red-500 hover:text-red-600 disabled:opacity-40"
-                  title="删除选中">🗑</button>
+              {!isSummary && <div className="mt-4">
+                <DependencyTaskPicker tasks={allTasks} numbers={seqMap} taskId={taskId}
+                  selectedIds={outgoingDeps.map(d => d.to_task_id)} label="后续任务编号"
+                  onPick={handleAddSuccessor} />
+              </div>}
+              <div className="mt-3 flex items-center justify-between">
+                <span className="text-xs text-gray-400">修改先进入草稿，可在关闭窗口后撤销。</span>
+                <button type="button" onClick={() => { if (selectedSuccId) { handleRemoveSuccessor(selectedSuccId); setSelectedSuccId(null) } }}
+                  disabled={!selectedSuccId} className="text-xs text-red-500 disabled:opacity-40">删除选中的后续关系</button>
               </div>
               </>
               )}
@@ -960,12 +863,17 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
           })()}
 
           {tab === 'custom' && <div className="space-y-4 px-5 py-4">
-            <div className="flex items-center justify-between gap-3"><p className="text-xs text-gray-500">属性配置供本项目共用。所有修改在“确认变更”后才入库。</p><button type="button" className="shrink-0 text-sm text-blue-600" onClick={() => setManageFields(v => !v)}>{manageFields ? '返回填写' : '管理属性'}</button></div>
-            {manageFields ? <TaskCustomFieldsEditor fields={currentProject?.custom_fields ?? []} onApply={fields => {
-              dispatch(labelDraftStep('配置任务属性')); dispatch(setCustomFields({ projectId, fields })); setManageFields(false)
+            <div className="flex items-center justify-between gap-3"><p className="text-xs text-gray-500">属性仅属于当前任务。任务保存后先进入草稿，“确认变更”后才保存到后台。</p><button type="button" className="shrink-0 text-sm text-blue-600" onClick={() => {
+              if (manageFields) {
+                try { setCustomFields(normalizeCustomFields(pendingCustomFields ?? customFields, customFields)); setPendingCustomFields(undefined); setManageFields(false); setFormError('') }
+                catch (err) { setFormError(err instanceof Error ? err.message : '属性设置无效') }
+              } else setManageFields(true)
+            }}>{manageFields ? '返回填写' : '管理属性'}</button></div>
+            {manageFields ? <TaskCustomFieldsEditor fields={customFields} initialDraft={pendingCustomFields} onDraftChange={fields => { setPendingCustomFields(fields); setFormError('') }} onApply={fields => {
+              setCustomFields(fields); setPendingCustomFields(undefined); setManageFields(false); setFormError('')
             }} /> : <>
-            {!(currentProject?.custom_fields ?? []).some(f => !f.archived) && <div className="py-6 text-center"><p className="mb-3 text-sm text-gray-400">尚未配置任务属性</p><button type="button" onClick={() => setManageFields(true)} className="rounded bg-blue-600 px-4 py-2 text-sm text-white">新增任务属性</button></div>}
-            {(currentProject?.custom_fields ?? []).filter(f => !f.archived).map(field => <label key={field.id} className="block text-sm text-gray-700">
+            {!customFields.some(f => !f.archived) && <div className="py-6 text-center"><p className="mb-3 text-sm text-gray-400">尚未配置任务属性</p><button type="button" onClick={() => setManageFields(true)} className="rounded bg-blue-600 px-4 py-2 text-sm text-white">新增任务属性</button></div>}
+            {customFields.filter(f => !f.archived).map(field => <label key={field.id} className="block text-sm text-gray-700">
               <span className="mb-1 block">{field.name}{field.unit ? `（${field.unit}）` : ''}</span>
               <TaskCustomValueInput field={field} value={customValues[field.id] ?? ''} onChange={value => { setCustomValues(v => ({ ...v, [field.id]: value })); setFormError('') }} />
             </label>)}</>}

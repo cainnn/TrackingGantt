@@ -103,6 +103,61 @@ async function main() {
   imported = await api(`/import/${q.id}`, 'POST', { mode: 'merge', tasks: [{ ...importedTask, custom_values: { [money.id]: '' } }], dependencies: [] });
   assert.deepEqual(imported.tasks[0].custom_values, { [money.id]: '', [text.id]: '合同原值' });
   assert.equal((await api(`/versions/${q.id}?list=1`)).length, 0, 'draft import does not create versions');
+  // Current UI owns both definitions and values on individual tasks.
+  const owned = await create(), target = await create();
+  const amount = { id: randomUUID(), name: '自行设置', type: 'money', unit: '元' };
+  const independent = { id: randomUUID(), name: '自行设置', type: 'text' };
+  const blank = { id: randomUUID(), name: '空白属性', type: 'text' };
+  const ownedTasks = await api(`/tasks/${owned.id}`, 'POST', [
+    { ...t, id: randomUUID(), custom_fields: [amount, blank], custom_values: { [amount.id]: '12.50', [blank.id]: '' } },
+    { ...t2, id: randomUUID(), custom_fields: [independent], custom_values: { [independent.id]: '自行填报' } },
+    { ...t2, id: randomUUID(), task_code: '3', custom_fields: [], custom_values: {} },
+  ], 201);
+  const ownedState = () => api(`/tasks/${owned.id}`);
+  assert.deepEqual((await api(`/projects/${owned.id}`)).custom_fields, []);
+  assert.deepEqual((await ownedState()).tasks.find(t => t.task_code === '3').custom_fields, []);
+  const renamed = { ...amount, name: '独立修改名称' };
+  await api(`/tasks/${owned.id}`, 'PUT', [{ id: ownedTasks[0].id, custom_fields: [renamed, blank] }]);
+  let ownState = await ownedState();
+  assert.deepEqual(ownState.tasks.find(t => t.task_code === '2').custom_fields, [independent]);
+  assert.deepEqual(ownState.tasks.find(t => t.task_code === '1').custom_fields, [renamed, blank]);
+  await api(`/tasks/${owned.id}`, 'PUT', [{ id: ownedTasks[0].id, custom_fields: [{ ...renamed, type: 'text' }] }], 400);
+  await api(`/tasks/${owned.id}`, 'PUT', [{ id: ownedTasks[0].id, custom_values: { [independent.id]: '跨任务属性' } }], 400);
+  await api(`/tasks/${owned.id}`, 'PUT', [{ id: ownedTasks[0].id, custom_fields: [renamed, blank] }], 403, viewToken);
+  await api(`/projects/${owned.id}`, 'PUT', { planning_status: 'stable' });
+  const ownVersion = await api(`/versions/${owned.id}`, 'POST', { use_database_snapshot: true, include_snapshot: true, status_date: '2026-11-02' }, 201);
+  assert.deepEqual(ownVersion.snapshot.tasks.find(t => t.task_code === '1').custom_fields, [renamed, blank]);
+  await api(`/tasks/${owned.id}`, 'PUT', [{ id: ownedTasks[0].id, custom_fields: [{ ...renamed, name: '第二次改名' }, blank], _reason: '验收独立属性' }]);
+  const ownVersion2 = await api(`/versions/${owned.id}`, 'POST', { use_database_snapshot: true, status_date: '2026-11-03', reasons: { '1': '验收独立属性' } }, 201);
+  assert.ok(ownVersion2.changes.diffs.some(d => d.changes?.some(c => c.field === '任务属性配置')));
+  await api(`/versions/${owned.id}/restore`, 'POST', { id: ownVersion.id });
+  ownState = await ownedState();
+  assert.deepEqual(ownState.tasks.find(t => t.task_code === '1').custom_fields, [renamed, blank]);
+  const copied = await create({ copy_from: owned.id });
+  for (const item of (await api(`/tasks/${copied.id}`)).tasks) {
+    const source = ownState.tasks.find(t => t.task_code === item.task_code);
+    assert.deepEqual(item.custom_fields, source.custom_fields); assert.deepEqual(item.custom_values, source.custom_values);
+  }
+  const fileTasks = ownState.tasks.map(t => ({ ...t, parent_task_code: '', duration: Number(t.duration), percent_done: Number(t.percent_done) }));
+  const payload = { name: '独立任务属性验收', start_date: '2026-11-01', status_date: '2026-11-02', time_granularity: 'day', tasks: fileTasks, dependencies: [] };
+  const exported = await fetch(`${base}/api/mpp/build`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(300000) });
+  const mppBytes = await exported.arrayBuffer();
+  assert.equal(exported.status, 200, Buffer.from(mppBytes).toString());
+  assert.ok(mppBytes.byteLength > 1000);
+  const form = new FormData(); form.append('file', new Blob([mppBytes]), 'owned.mpp');
+  const parsedResponse = await fetch(`${base}/api/mpp/parse`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form, signal: AbortSignal.timeout(300000) });
+  const parsed = await parsedResponse.json(); assert.ok(parsed.ok, JSON.stringify(parsed));
+  for (const item of parsed.value.tasks) {
+    const source = ownState.tasks.find(t => t.task_code === item.task_code);
+    assert.deepEqual(item.custom_fields, source.custom_fields); assert.deepEqual(item.custom_values, source.custom_values);
+  }
+  const ownedImport = await api(`/import/${target.id}`, 'POST', { mode: 'merge', tasks: parsed.value.tasks, dependencies: [] });
+  assert.deepEqual(ownedImport.custom_fields, []);
+  for (const item of ownedImport.tasks) {
+    const source = ownState.tasks.find(t => t.task_code === item.task_code);
+    assert.deepEqual(item.custom_fields, source.custom_fields); assert.deepEqual(item.custom_values, source.custom_values);
+  }
+  console.log('PASS task-owned attributes: independent types/names, empty membership, schema-only changes, readonly access, versions, copy, actual MPP and transactional import');
   console.log(`PASS custom field API: ${requests} requests; precision, validation, atomic batches, retry, draft/stable, snapshot restore, copy, legacy clients and readonly roles`);
 }
 main().catch(err => { console.error(err); process.exitCode = 1; }).finally(async () => {

@@ -3,7 +3,8 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { TaskCustomField, TaskCustomValues, TimeGranularity } from '../types'
-import { normalizeCustomFields, normalizeCustomValues } from './taskCustomFields'
+import { normalizeCustomFields } from './taskCustomFields'
+import { prepareTaskAttributeTransfer, restoreTaskAttributes, type TaskFieldBinding } from './taskAttributeTransfer'
 
 const CLI_DIR = path.join(process.cwd(), 'aspose-tasks-cli', 'publish')
 const CLI_BIN = path.join(CLI_DIR, 'aspose-tasks-cli')
@@ -43,6 +44,8 @@ export interface ImportTaskDto {
   auto_schedule: boolean
   note: string | null
   custom_values?: TaskCustomValues
+  custom_fields?: TaskCustomField[]
+  custom_field_binding?: TaskFieldBinding | null
   percent_done?: number | null
   constraint_type?: string | null
   constraint_date?: string | null
@@ -82,6 +85,7 @@ export interface ExportTaskDto {
   note: string | null
   assignee?: string | null
   custom_values?: TaskCustomValues
+  custom_fields?: TaskCustomField[]
   constraint_type: string | null
   constraint_date: string | null
   rollup: boolean
@@ -155,7 +159,9 @@ export async function importMpp(mppBuffer: Buffer): Promise<ImportResult> {
     const { stdout } = await runCli(['import', inPath])
     const result = JSON.parse(stdout) as ImportResult
     result.custom_fields = normalizeCustomFields(result.custom_fields ?? [])
-    result.tasks = result.tasks.map(task => ({ ...task, custom_values: normalizeCustomValues(task.custom_values ?? {}, result.custom_fields!) }))
+    result.tasks = result.tasks.map(({ custom_field_binding, ...task }) => ({ ...task,
+      ...restoreTaskAttributes(task.custom_values ?? {}, result.custom_fields!, custom_field_binding),
+    }))
     return result
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -167,7 +173,8 @@ export async function exportMpp(payload: ExportPayload): Promise<Buffer> {
   const inJson = path.join(dir, 'in.json')
   const outMpp = path.join(dir, 'out.mpp')
   try {
-    await writeFile(inJson, JSON.stringify(payload))
+    const transfer = prepareTaskAttributeTransfer(payload.tasks, normalizeCustomFields(payload.custom_fields ?? []))
+    await writeFile(inJson, JSON.stringify({ ...payload, custom_fields: transfer.fields, tasks: transfer.tasks }))
     await runCli(['export', inJson, outMpp])
     return await readFile(outMpp)
   } finally {

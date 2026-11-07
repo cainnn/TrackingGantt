@@ -5,6 +5,7 @@ import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
 import { setTasks, setComparison, clearComparison, setDiffFilter, clearDiffFilter, setViewSnapshot } from '@/store/slices/tasksSlice'
 import { setStatusDate, setPlanningStatus, setCustomFields } from '@/store/slices/projectSlice'
+import { restoreTaskAttributeSnapshot } from '@/lib/taskCustomFields'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
 import { setProjectLines } from '@/store/slices/projectLinesSlice'
 import { labelDraftStep, hasDraftChanges } from '@/store/draftHistory'
@@ -246,9 +247,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       dispatch(labelDraftStep('载入历史版本到草稿'))
       dispatch(setTasks({
         tasks: Array.isArray(snap.tasks) ? snap.tasks.map((task: Task) => ({ ...task,
-          custom_values: Object.hasOwn(task, 'custom_values')
-            ? { ...tasks.find(t => t.id === task.id)?.custom_values, ...Object.fromEntries((snap.custom_fields ?? []).map((f: { id: string }) => [f.id, ''])), ...task.custom_values }
-            : tasks.find(t => t.id === task.id)?.custom_values,
+          ...restoreTaskAttributeSnapshot(task, tasks.find(t => t.id === task.id), snap.custom_fields, currentProject?.custom_fields),
         })) : [],
         dependencies: Array.isArray(snap.dependencies) ? snap.dependencies : [],
       }))
@@ -303,14 +302,14 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
           start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, assignee: t.assignee,
           percent_done: t.percent_done, is_milestone: t.is_milestone,
-          parent_id: t.parent_id, custom_values: t.custom_values as TaskCustomValues | undefined,
+          parent_id: t.parent_id, custom_fields: t.custom_fields as TaskCustomField[] | undefined, custom_values: t.custom_values as TaskCustomValues | undefined,
         }))
         const newTasks: SnapshotTask[] = tasks.filter(t => !t.is_deleted).map(t => ({
           id: t.id, task_code: t.task_code, name: t.name,
           start_date: t.start_date, end_date: t.end_date,
           duration: t.duration, assignee: t.assignee,
           percent_done: t.percent_done, is_milestone: t.is_milestone,
-          parent_id: t.parent_id, custom_values: t.custom_values,
+          parent_id: t.parent_id, custom_fields: t.custom_fields, custom_values: t.custom_values,
         }))
         const diffs = diffSnapshots(oldTasks, newTasks, { isMinute, customFields: currentProject?.custom_fields })
         const changedCodes = diffs.map(d => d.task_code)

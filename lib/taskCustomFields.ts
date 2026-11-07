@@ -89,8 +89,22 @@ export function customValuesEqual(a: TaskCustomValues = {}, b: TaskCustomValues 
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].every(id => (a[id] ?? '') === (b[id] ?? ''))
 }
 export function customFieldsEqual(a: TaskCustomField[] = [], b: TaskCustomField[] = []): boolean {
-  const canonical = (fields: TaskCustomField[]) => fields.map(f => [f.id, f.name, f.type, f.unit ?? '', f.options ?? [], !!f.archived])
+  const canonical = (fields: TaskCustomField[]) => (fields ?? []).map(f => [f.id, f.name, f.type, f.unit ?? '', f.options ?? [], !!f.archived])
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
+}
+
+/** Legacy project definitions describe only values already attached to this task. */
+export function taskCustomFields(task: { custom_fields?: TaskCustomField[] | null; custom_values?: TaskCustomValues }, legacy: TaskCustomField[] = []): TaskCustomField[] {
+  if (Array.isArray(task.custom_fields)) return task.custom_fields
+  return legacy.filter(field => Object.hasOwn(task.custom_values ?? {}, field.id))
+}
+
+export function submittedTaskCustomFields(input: { custom_fields?: unknown; custom_values?: unknown }, previous: { custom_fields?: TaskCustomField[] | null; custom_values?: TaskCustomValues } = {}, legacy: TaskCustomField[] = []): TaskCustomField[] {
+  const old = taskCustomFields(previous, legacy)
+  if (input.custom_fields != null) return normalizeCustomFields(input.custom_fields, old)
+  const suppliedValues = isRecord(input.custom_values) ? input.custom_values : {}
+  const attached = legacy.filter(field => Object.hasOwn(suppliedValues, field.id) && !old.some(f => f.id === field.id))
+  return normalizeCustomFields([...old, ...attached], old)
 }
 export function formatCustomValue(value: string | undefined, field?: TaskCustomField): string {
   return value ? `${value}${field?.unit ? ` ${field.unit}` : ''}` : ''
@@ -114,10 +128,31 @@ export function mergeImportedCustomFields(existing: TaskCustomField[], imported:
   for (const field of imported) {
     const match = fields.find(f => f.id === field.id) ?? fields.find(f => !f.archived && f.name.toLocaleLowerCase() === field.name.toLocaleLowerCase())
     if (match) {
-      if (match.type !== field.type) return fail(`导入属性「${field.name}」与项目中的属性类型不同，请先调整属性名称`)
+      if (match.type !== field.type) return fail(`导入属性「${field.name}」与当前任务中的属性类型不同，请先调整属性名称`)
       idMap.set(field.id, match.id)
-      if (field.type === 'select') fields[fields.indexOf(match)] = { ...match, options: [...new Set([...(match.options ?? []), ...(field.options ?? [])])] }
+      fields[fields.indexOf(match)] = { ...field, id: match.id,
+        ...(field.type === 'select' ? { options: [...new Set([...(match.options ?? []), ...(field.options ?? [])])] } : {}) }
     } else { fields.push(field); idMap.set(field.id, field.id) }
   }
   return { fields: normalizeCustomFields(fields, existing), idMap }
+}
+
+export function mergeTaskAttributes(imported: { custom_fields?: TaskCustomField[]; custom_values?: TaskCustomValues }, previous: { custom_fields?: TaskCustomField[] | null; custom_values?: TaskCustomValues } = {}, legacy: TaskCustomField[] = []) {
+  const incoming = taskCustomFields(imported, legacy)
+  const { fields, idMap } = mergeImportedCustomFields(taskCustomFields(previous, legacy), incoming)
+  const remapped = Object.fromEntries(Object.entries(imported.custom_values ?? {}).map(([id, value]) => [idMap.get(id) ?? id, value]))
+  return { custom_fields: fields, custom_values: normalizeCustomValues(remapped, fields, previous.custom_values) }
+}
+
+/** Loading a version is still a local draft. Keep newer fields archived so
+ * rollback does not destroy data, and retain data omitted by old snapshots. */
+export function restoreTaskAttributeSnapshot(snapshot: { custom_fields?: TaskCustomField[] | null; custom_values?: TaskCustomValues }, current: { custom_fields?: TaskCustomField[] | null; custom_values?: TaskCustomValues } = {}, snapshotLegacy: TaskCustomField[] = [], currentLegacy: TaskCustomField[] = []) {
+  const previous = taskCustomFields(current, currentLegacy)
+  if (!Array.isArray(snapshot.custom_fields) && !Object.hasOwn(snapshot, 'custom_values')) return { custom_fields: previous, custom_values: current.custom_values ?? {} }
+  const original = taskCustomFields(snapshot, snapshotLegacy)
+  const fields = original.map(field => field.type === 'select' ? { ...field, options: [...new Set([...(field.options ?? []), ...(previous.find(f => f.id === field.id)?.options ?? [])])] } : field)
+  fields.push(...previous.filter(f => !original.some(old => old.id === f.id)).map(f => ({ ...f, archived: true })))
+  return { custom_fields: fields, custom_values: Object.hasOwn(snapshot, 'custom_values')
+    ? { ...current.custom_values, ...Object.fromEntries(original.map(f => [f.id, ''])), ...snapshot.custom_values }
+    : current.custom_values ?? {} }
 }

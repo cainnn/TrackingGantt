@@ -5,7 +5,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
-import type { TaskCustomValues } from '@/types'
+import type { TaskCustomField, TaskCustomValues } from '@/types'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -30,6 +30,7 @@ type SnapshotTask = {
   status?: string | null
   note?: string | null
   custom_values?: TaskCustomValues
+  custom_fields?: TaskCustomField[] | null
   order_index?: number | null
   rollup?: boolean | null
   inactive?: boolean | null
@@ -66,9 +67,9 @@ async function upsertTaskShell(client: PoolClient, projectId: string, task: Snap
         original_start_date, original_end_date, duration, duration_unit, percent_done,
         is_milestone, auto_schedule, constraint_type, constraint_date, deadline, status,
         note, order_index, rollup, inactive, project_boundary, baseline_end_date,
-        is_deleted, deleted_at, custom_values)
+        is_deleted, deleted_at, custom_values, custom_fields)
      VALUES
-       ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,false,NULL,$25::jsonb)
+       ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,false,NULL,$25::jsonb,$27::jsonb)
      ON CONFLICT (id) DO UPDATE SET
        task_code = EXCLUDED.task_code,
        name = EXCLUDED.name,
@@ -93,6 +94,7 @@ async function upsertTaskShell(client: PoolClient, projectId: string, task: Snap
        project_boundary = EXCLUDED.project_boundary,
        baseline_end_date = EXCLUDED.baseline_end_date,
        custom_values = CASE WHEN $26 THEN EXCLUDED.custom_values ELSE tasks.custom_values END,
+       custom_fields = CASE WHEN $28 THEN EXCLUDED.custom_fields ELSE tasks.custom_fields END,
        is_deleted = false,
        deleted_at = NULL,
        updated_at = NOW()`,
@@ -107,6 +109,7 @@ async function upsertTaskShell(client: PoolClient, projectId: string, task: Snap
       task.rollup ?? false, task.inactive ?? false, task.project_boundary ?? 'ask',
       task.baseline_end_date ?? null,
       JSON.stringify(task.custom_values ?? {}), Object.hasOwn(task, 'custom_values'),
+      task.custom_fields == null ? null : JSON.stringify(task.custom_fields), Object.hasOwn(task, 'custom_fields'),
     ],
   )
 }

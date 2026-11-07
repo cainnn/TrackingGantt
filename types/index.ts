@@ -50,6 +50,7 @@ export interface Task {
   percent_done: number
   is_milestone: boolean
   note: string | null
+  custom_fields?: TaskCustomField[]
   custom_values?: TaskCustomValues
   order_index: number
   is_deleted: boolean
@@ -103,6 +104,7 @@ export interface CreateTaskInput {
   percent_done?: number
   is_milestone?: boolean
   note?: string | null
+  custom_fields?: TaskCustomField[]
   custom_values?: TaskCustomValues
   order_index?: number
 }

@@ -27,6 +27,7 @@ internal static partial class Program
     {
         public int Version { get; set; } = 1;
         public List<FieldMapping> Fields { get; set; } = new();
+        public Dictionary<string, JsonElement> TaskFields { get; set; } = new();
         public string? TimeGranularity { get; set; }
         public List<ProjectLineOut>? ProjectLines { get; set; }
         public List<DepOut> InactiveDependencies { get; set; } = new();
@@ -168,6 +169,10 @@ internal static partial class Program
         var fields = ReadCustomFields(project, tasks, metadata);
         if (fields.Count != input.CustomFields.Count) throw new InvalidDataException("Project 属性数量校验失败，已停止导出");
         foreach (var original in input.Tasks) {
+            if (original.CustomFieldBinding is JsonElement binding &&
+                (!metadata.TaskFields.TryGetValue(original.TaskCode, out var savedBinding) ||
+                 !System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(binding.GetRawText()), System.Text.Json.Nodes.JsonNode.Parse(savedBinding.GetRawText()))))
+                throw new InvalidDataException($"Project 未能完整保存任务「{original.Name}」的属性归属，已停止导出");
             var task = tasks.FirstOrDefault(t => TaskCode(t) == original.TaskCode) ?? throw new InvalidDataException($"Project 中找不到任务「{original.Name}」，已停止导出");
             var values = ReadCustomValues(task, fields);
             foreach (var field in input.CustomFields) {
