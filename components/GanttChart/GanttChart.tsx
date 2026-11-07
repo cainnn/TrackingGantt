@@ -1468,6 +1468,9 @@ export default function GanttChart({
   // ── Global mousemove ────────────────────────────────────────────────────
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
+      // A hover after releasing the mouse (or switching input devices) is not
+      // a drag, even if the matching mouseup has not reached this window yet.
+      if ((e.buttons & 1) === 0) return
       const svgX = getSvgX(e.clientX)
 
       if (statusDateDrag) {

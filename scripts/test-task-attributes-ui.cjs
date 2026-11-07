@@ -41,7 +41,7 @@ async function click(label, scope = 'body') {
 }
 async function fill(selector, value) {
   await page.waitForSelector(selector, { visible: true });
-  await page.click(selector, { clickCount: 3, delay: 35 });
+  await page.click(selector, { count: 3, delay: 35 });
   await page.keyboard.press('Backspace');
   if (value) await page.type(selector, value, { delay: 15 });
   assert.equal(await page.$eval(selector, e => e.value), value);
@@ -54,6 +54,26 @@ async function openEditor() {
 }
 async function openValues() { await openEditor(); await click('编辑属性', modal); }
 async function closeEditor() { await click('取消', modal); await page.waitForSelector(modal, { hidden: true }); }
+const waitFrames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+async function barPoint() {
+  return page.evaluate(async id => {
+    let previous, stable = 0;
+    const deadline = performance.now() + 5000;
+    while (performance.now() < deadline) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const bar = document.querySelector(`[data-task-bar="${id}"] rect[fill="transparent"]`);
+      const timeline = document.querySelector('[data-timeline-scroll]');
+      if (!bar || !timeline) continue;
+      const r = bar.getBoundingClientRect(), v = timeline.getBoundingClientRect();
+      const position = JSON.stringify([r.x, r.y, r.width, timeline.scrollLeft, timeline.dataset.colWidth]);
+      stable = position === previous ? stable + 1 : 0; previous = position;
+      if (stable >= 3 && r.x > v.x && r.right < v.right) {
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2, step: Number(timeline.dataset.colWidth) };
+      }
+    }
+    throw new Error('Task bar did not settle inside the timeline');
+  }, task.id);
+}
 async function persisted() {
   const [p, state, versions] = await Promise.all([api(`/projects/${project.id}`), api(`/tasks/${project.id}`), api(`/versions/${project.id}?list=1`)]);
   return { p, task: state.tasks.find(t => t.id === task.id), versions };
@@ -230,9 +250,36 @@ async function main() {
   assert.equal(report.writes.length, writesBeforeFiles);
   pass('通过菜单导出 Excel/MPP 并重新导入：属性保留、Excel 工期按天、导入可撤销且未写入后台');
 
-  await click('显示全部'); await page.waitForSelector(`[data-task-bar="${task.id}"] rect[fill="transparent"]`);
-  await page.click(`[data-task-bar="${task.id}"] rect[fill="transparent"]`, { clickCount: 2, delay: 60 });
-  await page.waitForSelector(modal, { visible: true }); await button('编辑属性', modal); await closeEditor();
+  const startCell = `[data-task-cell="${task.id}"][data-col="start"]`;
+  const expectStart = value => page.waitForFunction((selector, expected) => document.querySelector(selector)?.textContent.trim() === expected, {}, startCell, value);
+  const writesBeforeBar = report.writes.length;
+  await expectStart('11-01'); await click('显示全部');
+  let point = await barPoint();
+  await page.mouse.move(point.x, point.y); await page.mouse.down(); await waitFrames();
+  // Send a real browser input event with no held button, as can happen when a
+  // second input device moves or mouseup is delayed. Do not dispatch DOM events.
+  const pointer = await page.createCDPSession();
+  await pointer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x + point.step, y: point.y, buttons: 0 });
+  await waitFrames();
+  assert.equal(await page.$eval(startCell, e => e.textContent.trim()), '11-01', 'An unpressed pointer must not move the task');
+  await page.mouse.up(); await pointer.detach(); await waitFrames();
+  assert.equal(await page.$eval('button[title^="撤销"]', e => e.disabled), true, 'Hover must not create an undo step');
+
+  point = await barPoint();
+  await page.mouse.move(point.x, point.y); await page.mouse.down(); await waitFrames();
+  await page.mouse.move(point.x + point.step, point.y, { steps: 5 }); await expectStart('11-02');
+  await page.mouse.up(); await waitFrames();
+  await page.click('button[title^="撤销"]'); await expectStart('11-01');
+  for (let i = 0; i < 3; i++) {
+    await click('显示全部'); point = await barPoint();
+    await page.mouse.click(point.x, point.y, { count: 2, delay: 60 });
+    await page.waitForSelector(modal, { visible: true });
+    assert.equal((await page.$$(modal)).length, 1);
+    await button('编辑属性', modal); await closeEditor(); await expectStart('11-01');
+  }
+  assert.equal(report.writes.length, writesBeforeBar);
+  assert.equal((await persisted()).task.start_date.slice(0, 10), '2026-11-01');
+  pass('未按键移动不拖动任务；正常拖动可撤销；连续双击只打开同一任务窗口且不修改日期');
   const writesBeforeLine = report.writes.length;
   const statusLabel = await page.$eval('[data-status-date-handle="body"]', e => e.getAttribute('aria-valuetext'));
   // SVG elements expose focus(), but Puppeteer's focus helper only accepts HTMLElement.
@@ -246,7 +293,7 @@ async function main() {
   await screenshot('06-finished');
   assert.deepEqual(report.pageErrors, []);
   report.trustedClicks = await page.evaluate(() => window.__trustedClicks);
-  pass('右侧任务条双击仍打开同一编辑窗口；状态日期线键盘调整和撤销仍不落盘');
+  pass('状态日期线键盘调整和撤销仍不落盘');
   report.passed = true;
 }
 main().catch(async error => {
