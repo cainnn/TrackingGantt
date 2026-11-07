@@ -1511,8 +1511,7 @@ export default function GanttToolbar({
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
-    if (!baseline) return
-    if (statusDateSaving) return
+    if (!baseline || readOnly || statusDateSaving || (!hasChanges && !history.uncertain)) return
     setStatusDateSaving(true)
     try {
       const persisted = saveIncomplete || history.uncertain ? await readPersistedState() : null
@@ -1546,7 +1545,7 @@ export default function GanttToolbar({
       setStatusDateSaving(false)
     }
   }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, dispatch, projectId, onDiscardChanges,
-      statusDateSaving, saveIncomplete, readPersistedState, baselineLines, baselineCustomFields, history.uncertain])
+      statusDateSaving, saveIncomplete, readPersistedState, baselineLines, baselineCustomFields, history.uncertain, hasChanges, readOnly])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
@@ -1708,9 +1707,9 @@ export default function GanttToolbar({
               {!readOnly && (
                 <button
                   onClick={handleRefresh}
-                  disabled={statusDateSaving}
-                  title="放弃全部未确认的草稿，回到最近一次保存状态"
-                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors"
+                  disabled={statusDateSaving || (!hasChanges && !history.uncertain)}
+                  title={hasChanges || history.uncertain ? '放弃全部未保存的更改，回到最近一次保存状态' : '没有未保存的更改'}
+                  className="inline-flex items-center gap-1 px-2.5 h-8 rounded border border-gray-300 text-gray-700 bg-white enabled:hover:bg-gray-50 cursor-pointer text-[13px] font-medium transition-colors disabled:border-gray-200 disabled:text-gray-300 disabled:bg-gray-50 disabled:cursor-not-allowed"
                 >
                   <IcoRefresh />
                   放弃全部更改
