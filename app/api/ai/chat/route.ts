@@ -14,7 +14,8 @@ import {
   resolveAiThinkingMode,
   type AiThinkingMode,
 } from '@/lib/ai/chatPolicy'
-import type { Task, Dependency } from '@/types'
+import type { Task, Dependency, TaskCustomField } from '@/types'
+import { buildTaskAttributeCatalog, isTaskAttributeQueryIntent } from '@/lib/ai/taskAttributeQuery'
 
 const openaiBaseURL = process.env.OPENAI_BASE_URL || undefined
 const openaiModel = process.env.OPENAI_MODEL ?? 'gpt-4o'
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json()
-  const { projectName, messages, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds, isMinute } = body as {
+  const { projectName, messages, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds, isMinute, customFields, currentDate, queryOnly } = body as {
     projectName: string
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     messages: any[]
@@ -50,11 +51,14 @@ export async function POST(req: NextRequest) {
     progress?: number | null
     prevTaskIds?: string[]
     isMinute?: boolean
+    customFields?: TaskCustomField[]
+    currentDate?: string
+    queryOnly?: boolean
   }
 
   const systemPrompt = buildSystemPrompt(
     projectName, tasks, dependencies, versionChanges, statusDate, progress, prevTaskIds,
-    isMinute ?? true,
+    isMinute ?? true, customFields ?? [], currentDate,
   )
 
   try {
@@ -63,10 +67,14 @@ export async function POST(req: NextRequest) {
       ...messages,
     ]
 
+    const latestUserMessage = [...messages].reverse().find(message => message.role === 'user')?.content
+    const attributesOnly = queryOnly === true || typeof latestUserMessage === 'string'
+      && isTaskAttributeQueryIntent(latestUserMessage, buildTaskAttributeCatalog(tasks, customFields ?? []))
     const requestParams: CompatibleChatParams = {
       model: openaiModel,
       messages: apiMessages,
-      tools: AI_TOOLS,
+      tools: attributesOnly ? AI_TOOLS.filter(tool => tool.function.name === 'query_task_attributes') : AI_TOOLS,
+      ...(attributesOnly ? { tool_choice: { type: 'function' as const, function: { name: 'query_task_attributes' } } } : {}),
       temperature: 0.3,
       max_tokens: 4096,
     }
@@ -81,6 +89,9 @@ export async function POST(req: NextRequest) {
     const response = await openai.chat.completions.create(requestParams)
 
     const choice = response.choices[0]
+    if (attributesOnly && choice?.message && !choice.message.tool_calls?.some(call => call.type === 'function' && call.function.name === 'query_task_attributes')) {
+      return NextResponse.json(failure('AI 未生成有效的属性查询，请明确属性名称后重试', 502), { status: 502 })
+    }
     if (!choice || !hasRenderableAssistantOutput(choice.message)) {
       console.error('AI chat returned no renderable output', {
         model: openaiModel,

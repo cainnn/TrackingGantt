@@ -11,6 +11,9 @@ import { computeProjectProgressPercent } from '@/lib/projectProgress'
 import { collapseDeletedTaskSuccessors, runFullCascade } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
+import { hasDraftChanges } from '@/store/draftHistory'
+import { attributeQueryMessage, buildTaskAttributeCatalog, isTaskAttributeQueryIntent, queryTaskAttributeReports, type AttributeQueryContext, type AttributeQueryResult } from '@/lib/ai/taskAttributeQuery'
+import AIAttributeReport from './AIAttributeReport'
 import {
   isWeeklySummaryIntent,
   WEEKLY_SUMMARY_OUTPUT_REQUIREMENT,
@@ -80,6 +83,8 @@ interface ChatMsg {
   content: string
   tool_call_id?: string
   actions?: string[]  // UI-only: show action summaries
+  attributeQueries?: AttributeQueryResult[]
+  includesUnsavedChanges?: boolean
 }
 
 interface Props {
@@ -126,7 +131,9 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   const { tasks, dependencies, diffFilter, comparison } = useAppSelector(s => s.tasks)
   const { versions } = useAppSelector(s => s.versions)
   const currentProject = useAppSelector(s => s.project.currentProject)
+  const unsavedChanges = useAppSelector(hasDraftChanges)
   const isMinute = currentProject?.time_granularity === 'minute'
+  const attributeCatalog = React.useMemo(() => buildTaskAttributeCatalog(tasks, currentProject?.custom_fields), [tasks, currentProject?.custom_fields])
 
   const [messages, setMessages] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -180,15 +187,22 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   }, [messages])
 
   // ── Execute tool calls ──────────────────────────────────────────────────
-  const executeToolCalls = useCallback(async (toolCalls: ToolCall[]): Promise<{ id: string; result: string }[]> => {
-    const results: { id: string; result: string }[] = []
+  const executeToolCalls = useCallback(async (toolCalls: ToolCall[], queriesOnly = false, queryContext?: AttributeQueryContext): Promise<{ id: string; result: string; attributeQueries?: AttributeQueryResult[] }[]> => {
+    const results: { id: string; result: string; attributeQueries?: AttributeQueryResult[] }[] = []
 
     for (const tc of toolCalls) {
-      const args = JSON.parse(tc.function.arguments)
       let result = ''
+      let attributeQueries: AttributeQueryResult[] | undefined
 
       try {
+        const args = JSON.parse(tc.function.arguments)
+        if (queriesOnly && tc.function.name !== 'query_task_attributes') throw new Error('本次是属性查询，不执行任务修改。')
         switch (tc.function.name) {
+          case 'query_task_attributes': {
+            attributeQueries = queryTaskAttributeReports(tasks, args, currentProject?.custom_fields, queryContext)
+            result = JSON.stringify(attributeQueries)
+            break
+          }
           case 'create_task': {
             const parentId = args.parent_task_code ? codeToId(tasks, args.parent_task_code) : null
             const maxCode = tasks.reduce((m, t) => {
@@ -427,11 +441,11 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         result = `Error: ${err instanceof Error ? err.message : 'Unknown'}`
       }
 
-      results.push({ id: tc.id, result })
+      results.push({ id: tc.id, result, ...(attributeQueries ? { attributeQueries } : {}) })
     }
 
     return results
-  }, [tasks, dependencies, projectId, dispatch])
+  }, [tasks, dependencies, projectId, dispatch, isMinute, currentProject?.custom_fields])
 
   // ── 检测"总结进展"类意图的关键词 ─────────────────────────────────────────
   const isSummaryIntent = (text: string) =>
@@ -560,9 +574,12 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     setLoading(true)
 
     try {
+      const previousAnswer = messages.findLast(message => message.role === 'assistant')
+      const attributeQuestion = isTaskAttributeQueryIntent(text, attributeCatalog, !!previousAnswer?.attributeQueries?.length)
+      const today = fmtLocalDate(new Date())
       // 如果是"总结进展"类意图，前端主动预取数据注入上下文
       let enrichedMessages = newMessages
-      if (isSummaryIntent(text)) {
+      if (!attributeQuestion && isSummaryIntent(text)) {
         const changeData = await prefetchChanges(text)
         // 将变更数据作为附加上下文拼接到用户消息中
         enrichedMessages = [
@@ -573,7 +590,11 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
 
       // Build API messages (strip UI-only fields)
       const apiMessages = enrichedMessages.map(m => {
-        const msg: Record<string, unknown> = { role: m.role, content: m.content }
+        const attributeContext = m.attributeQueries?.map(result => result.ok ? {
+          query: result.query, attribute: result.attribute, total: result.total, matchedTasks: result.matchedTasks,
+          groups: result.groups.slice(0, 60), skipped: result.skipped,
+        } : result)
+        const msg: Record<string, unknown> = { role: m.role, content: m.content + (attributeContext ? `\n【上次属性查询口径与结果，追问时重新查询当前数据】${JSON.stringify(attributeContext)}` : '') }
         if (m.tool_call_id) msg.tool_call_id = m.tool_call_id
         return msg
       })
@@ -599,6 +620,9 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           progress: computeProjectProgressPercent(tasks, currentProject?.status_date),
           prevTaskIds: prevSnapshotTaskIds,
           isMinute: currentProject?.time_granularity === 'minute',
+          customFields: currentProject?.custom_fields ?? [],
+          currentDate: today,
+          queryOnly: attributeQuestion,
       })
 
       const data = await res.json()
@@ -611,7 +635,17 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
 
       if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
         // Execute tool calls
-        const toolResults = await executeToolCalls(assistantMsg.tool_calls)
+        const previousReports = previousAnswer?.attributeQueries?.filter(result => result.ok) ?? []
+        const previousQuery = previousReports.length === 1 ? previousReports[0] : undefined
+        const toolResults = await executeToolCalls(assistantMsg.tool_calls, attributeQuestion, { text, today, previousQuery: previousQuery?.ok ? previousQuery.query : undefined })
+        if (attributeQuestion || assistantMsg.tool_calls.every(call => call.function.name === 'query_task_attributes')) {
+          const attributeQueries = toolResults.flatMap(result => result.attributeQueries ?? [])
+          setMessages(prev => [...prev, {
+            role: 'assistant', content: toolResults.map(result => result.attributeQueries ? result.attributeQueries.map(query => attributeQueryMessage(query, unsavedChanges)).join('\n\n') : result.result).join('\n'),
+            attributeQueries, includesUnsavedChanges: unsavedChanges,
+          }])
+          return
+        }
         const actionSummaries = toolResults.map(r => r.result)
 
         // Add assistant message (with tool_calls info) and tool results to conversation
@@ -636,6 +670,10 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             versionChanges,
             prevTaskIds: prevSnapshotTaskIds,
             isMinute: currentProject?.time_granularity === 'minute',
+            customFields: currentProject?.custom_fields ?? [],
+            currentDate: fmtLocalDate(new Date()),
+            statusDate: currentProject?.status_date ?? null,
+            progress: computeProjectProgressPercent(tasks, currentProject?.status_date),
         })
         const followData = await followRes.json()
         if (!followData.ok) {
@@ -664,7 +702,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
     } finally {
       setLoading(false)
     }
-  }, [input, loading, messages, tasks, dependencies, versions, currentProject, executeToolCalls, prefetchChanges])
+  }, [input, loading, messages, tasks, dependencies, versions, currentProject, executeToolCalls, prefetchChanges, enrichedTasks, prevSnapshotTaskIds, attributeCatalog, unsavedChanges])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -730,6 +768,8 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
 
   // ── Example prompts ─────────────────────────────────────────────────────
   const examples = [
+    `按任务结束日期统计每月的「${attributeCatalog.find(field => field.type === 'number' || field.type === 'money')?.name ?? '搬迁服务器台数'}」合计`,
+    `后3个月的「${attributeCatalog.find(field => field.type === 'number' || field.type === 'money')?.name ?? '搬迁服务器台数'}」分别是多少？请用文字回答。`,
     '总结本周进展',
     '总结本月进展',
     '哪些任务还没有分配责任人？',
@@ -738,7 +778,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
   ]
 
   return (
-    <div className="relative z-30 flex flex-col h-full border-l border-gray-200 bg-white isolate" style={{ width: 400 }}>
+    <div data-ai-chat role="complementary" aria-label="AI助手" className="relative z-30 flex flex-col h-full border-l border-gray-200 bg-white isolate" style={{ width: 400 }}>
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-gray-50">
         <div className="flex items-center gap-2">
@@ -760,7 +800,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         {messages.length === 0 && (
           <div className="space-y-2">
             <p className="text-sm text-gray-500 mb-2">
-              你好！我是 AI 助手，可以帮你管理甘特图中的任务。试试下面的例子：
+              你好！我是 AI 助手，可以管理任务，也可以查询、汇总任务自定义属性，例如每月的搬迁台数或支出金额。点击示例即可填入提问：
             </p>
             <div className="space-y-2">
               {examples.map((ex, i) => (
@@ -777,7 +817,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         )}
 
         {messages.filter(m => m.role !== 'tool').map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+          <div key={i} data-ai-message={msg.role} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[85%] rounded-xl px-3 py-2 text-sm whitespace-pre-wrap ${
               msg.role === 'user'
                 ? 'bg-blue-600 text-white'
@@ -796,6 +836,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
                 </div>
               )}
               {msg.content}
+              {msg.attributeQueries?.map((result, index) => result.ok ? <details key={index} className="mt-2 whitespace-normal"><summary className="cursor-pointer text-xs text-blue-600">查看统计依据与任务明细</summary><AIAttributeReport report={result} unsaved={!!msg.includesUnsavedChanges} /></details> : null)}
             </div>
           </div>
         ))}
@@ -817,6 +858,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
       <div className="border-t border-gray-200 px-3 py-2">
         <div className="flex items-end gap-2">
           <textarea
+            aria-label="AI消息"
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -831,6 +873,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             }}
           />
           <button
+            aria-label="发送AI消息"
             onClick={() => sendMessage()}
             disabled={!input.trim() || loading}
             className="shrink-0 w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center disabled:opacity-40 hover:bg-blue-700 transition-colors cursor-pointer disabled:cursor-not-allowed"
