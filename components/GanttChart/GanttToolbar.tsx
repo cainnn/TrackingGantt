@@ -20,6 +20,7 @@ import type { Task, TaskCustomField } from '@/types'
 import EditTaskModal from './EditTaskModal'
 import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
 import BulkEditPanel from './BulkEditPanel'
+import TaskRepairPanel from './TaskRepairPanel'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { scheduleDurationMinutes } from '@/lib/clientTaskEdit'
@@ -248,6 +249,7 @@ export default function GanttToolbar({
 
 
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
+  const [taskRepairOpen, setTaskRepairOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [retroLogOpen, setRetroLogOpen] = useState(false)
@@ -1592,6 +1594,7 @@ export default function GanttToolbar({
 
         <ToolbarActionMenu label="任务操作" actions={[
           ...(!readOnly ? [
+            { label: '检查与修复', disabled: history.saving || history.uncertain, onSelect: () => setTaskRepairOpen(true) },
             { label: '批量修改任务', disabled: !hasSelection, onSelect: () => setBulkEditOpen(true) },
             { label: '复制选中任务', disabled: !hasSelection, shortcut: 'Ctrl/Cmd+C', divider: true, onSelect: handleCopy },
             { label: '粘贴任务', disabled: clipboard.length === 0, shortcut: 'Ctrl/Cmd+V', onSelect: handlePaste },
@@ -2021,6 +2024,7 @@ export default function GanttToolbar({
 
       {attributeViewTask && <TaskCustomFieldsPanel task={attributeViewTask} fields={taskCustomFields(attributeViewTask, viewSnapshot?.customFields ?? currentProject?.custom_fields)} onClose={() => setAttributeViewTask(null)} />}
       {bulkEditOpen && !readOnly && <BulkEditPanel onClose={() => setBulkEditOpen(false)} />}
+      {taskRepairOpen && !readOnly && <TaskRepairPanel tasks={getFlatOrder(tasks.filter(task => !task.is_deleted))} onClose={() => setTaskRepairOpen(false)} />}
       {/* Edit Task Modal */}
       {editModalOpen && selectedIds.length === 1 && (
         <EditTaskModal

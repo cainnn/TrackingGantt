@@ -5,8 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { initializeDraft, resetDraft, hasDraftChanges, beginDraftSave, failDraftSave } from '@/store/draftHistory'
-import { setTasks, clearTasks, clearViewSnapshot, markDirty } from '@/store/slices/tasksSlice'
-import { applyAutoStartAnchor, runFullCascade } from '@/lib/clientScheduling'
+import { setTasks, clearTasks, clearViewSnapshot } from '@/store/slices/tasksSlice'
 import { toDateTimeStr } from '@/lib/clientTime'
 import type { SaveBaseline } from '@/lib/clientSave'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
@@ -199,44 +198,12 @@ export default function ProjectPage() {
         if (!tr.ok || !tr.value || !plr.ok || !Array.isArray(plr.value)) throw new Error(tr.error ?? '加载项目数据失败')
         dispatch(setCurrentProject(pr.value))
         if (tr.ok && tr.value) {
-          let loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
+          const loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
           const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
-          // 自动起点锚定：无依赖 + auto_schedule 的任务起点不早于
-          //   max(项目开始时间, 当前时间)。
-          // 天级项目把锚点对齐到当天 00:00，避免任务带 sub-day 时间。
-          //
-          // 已设 status_date 的项目视为"用户在主动推进"，跳过 anchor，
-          // 避免历史/示例项目被强行拉到今天造成假延期。
-          const projIsMinute = pr.value?.time_granularity === 'minute'
-          const hasStatusDate = !!pr.value?.status_date
-          const now = new Date()
-          const pad = (n: number) => String(n).padStart(2, '0')
-          const nowStr = projIsMinute
-            ? `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`
-            : `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T00:00:00`
-          const projStartRaw = toDateTimeStr(pr.value?.start_date ?? null)
-          const projStart = !projIsMinute && projStartRaw
-            ? `${projStartRaw.slice(0, 10)}T00:00:00`
-            : projStartRaw
-          const earliest = projStart && projStart > nowStr ? projStart : nowStr
-          const anchored = hasStatusDate
-            ? []
-            : applyAutoStartAnchor(loadedTasks, loadedDeps, earliest)
-          let dirtyIds: string[] = []
-          if (anchored.length > 0) {
-            const byId = new Map(anchored.map(t => [t.id, t]))
-            loadedTasks = loadedTasks.map(t => byId.get(t.id) ?? t)
-            dirtyIds = anchored.map(t => t.id)
-            // 再跑一次级联，让下游跟着前移
-            const cascaded = runFullCascade(loadedTasks, loadedDeps, { isMinute: projIsMinute })
-            if (cascaded.length > 0) {
-              const cByid = new Map(cascaded.map(t => [t.id, t]))
-              loadedTasks = loadedTasks.map(t => cByid.get(t.id) ?? t)
-              dirtyIds = [...new Set([...dirtyIds, ...cascaded.map(t => t.id)])]
-            }
-          }
+          // Loading must preserve the confirmed plan, including an explicit
+          // repair to today before the project start or without a status date.
+          // Date adjustments now require a user operation (检查与修复 / edit).
           dispatch(setTasks({ tasks: loadedTasks, dependencies: loadedDeps }))
-          if (dirtyIds.length > 0) dispatch(markDirty(dirtyIds))
           setLoadedBaseline({
             projectId,
             tasks: tr.value.tasks,
