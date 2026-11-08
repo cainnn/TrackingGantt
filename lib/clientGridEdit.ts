@@ -2,15 +2,7 @@ import type { Task, Dependency } from '../types'
 import { buildTaskScheduleEdit, normalizeScheduleDate, scheduleDurationMinutes } from './clientTaskEdit'
 import { runFullCascade } from './clientScheduling'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from '../components/GanttChart/constants'
-
-function validDate(value: string): boolean {
-  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/)
-  if (!m) return false
-  const [, year, month, day, hour = '0', minute = '0', second = '0'] = m
-  const d = new Date(Date.UTC(+year, +month - 1, +day))
-  return d.getUTCFullYear() === +year && d.getUTCMonth() === +month - 1 && d.getUTCDate() === +day
-    && +hour < 24 && +minute < 60 && +second < 60
-}
+import { parseDateInput } from './clientDateInput'
 
 /** Excel/Sheets plain-text clipboard, including quoted tabs and newlines. */
 export function parseClipboardGrid(text: string): string[][] {
@@ -59,14 +51,23 @@ export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string
     for (let c = 0; c < grid[r].length; c++) {
       const col = columns[startCol + c], value = grid[r][c].trim()
       const fail = (message: string): never => { throw new Error(`第 ${r + 1} 行、第 ${c + 1} 列：${message}`) }
+      if ((col === 'start' || col === 'end') && !tasks.some(candidate => !candidate.is_deleted && candidate.parent_id === task.id)) {
+        const field = col === 'start' ? 'start_date' : 'end_date'
+        const parsed = parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear())
+        if (!parsed) fail('日期无效，应为年-月-日，可附带 HH:mm')
+        if (normalizeScheduleDate(parsed, isMinute) === normalizeScheduleDate(task[field], isMinute)) continue
+        // Explicit pasted dates follow bar movement: pin the user's dates.
+        task.auto_schedule = false
+      }
       if (!gridCellEditable(task, col, tasks, nextDeps)) fail('目标为只读或自动计算字段')
       if (col === 'name') { if (!value) fail('任务名称不能为空'); task.name = value }
       else if (col === 'assignee') task.assignee = value || null
       else if (['duration', 'start', 'end'].includes(col)) {
         const field = col === 'start' ? 'start_date' : col === 'end' ? 'end_date' : 'duration'
         if (field === 'duration' && (!/^\d+$/.test(value) || Number(value) <= 0)) fail('工期应为正整数')
-        if (field !== 'duration' && !validDate(value)) fail('日期无效，应为 YYYY-MM-DD，可附带 HH:mm')
-        const patch = buildTaskScheduleEdit(task, nextDeps, field, value.replace(' ', 'T'), isMinute)
+        const parsed = field === 'duration' ? value : parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear())
+        if (parsed == null) fail('日期无效，应为年-月-日，可附带 HH:mm')
+        const patch = buildTaskScheduleEdit(task, nextDeps, field, parsed!, isMinute)
         if (!Object.keys(patch).length) fail('日期或工期无效，请检查排程方式')
         Object.assign(task, patch)
       } else if (col === 'taskType') {
@@ -78,8 +79,9 @@ export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string
         task.constraint_type = type!.value
         if (!type!.needsDate) task.constraint_date = null
       } else if (col === 'cdate' || col === 'ddate') {
-        const date = value ? normalizeScheduleDate(value.replace(' ', 'T'), isMinute) : null
-        if (value && (!date || !validDate(value))) fail('日期无效')
+        const parsed = value ? parseDateInput(value, isMinute) : ''
+        const date = parsed ? normalizeScheduleDate(parsed, isMinute) : null
+        if (value && !date) fail('日期无效')
         if (col === 'cdate') task.constraint_date = date
         else task.deadline = date
       } else if (col === 'inactive') {

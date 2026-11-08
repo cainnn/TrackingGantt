@@ -9,7 +9,11 @@ import {
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
 import type { Task, Dependency } from '@/types'
+import { taskBranchIds } from '@/lib/taskTree'
+import { buildSaveDiff } from '@/lib/clientSave'
 import EditTaskModal from './EditTaskModal'
+import DateCellEditor from './DateCellEditor'
+import { formatDateDisplay, parseDateInput } from '@/lib/clientDateInput'
 import DependencyTaskPicker from './DependencyTaskPicker'
 import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
@@ -50,8 +54,8 @@ const COL_NAME   = 160
 const COL_ASSIGN =  72
 const COL_PCT    =  48
 const COL_DUR    =  48
-const COL_START  =  80
-const COL_END    =  80
+const COL_START  =  88
+const COL_END    =  88
 const COL_PRED   =  56
 const COL_SUCC   =  56
 const COL_TASK_TYPE = 64
@@ -659,6 +663,7 @@ export default function GanttChart({
   const cancelEditorRef = useRef(false)
   useEffect(() => { cellCommittedRef.current = false }, [cellEdit?.taskId, cellEdit?.field])
   const [gridError, setGridError] = useState('')
+  const [gridNotice, setGridNotice] = useState('')
 
   // ── Panel resize / collapse ─────────────────────────────────────────────
   const [panelW, setPanelW]           = useState(INIT_LEFT_W)
@@ -2043,7 +2048,7 @@ export default function GanttChart({
   }, [editId, tasks, dispatch])
 
   // ── Commit inline cell edit ─────────────────────────────────────────────
-  const commitCellEdit = useCallback(async () => {
+  const commitCellEdit = useCallback(async (valueOverride?: string) => {
     if (!cellEdit || cellCommittedRef.current || readOnly) return
     cellCommittedRef.current = true
     const orig = tasks.find(t => t.id === cellEdit.taskId)
@@ -2053,11 +2058,12 @@ export default function GanttChart({
     if (cellEdit.field === 'assignee') {
       patch = { assignee: cellEdit.value.trim() || null }
     } else {
-      patch = buildTaskScheduleEdit(orig, deps, cellEdit.field, cellEdit.value, isMinute)
+      patch = buildTaskScheduleEdit(orig, deps, cellEdit.field, valueOverride ?? cellEdit.value, isMinute)
     }
 
     if (Object.keys(patch).length === 0) { setCellEdit(null); return }
     const updated = { ...orig, ...patch } as typeof orig
+    if (buildSaveDiff([orig], [], [updated], []).tasksToUpdate.length === 0) { setCellEdit(null); return }
 
 
     const nextTasks = tasks.map(t => t.id === updated.id ? updated : t)
@@ -2348,18 +2354,22 @@ export default function GanttChart({
   // ── Context menu: action handlers ────────────────────────────────────────
   const handleCtxDeleteTask = useCallback((taskId: string) => {
     setCtxMenu(null)
+    if (readOnly) return
+    const ids = taskBranchIds(tasks, [taskId])
+    if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
+    dispatch(labelDraftStep('删除任务及子任务'))
     // 同时移除关联依赖（本地）
-    const relatedDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
+    const relatedDeps = deps.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
     const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
-    const remainTasks = tasks.filter(t => t.id !== taskId)
-    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, [taskId], currentProject?.status_date, { isMinute })
+    const remainTasks = tasks.filter(t => !ids.has(t.id))
+    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, ids, currentProject?.status_date, { isMinute })
     for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([taskId]))
+    dispatch(deleteTasks([...ids]))
     if (cascaded.length > 0) {
       dispatch(updateTasks(cascaded))
       dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute])
+  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute, readOnly])
 
   const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2627,9 +2637,10 @@ export default function GanttChart({
   // Right columns: only include visible optional columns
   const RIGHT_COL_BASES = useMemo(() =>
     OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c =>
-      autoFitColWidths ? autoFitColWidths[c.key] : (colWidthOverrides[c.key] ?? c.width)
+      Math.max(['start', 'end', 'cdate', 'ddate'].includes(c.key) ? (isMinute && ['start', 'end'].includes(c.key) ? 128 : 88) : 0,
+        autoFitColWidths ? autoFitColWidths[c.key] : (colWidthOverrides[c.key] ?? c.width))
     ),
-    [visibleCols, colWidthOverrides, autoFitColWidths])
+    [visibleCols, colWidthOverrides, autoFitColWidths, isMinute])
   const RIGHT_COLS_TOTAL = RIGHT_COL_BASES.reduce((a, b) => a + b, 0)
   const rightColWidths = RIGHT_COL_BASES
   const nameColW = autoFitColWidths ? autoFitColWidths.name : nameW
@@ -2857,8 +2868,13 @@ export default function GanttChart({
     const arrow = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)
     if ((!tab && !enter && !arrow) || (editing && arrow) || e.ctrlKey || e.metaKey || e.altKey) return
     e.preventDefault(); e.stopPropagation()
+    const dateInput = (e.target as HTMLElement).closest('[data-date-editor]')?.querySelector<HTMLInputElement>('input[type="text"]')
+    const dateTask = tasks.find(task => task.id === selectedCell.taskId)
+    const referenceDate = cellEdit?.field === 'end_date' ? dateTask?.end_date : selectedCell.col === 'cdate' ? dateTask?.constraint_date : selectedCell.col === 'ddate' ? dateTask?.deadline : dateTask?.start_date
+    const parsedDate = dateInput ? (dateInput.value.trim() ? parseDateInput(dateInput.value, !!cellEdit && isMinute, Number(referenceDate?.slice(0, 4)) || new Date().getFullYear()) : '') : undefined
+    if (dateInput && (parsedDate == null || (!parsedDate && cellEdit))) { setGridError('日期无效，请输入年-月-日，例如 26-11-04'); return }
     if (editId) void commitName()
-    if (cellEdit) void commitCellEdit()
+    if (cellEdit) void commitCellEdit(parsedDate ?? undefined)
     if (activeEditor) { (e.target as HTMLElement).blur(); setActiveEditor(null) }
     let row = displayRows.findIndex(r => r.task.id === selectedCell.taskId)
     let col = gridColumns.indexOf(selectedCell.col)
@@ -2883,18 +2899,25 @@ export default function GanttChart({
     }
   }
   const handleGridPaste = (e: React.ClipboardEvent) => {
-    if (readOnly || !selectedCell || (e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')) return
+    if (readOnly || !selectedCell) return
     const text = e.clipboardData.getData('text/plain')
+    if ((e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')
+      && !((e.target as HTMLElement).closest('[data-date-editor]') && /[\t\r\n]/.test(text.trimEnd()))) return
     if (!text) return
     e.preventDefault(); e.stopPropagation()
     try {
       const next = applyGridPaste(tasks, deps, displayRows.map(r => r.task.id), gridColumns, selectedCell, text, isMinute)
+      const original = new Map(tasks.map(task => [task.id, task]))
+      const manualCount = next.tasks.filter(task => original.get(task.id)?.auto_schedule !== false && task.auto_schedule === false).length
+      cellCommittedRef.current = true; cancelEditorRef.current = true
+      setCellEdit(null); setActiveEditor(null)
       dispatch(labelDraftStep('粘贴单元格区域'))
       dispatch(setTasks(next))
       dispatch(markDirty(next.editedIds))
       for (const taskId of next.editedIds) dispatch(setEditDescription({ taskId, description: '粘贴表格数据' }))
       setGridError('')
-    } catch (err) { setGridError(err instanceof Error ? err.message : String(err)) }
+      setGridNotice(manualCount ? `已按粘贴日期更新，${manualCount} 个自动排程任务已转为手动排程，可一步撤销。` : '已粘贴单元格，可一步撤销。')
+    } catch (err) { setGridNotice(''); setGridError(err instanceof Error ? err.message : String(err)) }
   }
 
   useEffect(() => {
@@ -3061,6 +3084,7 @@ export default function GanttChart({
 
         {/* Rows */}
         {gridError && <div role="alert" className="bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
+        {gridNotice && <div role="status" className="bg-blue-50 text-blue-700 text-xs px-3 py-2">{gridNotice}<button className="ml-2" onClick={() => setGridNotice('')}>关闭</button></div>}
         <div ref={leftRef} data-gantt-grid tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
              className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
@@ -3083,9 +3107,7 @@ export default function GanttChart({
               .join(',')
             const fmtCell = (s: string | null) => {
               if (!s) return ''
-              return isMinute
-                ? `${s.slice(5, 10)} ${s.slice(11, 16)}`  // 'MM-DD HH:mm'
-                : s.split('T')[0].slice(5)  // 'MM-DD'
+              return formatDateDisplay(s, isMinute)
             }
             const cellRing = (col: OptionalCol | 'name') =>
               selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
@@ -3203,7 +3225,7 @@ export default function GanttChart({
                                className="w-full border border-blue-400 rounded px-1 text-[11px] outline-none"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
-                               onBlur={commitCellEdit}
+                               onBlur={() => commitCellEdit()}
                                onKeyDown={e => {
                                  if (e.key === 'Enter') commitCellEdit()
                                  if (e.key === 'Escape') setCellEdit(null)
@@ -3297,7 +3319,7 @@ export default function GanttChart({
                                className="w-full border border-blue-400 rounded px-1 text-[11px] outline-none text-right"
                                value={cellEdit.value}
                                onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
-                               onBlur={commitCellEdit}
+                               onBlur={() => commitCellEdit()}
                                onKeyDown={e => {
                                  if (e.key === 'Enter') commitCellEdit()
                                  if (e.key === 'Escape') setCellEdit(null)
@@ -3333,16 +3355,9 @@ export default function GanttChart({
                          setCellEdit({ taskId: t.id, field: 'start_date', value: (t.start_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'start_date'
-                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
-                               className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
-                               value={cellEdit.value}
-                               onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
-                               onBlur={commitCellEdit}
-                               onKeyDown={e => {
-                                 if (e.key === 'Enter') commitCellEdit()
-                                 if (e.key === 'Escape') setCellEdit(null)
-                               }}
-                               onClick={e => e.stopPropagation()} />
+                      ? <DateCellEditor label={isMinute ? '开始时间' : '开始日期'} includeTime={isMinute} value={cellEdit.value}
+                          onChange={value => setCellEdit(p => p ? { ...p, value } : null)}
+                          onCommit={value => { void commitCellEdit(value) }} onCancel={() => setCellEdit(null)} />
                       : <span className="text-[11px] text-gray-600">
                           {fmtCell(t.start_date)}
                         </span>
@@ -3368,16 +3383,9 @@ export default function GanttChart({
                          setCellEdit({ taskId: t.id, field: 'end_date', value: (t.end_date ?? '').slice(0, isMinute ? 16 : 10) })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'end_date'
-                      ? <input autoFocus type={isMinute ? 'datetime-local' : 'date'} step={isMinute ? 60 * 15 : undefined}
-                               className="w-full border border-blue-400 rounded px-0.5 text-[11px] outline-none"
-                               value={cellEdit.value}
-                               onChange={e => setCellEdit(p => p ? { ...p, value: e.target.value } : null)}
-                               onBlur={commitCellEdit}
-                               onKeyDown={e => {
-                                 if (e.key === 'Enter') commitCellEdit()
-                                 if (e.key === 'Escape') setCellEdit(null)
-                               }}
-                               onClick={e => e.stopPropagation()} />
+                      ? <DateCellEditor label={isMinute ? '完成时间' : '完成日期'} includeTime={isMinute} value={cellEdit.value}
+                          onChange={value => setCellEdit(p => p ? { ...p, value } : null)}
+                          onCommit={value => { void commitCellEdit(value) }} onCancel={() => setCellEdit(null)} />
                       : <span className="text-[11px] text-gray-600">
                           {fmtCell(t.end_date)}
                         </span>
@@ -3528,18 +3536,15 @@ export default function GanttChart({
                         {!needsDate ? (
                           <span className="text-[11px] text-gray-300 w-full text-center">—</span>
                         ) : editing ? (
-                          <input autoFocus type="date"
-                            className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
-                            defaultValue={dv}
-                            onClick={e => e.stopPropagation()}
-                            onBlur={e => {
+                          <DateCellEditor label="限制日期" defaultValue={dv} allowEmpty
+                            onCommit={value => {
                               if (cancelEditorRef.current) { setActiveEditor(null); return }
-                              handleTaskFieldChange(t.id, { constraint_date: e.target.value || null })
+                              handleTaskFieldChange(t.id, { constraint_date: value || null })
                               setActiveEditor(null)
                             }}
-                            onKeyDown={e => { if (e.key === 'Escape') setActiveEditor(null) }} />
+                            onCancel={() => setActiveEditor(null)} />
                         ) : (
-                          <span className="text-[11px] text-gray-600 w-full">{dv}</span>
+                          <span className="text-[11px] text-gray-600 w-full" title={dv}>{formatDateDisplay(dv)}</span>
                         )}
                       </div>
                     )
@@ -3566,19 +3571,16 @@ export default function GanttChart({
                            onDoubleClick={e => { e.stopPropagation(); if (!readOnly) setActiveEditor({ taskId: t.id, col: 'ddate' }) }}
                            title={overdue ? `计划结束 ${ev} 已超过截止日期 ${dv}` : ''}>
                         {editing ? (
-                          <input autoFocus type="date"
-                            className="text-[11px] border border-blue-400 rounded px-0.5 bg-white w-full focus:outline-none"
-                            defaultValue={dv}
-                            onClick={e => e.stopPropagation()}
-                            onBlur={e => {
+                          <DateCellEditor label="截止日期" defaultValue={dv} allowEmpty
+                            onCommit={value => {
                               if (cancelEditorRef.current) { setActiveEditor(null); return }
-                              handleTaskFieldChange(t.id, { deadline: e.target.value || null })
+                              handleTaskFieldChange(t.id, { deadline: value || null })
                               setActiveEditor(null)
                             }}
-                            onKeyDown={e => { if (e.key === 'Escape') setActiveEditor(null) }} />
+                            onCancel={() => setActiveEditor(null)} />
                         ) : dv ? (
                           <span className={`text-[11px] w-full ${overdue ? 'text-red-600 font-semibold' : 'text-gray-600'}`}>
-                            {overdue && <span className="mr-0.5">⚠</span>}{dv}
+                            {overdue && <span className="mr-0.5">⚠</span>}{formatDateDisplay(dv)}
                           </span>
                         ) : (
                           <span className="text-[11px] text-gray-300 w-full">—</span>

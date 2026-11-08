@@ -19,6 +19,7 @@ import {
   WEEKLY_SUMMARY_OUTPUT_REQUIREMENT,
 } from '@/lib/ai/summaryPolicy'
 import type { Task, Dependency } from '@/types'
+import { taskBranchIds } from '@/lib/taskTree'
 
 function fmtStatusDate(value?: string | null): string {
   if (!value) return '未设置'
@@ -275,7 +276,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
           case 'delete_tasks': {
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
-            const idSet = new Set(ids)
+            const idSet = taskBranchIds(tasks, ids)
             const relatedDeps = dependencies.filter(d => idSet.has(d.from_task_id) || idSet.has(d.to_task_id))
             const remainTasks = tasks.filter(t => !idSet.has(t.id))
             const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
@@ -288,12 +289,12 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
               { isMinute },
             )
             for (const d of relatedDeps) dispatch(removeDependency(d.id))
-            dispatch(deleteTasks(ids))
+            dispatch(deleteTasks([...idSet]))
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))
             }
-            result = `Deleted ${ids.length} task(s)`
+            result = `Deleted ${idSet.size} task(s), including descendants`
             break
           }
 

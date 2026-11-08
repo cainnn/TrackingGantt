@@ -38,6 +38,7 @@ import { buildSaveDiff, recoverSaveRecords, type SaveBaseline } from '@/lib/clie
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
 import type { Dependency } from '@/types'
+import { taskBranchIds } from '@/lib/taskTree'
 
 // ── Flat tree order ───────────────────────────────────────────────────────
 function getFlatOrder(tasks: Task[]): Task[] {
@@ -67,9 +68,10 @@ function calcPercent(task: Task, statusDate: Date): number {
 }
 
 // ── Icon components ───────────────────────────────────────────────────────
-const Ic = ({ children, title, onClick, disabled, active, variant = 'default' }: {
+const Ic = ({ children, title, label, onClick, disabled, active, variant = 'default' }: {
   children: React.ReactNode
   title?: string
+  label?: string
   onClick?: () => void
   disabled?: boolean
   active?: boolean
@@ -87,7 +89,7 @@ const Ic = ({ children, title, onClick, disabled, active, variant = 'default' }:
   }
   return (
     <button className={`${base} ${size} ${colors[variant]}`}
-            type="button" aria-label={title} title={title} onClick={!disabled ? onClick : undefined} disabled={disabled}>
+            type="button" aria-label={label ?? title} title={title} onClick={!disabled ? onClick : undefined} disabled={disabled}>
       {children}
     </button>
   )
@@ -131,6 +133,7 @@ const IcoCollapseAll = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="
 const IcoExpandAll = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 6 4-4 4 4M3 8h10m-9 2 4 4 4-4"/></svg>
 const IcoPromote = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12M5 6 3 8l2 2M3 8h3"/></svg>
 const IcoDemote = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12M3 6l2 2-2 2M2 8h3"/></svg>
+const IcoDelete = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M2 4h12M6 4V2h4v2M4 4l1 10h6l1-10M7 7v4M9 7v4"/></svg>
 
 async function copyText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
@@ -1015,10 +1018,11 @@ export default function GanttToolbar({
 
   // ── Delete（本地）────────────────────────────────────────────────────────
   const handleDeleteTasks = useCallback(() => {
-    if (!hasSelection) return
-    if (!confirm(`确定删除 ${selectedIds.length} 个任务？`)) return
+    if (!hasSelection || readOnly) return
+    const ids = taskBranchIds(tasks, selectedIds)
+    if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
+    dispatch(labelDraftStep('删除任务及子任务'))
     // 同时移除关联依赖
-    const ids = new Set(selectedIds)
     const relatedDeps = dependencies.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
     const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
     const remainTasks = tasks.filter(t => !ids.has(t.id))
@@ -1031,12 +1035,12 @@ export default function GanttToolbar({
         { isMinute },
       )
     for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks(selectedIds))
+    dispatch(deleteTasks([...ids]))
     if (cascaded.length > 0) {
       dispatch(updateTasks(cascaded))
       dispatch(markDirty(cascaded.map(t => t.id)))
     }
-  }, [dispatch, selectedIds, hasSelection, tasks, dependencies, currentProject?.status_date])
+  }, [dispatch, selectedIds, hasSelection, tasks, dependencies, currentProject?.status_date, isMinute, readOnly])
 
   // ── Promote (升级) ────────────────────────────────────────────────────
   const handlePromote = useCallback(async () => {
@@ -1586,9 +1590,10 @@ export default function GanttToolbar({
             <Ic title={`撤销${history.past.at(-1) ? '：' + history.past.at(-1)!.label : ''} (Ctrl+Z)`} disabled={!history.past.length || history.saving || history.uncertain} onClick={() => dispatch(undoDraft())}><IcoUndo /></Ic>
             <Ic title="重做 (Ctrl+Shift+Z / Ctrl+Y)" disabled={!history.future.length || history.saving || history.uncertain} onClick={() => dispatch(redoDraft())}><IcoRedo /></Ic>
             {/* Group 1: Create + Edit */}
-            <LabelIc title="创建任务" icon={<IcoPlus />} label="新建任务" onClick={handleAddTask} />
-            <LabelIc title="编辑任务" icon={<IcoPencil />} label="编辑任务" disabled={selectedIds.length !== 1}
-                     onClick={() => selectedIds.length === 1 && setEditModalOpen(true)} />
+            <Ic title="创建任务" label="新建任务" onClick={handleAddTask}><IcoPlus /></Ic>
+            <Ic title="编辑任务" disabled={selectedIds.length !== 1}
+                onClick={() => selectedIds.length === 1 && setEditModalOpen(true)}><IcoPencil /></Ic>
+            <Ic title="删除选中任务" disabled={!hasSelection} onClick={handleDeleteTasks}><IcoDelete /></Ic>
 
             {sep}
           </>

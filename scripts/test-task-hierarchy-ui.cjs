@@ -36,7 +36,8 @@ async function operation(ids, label) {
   assert.deepEqual((await page.$$eval('[data-task-row] input:checked', inputs => inputs.map(el => el.closest('[data-task-row]').dataset.taskRow))).sort(), [...ids].sort());
   if (label === '提升任务层级' || label === '降为子任务') {
     await click(label === '降为子任务' ? '降低任务层级' : label, '[data-toolbar-row="tasks"]');
-  } else { await click('任务操作'); await click(label); }
+  } else if (label === '删除选中任务') { await click(label, '[data-toolbar-row="tasks"]'); }
+  else { await click('任务操作'); await click(label); }
 }
 async function level(id, expected) {
   await page.waitForFunction((selector, expected) => Number.parseFloat(document.querySelector(selector)?.style.paddingLeft) === 4 + expected * 16, {}, cell(id), expected);

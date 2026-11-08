@@ -1,5 +1,6 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField } from '@/types'
+import { taskBranchIds } from '../../lib/taskTree'
 
 interface Comparison {
   tasks: Task[]
@@ -83,8 +84,10 @@ const tasksSlice = createSlice({
       }
     },
     deleteTasks(state, action: PayloadAction<string[]>) {
-      state.tasks = state.tasks.filter(t => !action.payload.includes(t.id))
-      state.selectedIds = state.selectedIds.filter(id => !action.payload.includes(id))
+      const ids = taskBranchIds(state.tasks, action.payload)
+      state.tasks = state.tasks.filter(task => !ids.has(task.id))
+      state.dependencies = state.dependencies.filter(dep => !ids.has(dep.from_task_id) && !ids.has(dep.to_task_id))
+      state.selectedIds = state.selectedIds.filter(id => !ids.has(id))
     },
     copyTasks(state, action: PayloadAction<string[]>) {
       const ids = new Set(action.payload)
