@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
+import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
 import { buildSaveDiff } from '../lib/clientSave'
 import { runFullCascade } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
@@ -24,6 +24,15 @@ function dependency(type: number): Dependency {
     from_task_id: 'predecessor', to_task_id: 'task-1', type, lag: 0,
   }
 }
+
+test('past-start protection uses calendar dates for day and minute tasks', () => {
+  const today = '2026-11-08T09:00:00'
+  assert.equal(hasPastStartDate('2026-11-07T23:59:00', today), true)
+  assert.equal(hasPastStartDate('2026-11-01', today), true)
+  assert.equal(hasPastStartDate('2026-11-08T00:00:00', today), false)
+  assert.equal(hasPastStartDate('2026-11-09', today), false)
+  assert.equal(hasPastStartDate(null, today), false)
+})
 
 test('day-level inline editing opens in days and preserves an unchanged task through save', () => {
   const original = task()

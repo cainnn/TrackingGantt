@@ -17,7 +17,7 @@ import { runFullCascade, snapTaskUpdatesToDayLevel, wouldCreateCycle } from '@/l
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
-import { defaultTaskSchedule, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
+import { defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
 import { describeLifecycleChange } from '@/lib/taskLifecycleDisplay'
 
 interface Props {
@@ -193,6 +193,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (!autoSchedule) return updated
     if (depList.some(d => d.active !== false && d.to_task_id === target.id)) return updated
     if (!target.start_date || !target.end_date) return updated
+    if (hasPastStartDate(target.start_date)) return updated
     const ct = target.constraint_type
     if (ct && ct !== 'asap' && ct !== 'none') return updated
     const anchor = autoAnchorForTask(target, taskList)
@@ -209,8 +210,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const recascadeAndUpdate = useCallback((nextDeps: Dependency[], nextTasks?: Task[]) => {
     let baseTasks = nextTasks ?? allTasks
     const allChanged: Task[] = []
-    // 删除依赖后，无前置依赖的自动 + 尽早任务回到任务自身锚点：
-    // 父摘要开始 / 状态时间 / 今天当前时间，取较晚者。
+    // 删除依赖后，仅未开始的自动尽早任务回到锚点；历史开始日期保留。
     const anchorCandidates = baseTasks.filter(t => {
       if (t.is_deleted || t.auto_schedule === false || t.is_milestone) return false
       const hadIncoming = deps.some(d => d.active !== false && d.to_task_id === t.id)

@@ -47,6 +47,23 @@ test('bulk move includes descendants once, pins moved leaves and preserves other
   assert.equal(updates.some(t => t.id === '3'), false)
   assert.equal(updates.filter(t => t.id === '2').length, 1)
 })
+
+test('bulk automatic scheduling preserves past dates even when the status or parent anchor is later', () => {
+  for (const isMinute of [false, true]) {
+    const start = isMinute ? '2026-11-01T09:15:00' : '2026-11-01T00:00:00'
+    const end = isMinute ? '2026-11-01T10:45:00' : '2026-11-02T00:00:00'
+    const original = task('2', { parent_id: '1', start_date: start, end_date: end, duration: isMinute ? 90 : 1440, constraint_type: 'asap' })
+    const parent = task('1', { start_date: '2026-11-20T00:00:00', end_date: '2026-11-21T00:00:00' })
+    const updates = buildBulkEdit([parent, original], [], ['2'], { autoSchedule: true }, isMinute, '2026-11-15T00:00:00', '2026-11-08')
+    const updated = updates.find(task => task.id === '2')!
+    assert.deepEqual(updated, { ...original, auto_schedule: true })
+    const noChange = buildBulkEdit([updated], [], ['2'], { autoSchedule: true }, isMinute, '2026-11-15T00:00:00', '2026-11-08')
+    assert.deepEqual(noChange, [])
+    const moved = buildBulkEdit([original], [], ['2'], { autoSchedule: true, shiftMinutes: isMinute ? 15 : 1440 }, isMinute, '2026-11-15T00:00:00', '2026-11-08')[0]
+    assert.notEqual(moved.start_date, original.start_date)
+    assert.equal(moved.auto_schedule, false)
+  }
+})
 test('clipboard paste uses its captured subtree even if originals are removed or changed', () => {
   const source = [task('1'), task('2', { parent_id: '1' })]
   const result = buildTaskCopies([task('3')], [], ['1'], '3', 'after', { tasks: source, dependencies: [] })

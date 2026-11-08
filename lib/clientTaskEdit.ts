@@ -1,6 +1,13 @@
 import type { Dependency, Task } from '@/types'
 import { MIN_PER_DAY, MIN_PER_HOUR, SNAP_INTERVAL, addMinutesStr, diffMinutesStr, toDateTimeStr } from './clientTime'
 
+/** Automatic anchoring must preserve tasks that already started on an earlier day. */
+export function hasPastStartDate(startDate: string | null | undefined, today: string | Date = new Date()): boolean {
+  const start = toDateTimeStr(startDate)
+  const current = toDateTimeStr(today)
+  return !!start && !!current && start.slice(0, 10) < current.slice(0, 10)
+}
+
 export function normalizeScheduleDate(date: string | null | undefined, isMinute: boolean): string | null {
   return toDateTimeStr(isMinute ? date : date?.slice(0, 10))
 }

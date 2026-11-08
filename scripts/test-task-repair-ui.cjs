@@ -57,8 +57,8 @@ async function reload() {
   clicks += await page.evaluate(() => window.__trustedClicks);
   await page.reload({ waitUntil: 'networkidle2' }); await waitForProject();
 }
-async function makeProject(granularity, statusDate) {
-  project = await api('/projects', 'POST', { name: `任务修复验收-${granularity}-${randomUUID().slice(0, 8)}`, start_date: day(12),
+async function makeProject(granularity, statusDate, startDate = day(12)) {
+  project = await api('/projects', 'POST', { name: `任务修复验收-${granularity}-${randomUUID().slice(0, 8)}`, start_date: startDate,
     status_date: statusDate, planning_status: 'draft', time_granularity: granularity, use_template: false });
   fixtures.push(project);
 }
@@ -157,6 +157,61 @@ async function main() {
   await reload(); await saved(); await openCheck(); await previewIds([]); await click('取消', dialog);
   assert.equal(normalized((await state()).tasks[0].start_date), `${today}T23:30`); assert.equal((await versions()).length, 0);
   pass('分钟级保留时分和 95 分钟工期；无状态日期、项目开始在未来时，修复保存后刷新仍保持当天');
+  for (const granularity of ['day', 'minute']) {
+    const minuteMode = granularity === 'minute';
+    await makeProject(granularity, minuteMode ? null : date(10), day(-10));
+    const [inlineId, editorId, bulkA, bulkB, predecessor, orphan] = Array.from({ length: 6 }, randomUUID);
+    const start = minuteMode ? date(-4, '09:15') : date(-4);
+    const end = minuteMode ? date(-4, '10:45') : date(-2);
+    const duration = minuteMode ? 90 : 2880;
+    const rows = [inlineId, editorId, bulkA, bulkB, predecessor, orphan].map((id, index) => ({ id, name: `历史开始-${index + 1}`, task_code: String(index + 1), parent_id: null,
+      order_index: index, start_date: start, end_date: end, duration, auto_schedule: id === orphan, constraint_type: 'asap', duration_unit: granularity }));
+    Object.assign(rows[4], { start_date: minuteMode ? date(-5, '09:15') : date(-6), end_date: start, duration: minuteMode ? 1440 : 2880 });
+    await api(`/tasks/${project.id}`, 'POST', rows);
+    await api(`/dependencies/${project.id}`, 'POST', { from_task_id: predecessor, to_task_id: orphan, type: 2 });
+    clicks += await page.evaluate(() => window.__trustedClicks);
+    await page.goto(`${base}/projects/${project.id}`, { waitUntil: 'networkidle2' }); await waitForProject(); await saved();
+    const baseline = await state(), writesBefore = report.writes.length;
+    const nameCell = id => `[data-task-cell="${id}"][data-col="name"]`;
+    const typeCell = id => `[data-task-cell="${id}"][data-col="taskType"]`;
+    const modal = '[role="dialog"][aria-label="编辑任务"]';
+    const startTexts = await page.$$eval('[data-task-cell][data-col="start"]', cells => Object.fromEntries(cells.map(cell => [cell.dataset.taskCell, cell.textContent.trim()])));
+    await page.click(typeCell(inlineId), { count: 2 }); await page.waitForSelector(`${typeCell(inlineId)} select`);
+    await page.select(`${typeCell(inlineId)} select`, 'auto');
+    await page.waitForFunction(selector => !document.querySelector(`${selector} select`) && document.querySelector(selector).textContent.trim() === '自动', {}, typeCell(inlineId));
+
+    await page.click(nameCell(editorId)); await click('编辑任务'); await page.waitForSelector(modal); await click('限制', modal);
+    const toggle = await page.evaluateHandle(modal => [...document.querySelectorAll(`${modal} label`)].find(label => label.textContent.trim() === '手动排程')?.nextElementSibling, modal);
+    assert.ok(toggle.asElement()); assert.ok(await toggle.evaluate(button => button.classList.contains('bg-blue-500')));
+    await toggle.asElement().click(); await toggle.dispose(); await click('保存', modal); await page.waitForSelector(modal, { hidden: true });
+
+    await page.click(nameCell(bulkA)); await page.click(`[data-task-row="${bulkB}"] input[type=checkbox]`);
+    await click('任务操作'); await click('批量修改任务');
+    await page.select('select[aria-label="批量排程模式"]', 'auto'); await click('应用到草稿');
+    await page.waitForSelector('[role="dialog"][aria-label="批量修改任务"]', { hidden: true });
+
+    await page.click(nameCell(orphan)); await click('编辑任务'); await page.waitForSelector(modal); await click('前置', modal);
+    const relation = await page.evaluateHandle(modal => [...document.querySelectorAll(`${modal} span`)].find(span => span.textContent.trim() === '历史开始-5')?.closest('div.grid'), modal);
+    assert.ok(relation.asElement()); await relation.asElement().click(); await relation.dispose();
+    await click('删除选中的前置关系', modal); await click('保存', modal); await page.waitForSelector(modal, { hidden: true });
+    for (const id of [inlineId, editorId, bulkA, bulkB, orphan]) {
+      assert.equal(await page.$eval(typeCell(id), cell => cell.textContent.trim()), '自动');
+      assert.equal(await page.$eval(`[data-task-cell="${id}"][data-col="start"]`, cell => cell.textContent.trim()), startTexts[id]);
+    }
+    await openCheck(); await previewIds([]); await click('取消', dialog);
+    assert.equal(report.writes.length, writesBefore); assert.deepEqual(await state(), baseline);
+    await click('保存', '[data-toolbar-row="progress"]'); await saved();
+    const persisted = await state(); assert.equal(persisted.dependencies.length, 0);
+    for (const before of baseline.tasks) {
+      const after = persisted.tasks.find(task => task.id === before.id);
+      assert.equal(normalized(after.start_date), normalized(before.start_date)); assert.equal(normalized(after.end_date), normalized(before.end_date)); assert.equal(after.duration, before.duration);
+      assert.equal(after.auto_schedule, before.id !== predecessor);
+    }
+    await reload(); await saved(); await openCheck(); await previewIds([]); await click('取消', dialog);
+    assert.deepEqual(await state(), persisted); assert.equal((await versions()).length, 0);
+    await page.screenshot({ path: path.join(output, `${granularity}-past-start-preserved.png`), fullPage: true });
+    pass(`${granularity === 'day' ? '天级' : '分钟级'}历史任务在表格切自动、编辑窗口切自动、批量设自动及删除最后前置后，原开始/结束/工期保持，保存重进也不推到今天`);
+  }
   assert.deepEqual(report.pageErrors, []); report.trustedClicks = clicks + await page.evaluate(() => window.__trustedClicks); report.passed = true;
 }
 main().catch(async error => {

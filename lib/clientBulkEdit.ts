@@ -1,6 +1,7 @@
 import type { Task, Dependency } from '../types'
 import { addMinutesStr } from './clientTime'
 import { runFullCascade } from './clientScheduling'
+import { hasPastStartDate } from './clientTaskEdit'
 
 export function selectedTreeIds(tasks: Task[], selectedIds: string[]): Set<string> {
   const ids = new Set(selectedIds)
@@ -18,7 +19,7 @@ export interface BulkEdit {
   autoSchedule?: boolean
   shiftMinutes?: number
 }
-export function buildBulkEdit(tasks: Task[], deps: Dependency[], ids: string[], edit: BulkEdit, isMinute: boolean, anchor: string): Task[] {
+export function buildBulkEdit(tasks: Task[], deps: Dependency[], ids: string[], edit: BulkEdit, isMinute: boolean, anchor: string, today: string | Date = new Date()): Task[] {
   const selected = selectedTreeIds(tasks, ids)
   const summaries = new Set(tasks.filter(t => !t.is_deleted).map(t => t.parent_id))
   const shift = edit.shiftMinutes ?? 0
@@ -36,6 +37,7 @@ export function buildBulkEdit(tasks: Task[], deps: Dependency[], ids: string[], 
         // Manual movement must survive the next automatic scheduling pass.
         updated.auto_schedule = false
       } else if (edit.autoSchedule && t.start_date && t.end_date
+          && !hasPastStartDate(t.start_date, today)
           && !deps.some(d => d.to_task_id === t.id && d.active !== false)
           && (!t.constraint_type || ['asap', 'none'].includes(t.constraint_type))) {
         const parentStart = tasks.find(p => p.id === t.parent_id)?.start_date

@@ -22,7 +22,7 @@ import {
   wouldCreateCycle,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
-import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
+import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
@@ -2125,6 +2125,7 @@ export default function GanttChart({
     if (!autoSchedule) return updated
     const hasIncoming = nextDeps.some(d => d.active !== false && d.to_task_id === task.id)
     if (hasIncoming || !task.start_date || !task.end_date) return updated
+    if (hasPastStartDate(task.start_date)) return updated
     const ct = task.constraint_type
     if (ct && ct !== 'asap' && ct !== 'none') return updated
 
@@ -2220,14 +2221,16 @@ export default function GanttChart({
     if (!t) return
 
     if (value === 'empty') {
-      // 空：删除所有入依赖，auto_schedule=true，开始日期设为项目最早任务开始日期
+      // 空：删除所有入依赖并自动排程；已在今天之前开始的任务保留原日期。
       const incoming = deps.filter(d => d.to_task_id === taskId)
       for (const dep of incoming) dispatch(removeDependency(dep.id))
       const remainDeps = deps.filter(d => !incoming.some(x => x.id === d.id))
       const dur = t.duration ?? 0
       const emptyStart = projectStartDate
       const newEnd = addMinutesStr(emptyStart, dur)
-      const updatedEmpty = { ...t, auto_schedule: true, start_date: emptyStart, end_date: newEnd, duration: dur }
+      const updatedEmpty = hasPastStartDate(t.start_date)
+        ? { ...t, auto_schedule: true }
+        : { ...t, auto_schedule: true, start_date: emptyStart, end_date: newEnd, duration: dur }
       dispatch(updateTasks([updatedEmpty]))
       dispatch(markDirty([taskId]))
       dispatch(setEditDescription({ taskId, description: `「${t.name}」排程模式改为无约束` }))
