@@ -34,7 +34,7 @@ import { buildTaskRowMove, taskMoveSelection } from '@/lib/clientTaskMove'
 import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
 import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
-import { applyGridPaste, gridCellEditable } from '@/lib/clientGridEdit'
+import { applyGridPaste, gridCellEditable, gridSelectionRect } from '@/lib/clientGridEdit'
 import type { ChartViewState } from '@/lib/clientViewState'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -680,6 +680,17 @@ export default function GanttChart({
   const [predPopup, setPredPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
   const [succPopup, setSuccPopup] = useState<{ taskId: string; x: number; y: number } | null>(null)
   const [selectedCell, setSelectedCell] = useState<{ taskId: string; col: OptionalCol | 'name' } | null>(null)
+  const [cellRangeEnd, setCellRangeEnd] = useState<{ taskId: string; col: OptionalCol | 'name' } | null>(null)
+  const cellRangeDrag = useRef<{ anchor: { taskId: string; col: OptionalCol | 'name' }; moved: boolean } | null>(null)
+  const cellRangeClickHandled = useRef(false)
+  useEffect(() => {
+    const end = () => {
+      if (cellRangeDrag.current?.moved) cellRangeClickHandled.current = true
+      cellRangeDrag.current = null
+    }
+    window.addEventListener('mouseup', end); window.addEventListener('blur', end)
+    return () => { window.removeEventListener('mouseup', end); window.removeEventListener('blur', end) }
+  }, [])
   const [activeEditor, setActiveEditor] = useState<{ taskId: string; col: OptionalCol } | null>(null)
 
   // ── Post-create edit modal ───────────────────────────────────────────────
@@ -1377,6 +1388,7 @@ export default function GanttChart({
     }
     setSelectedDep(null)
     setSelectedCell(null)
+    setCellRangeEnd(null)
     selectTask(taskId, e)
   }, [selectTask])
 
@@ -2829,6 +2841,32 @@ export default function GanttChart({
   }
 
   const gridColumns = useMemo(() => ['name', ...visibleCols] as (OptionalCol | 'name')[], [visibleCols])
+  const gridRowIds = useMemo(() => displayRows.map(row => row.task.id), [displayRows])
+  const selectedRect = selectedCell ? gridSelectionRect(gridRowIds, gridColumns, selectedCell, cellRangeEnd ?? selectedCell) : null
+  const handleCellRangeStart = (e: React.MouseEvent) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest('input,textarea,select,button,[contenteditable=true]')) return
+    cellRangeClickHandled.current = false
+    const element = (e.target as HTMLElement).closest<HTMLElement>('[data-task-cell]')
+    const col = element?.dataset.col as OptionalCol | undefined
+    if (!element?.dataset.taskCell || !col || !['duration', 'start', 'end', 'cdate', 'ddate'].includes(col) || e.ctrlKey || e.metaKey) {
+      setCellRangeEnd(null); return
+    }
+    e.preventDefault()
+    leftRef.current?.focus({ preventScroll: true })
+    const cell = { taskId: element.dataset.taskCell, col }
+    const anchor = e.shiftKey && selectedCell && gridRowIds.includes(selectedCell.taskId) && gridColumns.includes(selectedCell.col) ? selectedCell : cell
+    setSelectedCell(anchor); setCellRangeEnd(cell)
+    cellRangeDrag.current = { anchor, moved: e.shiftKey }
+  }
+  const handleCellRangeMove = (e: React.MouseEvent) => {
+    const gesture = cellRangeDrag.current
+    if (!gesture || e.buttons !== 1) return
+    const element = (e.target as HTMLElement).closest<HTMLElement>('[data-task-cell]')
+    const col = element?.dataset.col as OptionalCol | 'name' | undefined
+    if (!element?.dataset.taskCell || !col || !gridColumns.includes(col)) return
+    if (element.dataset.taskCell !== gesture.anchor.taskId || col !== gesture.anchor.col) gesture.moved = true
+    if (gesture.moved) { e.preventDefault(); setCellRangeEnd({ taskId: element.dataset.taskCell, col }) }
+  }
   const beginCellEditing = useCallback((cell: { taskId: string; col: OptionalCol | 'name' }) => {
     if (readOnly) return
     const task = tasks.find(t => t.id === cell.taskId)
@@ -2859,6 +2897,7 @@ export default function GanttChart({
       e.preventDefault(); e.stopPropagation()
       cancelEditorRef.current = true; cellCommittedRef.current = true; nameCommittedRef.current = true
       setEditId(null); setCellEdit(null); setActiveEditor(null); setGridError('')
+      cellRangeDrag.current = null; setCellRangeEnd(null)
       requestAnimationFrame(() => leftRef.current?.focus({ preventScroll: true }))
       return
     }
@@ -2871,13 +2910,14 @@ export default function GanttChart({
     const dateInput = (e.target as HTMLElement).closest('[data-date-editor]')?.querySelector<HTMLInputElement>('input[type="text"]')
     const dateTask = tasks.find(task => task.id === selectedCell.taskId)
     const referenceDate = cellEdit?.field === 'end_date' ? dateTask?.end_date : selectedCell.col === 'cdate' ? dateTask?.constraint_date : selectedCell.col === 'ddate' ? dateTask?.deadline : dateTask?.start_date
-    const parsedDate = dateInput ? (dateInput.value.trim() ? parseDateInput(dateInput.value, !!cellEdit && isMinute, Number(referenceDate?.slice(0, 4)) || new Date().getFullYear()) : '') : undefined
+    const parsedDate = dateInput ? (dateInput.value.trim() ? parseDateInput(dateInput.value, !!cellEdit && isMinute, Number(referenceDate?.slice(0, 4)) || new Date().getFullYear(), referenceDate) : '') : undefined
     if (dateInput && (parsedDate == null || (!parsedDate && cellEdit))) { setGridError('日期无效，请输入年-月-日，例如 26-11-04'); return }
     if (editId) void commitName()
     if (cellEdit) void commitCellEdit(parsedDate ?? undefined)
     if (activeEditor) { (e.target as HTMLElement).blur(); setActiveEditor(null) }
-    let row = displayRows.findIndex(r => r.task.id === selectedCell.taskId)
-    let col = gridColumns.indexOf(selectedCell.col)
+    const cursor = e.shiftKey && arrow && !editing ? cellRangeEnd ?? selectedCell : selectedCell
+    let row = displayRows.findIndex(r => r.task.id === cursor.taskId)
+    let col = gridColumns.indexOf(cursor.col)
     const direction = e.shiftKey ? -1 : 1
     const total = displayRows.length * gridColumns.length
     for (let tries = 0; tries < total; tries++) {
@@ -2889,7 +2929,8 @@ export default function GanttChart({
       const task = displayRows[row].task
       if (tab && !gridCellEditable(task, gridColumns[col], tasks, deps)) continue
       const next = { taskId: task.id, col: gridColumns[col] }
-      setSelectedCell(next)
+      if (e.shiftKey && arrow && !editing) setCellRangeEnd(next)
+      else { setSelectedCell(next); setCellRangeEnd(null) }
       dispatch(setSelectedIds([task.id])); selectionAnchor.current = task.id
       requestAnimationFrame(() => {
         leftRef.current?.focus({ preventScroll: true })
@@ -2901,18 +2942,21 @@ export default function GanttChart({
   const handleGridPaste = (e: React.ClipboardEvent) => {
     if (readOnly || !selectedCell) return
     const text = e.clipboardData.getData('text/plain')
+    const inputCell = (e.target as HTMLElement).closest<HTMLElement>('[data-task-cell]')
     if ((e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')
-      && !((e.target as HTMLElement).closest('[data-date-editor]') && /[\t\r\n]/.test(text.trimEnd()))) return
+      && !(inputCell && ['duration', 'start', 'end', 'cdate', 'ddate'].includes(inputCell.dataset.col ?? '') && /[\t\r\n]/.test(text.trimEnd()))) return
     if (!text) return
     e.preventDefault(); e.stopPropagation()
     try {
-      const next = applyGridPaste(tasks, deps, displayRows.map(r => r.task.id), gridColumns, selectedCell, text, isMinute)
+      const next = applyGridPaste(tasks, deps, gridRowIds, gridColumns, selectedCell, text, isMinute, cellRangeEnd)
       const original = new Map(tasks.map(task => [task.id, task]))
       const manualCount = next.tasks.filter(task => original.get(task.id)?.auto_schedule !== false && task.auto_schedule === false).length
       cellCommittedRef.current = true; cancelEditorRef.current = true
       setCellEdit(null); setActiveEditor(null)
       dispatch(labelDraftStep('粘贴单元格区域'))
       dispatch(setTasks(next))
+      setSelectedCell({ ...next.selection.start, col: next.selection.start.col as OptionalCol | 'name' })
+      setCellRangeEnd({ ...next.selection.end, col: next.selection.end.col as OptionalCol | 'name' })
       dispatch(markDirty(next.editedIds))
       for (const taskId of next.editedIds) dispatch(setEditDescription({ taskId, description: '粘贴表格数据' }))
       setGridError('')
@@ -3004,9 +3048,15 @@ export default function GanttChart({
 
   // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex h-full overflow-hidden select-none"
+    <div className="flex flex-col h-full overflow-hidden select-none"
          style={{ fontFamily:'system-ui,sans-serif', fontSize:13,
                   cursor: (splitterDrag || nameDrag) ? 'col-resize' : undefined }}>
+      {gridError && <div role="alert" className="flex-none bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
+      {gridNotice && <div role="status" className="flex-none bg-blue-50 text-blue-700 text-xs px-3 py-2">{gridNotice}<button className="ml-2" onClick={() => setGridNotice('')}>关闭</button></div>}
+      <div role="status" className="flex-none bg-blue-50 text-blue-700 text-xs px-3 py-1 whitespace-nowrap overflow-hidden">{selectedRect && (selectedRect.bottom > selectedRect.top || selectedRect.right > selectedRect.left)
+        ? `已选 ${selectedRect.bottom - selectedRect.top + 1} 行 × ${selectedRect.right - selectedRect.left + 1} 列，可粘贴 Excel 区域或用单个值填充；Esc 取消选区。`
+        : '拖选或 Shift 连选日期、时间、持续时间单元格，可批量粘贴。'}</div>
+      <div className="flex flex-1 min-h-0 overflow-hidden">
 
       {(drag?.dragging || (tooltipTask && !drag && !connect && !ctxMenu)) && (() => {
         const task = tasks.find(t => t.id === (drag?.taskId ?? tooltipTask))
@@ -3083,9 +3133,9 @@ export default function GanttChart({
         </div>
 
         {/* Rows */}
-        {gridError && <div role="alert" className="bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
-        {gridNotice && <div role="status" className="bg-blue-50 text-blue-700 text-xs px-3 py-2">{gridNotice}<button className="ml-2" onClick={() => setGridNotice('')}>关闭</button></div>}
-        <div ref={leftRef} data-gantt-grid tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
+        <div ref={leftRef} data-gantt-grid data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
+             onMouseDownCapture={handleCellRangeStart} onMouseMoveCapture={handleCellRangeMove}
+             onClickCapture={event => { if (cellRangeClickHandled.current) { cellRangeClickHandled.current = false; event.preventDefault(); event.stopPropagation(); leftRef.current?.focus({ preventScroll: true }) } }}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
              className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
@@ -3109,8 +3159,11 @@ export default function GanttChart({
               if (!s) return ''
               return formatDateDisplay(s, isMinute)
             }
-            const cellRing = (col: OptionalCol | 'name') =>
-              selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
+            const cellRing = (col: OptionalCol | 'name') => {
+              const column = gridColumns.indexOf(col)
+              if (selectedRect && i >= selectedRect.top && i <= selectedRect.bottom && column >= selectedRect.left && column <= selectedRect.right) return 'ring-1 ring-inset ring-blue-400 bg-blue-100'
+              return selectedCell?.taskId === t.id && selectedCell?.col === col ? 'ring-2 ring-inset ring-blue-500' : ''
+            }
             const pickCell = (col: OptionalCol | 'name') => () => { setSelectedCell({ taskId: t.id, col }); leftRef.current?.focus({ preventScroll: true }) }
             return (
               <React.Fragment key={t.id}>
@@ -4767,6 +4820,7 @@ export default function GanttChart({
           onClose={() => setEditModalTaskId(null)}
         />
       )}
+      </div>
     </div>
   )
 }

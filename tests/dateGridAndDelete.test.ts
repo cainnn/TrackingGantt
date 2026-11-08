@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { configureStore } from '@reduxjs/toolkit'
 import type { Task, Dependency } from '../types'
 import { parseDateInput, formatDateDisplay } from '../lib/clientDateInput'
-import { applyGridPaste } from '../lib/clientGridEdit'
+import { applyGridPaste, gridSelectionRect } from '../lib/clientGridEdit'
 import { taskBranchIds } from '../lib/taskTree'
 import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, labelDraftStep, snapshotDraft, undoDraft, redoDraft } from '../store/draftHistory'
@@ -66,6 +66,37 @@ test('minute date paste keeps time-of-day and exact stored minute duration', () 
   assert.equal(result.tasks[0].duration, 90)
   assert.equal(result.tasks[0].start_date, '2026-11-04T09:15:00')
   assert.equal(result.tasks[0].end_date, '2026-11-04T10:45:00')
+})
+
+test('rectangular selection uses visible order, fills single values and accepts differently sized clipboard data', () => {
+  const tasks = [task('a'), task('b'), task('hidden')]
+  const rows = ['b', 'a'], columns = ['end', 'duration', 'start']
+  assert.deepEqual(gridSelectionRect(rows, columns, { taskId: 'a', col: 'start' }, { taskId: 'b', col: 'duration' }), { top: 0, bottom: 1, left: 1, right: 2 })
+  const result = applyGridPaste(tasks, [], rows, columns, { taskId: 'a', col: 'duration' }, '5天', false, { taskId: 'b', col: 'duration' })
+  assert.deepEqual(result.tasks.map(t => t.duration), [7200, 7200, 1440])
+  assert.equal(result.selection.start.taskId, 'b')
+  assert.equal(result.selection.end.taskId, 'a')
+  assert.equal(result.tasks[0].end_date?.slice(0, 10), '2026-11-06')
+  const expanded = applyGridPaste(tasks, [], ['a', 'b', 'hidden'], ['duration'], { taskId: 'a', col: 'duration' }, '1\n2\n3', false, { taskId: 'b', col: 'duration' })
+  assert.deepEqual(expanded.tasks.map(t => t.duration), [1440, 2880, 4320])
+  assert.equal(expanded.selection.end.taskId, 'hidden')
+  const smaller = applyGridPaste(tasks, [], ['a', 'b', 'hidden'], ['duration', 'start', 'end'], { taskId: 'a', col: 'duration' }, '2\t20261101', false, { taskId: 'b', col: 'end' })
+  assert.deepEqual(smaller.tasks.map(t => t.duration), [2880, 1440, 1440])
+  assert.deepEqual(smaller.selection.end, { taskId: 'a', col: 'start' })
+  assert.deepEqual(tasks.map(t => t.duration), [1440, 1440, 1440])
+})
+
+test('selected minute/time regions preserve each task date and accept duration units', () => {
+  const tasks = [{ ...task('a'), start_date: '2026-11-01T08:00:00', end_date: '2026-11-01T09:00:00', duration: 60 },
+    { ...task('b'), start_date: '2026-11-02T08:00:00', end_date: '2026-11-02T09:00:00', duration: 60 }]
+  const result = applyGridPaste(tasks, [], ['a', 'b'], ['start', 'end'], { taskId: 'a', col: 'start' }, '09:15\t10:45', true, { taskId: 'b', col: 'end' })
+  assert.deepEqual(result.tasks.map(t => [t.start_date, t.end_date, t.duration]), [
+    ['2026-11-01T09:15:00', '2026-11-01T10:45:00', 90], ['2026-11-02T09:15:00', '2026-11-02T10:45:00', 90],
+  ])
+  const durations = applyGridPaste(tasks, [], ['a', 'b'], ['duration'], { taskId: 'a', col: 'duration' }, '1.5小时\n45分钟', true, { taskId: 'b', col: 'duration' })
+  assert.deepEqual(durations.tasks.map(t => t.duration), [90, 45])
+  assert.equal(parseDateInput('9:30', true, 2026, '2026-11-04'), '2026-11-04T09:30')
+  assert.equal(parseDateInput('25:30', true, 2026, '2026-11-04'), null)
 })
 
 test('deleting a selected parent removes every descendant and their links as one undoable step', async () => {

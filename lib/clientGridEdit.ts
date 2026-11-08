@@ -4,6 +4,26 @@ import { runFullCascade } from './clientScheduling'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from '../components/GanttChart/constants'
 import { parseDateInput } from './clientDateInput'
 
+export interface GridCell { taskId: string; col: string }
+
+export function gridSelectionRect(rowIds: string[], columns: string[], anchor: GridCell, extent: GridCell = anchor) {
+  const a = rowIds.indexOf(anchor.taskId), b = rowIds.indexOf(extent.taskId)
+  const x = columns.indexOf(anchor.col), y = columns.indexOf(extent.col)
+  if (Math.min(a, b, x, y) < 0) return null
+  return { top: Math.min(a, b), bottom: Math.max(a, b), left: Math.min(x, y), right: Math.max(x, y) }
+}
+
+/** Convert explicit units to the project's input unit without silently rounding. */
+function durationFromClipboard(value: string, isMinute: boolean): string | null {
+  const match = value.normalize('NFKC').match(/^(\d+(?:\.\d+)?)\s*(天|日|d|days?|小时|h|hours?|分钟|分|m|mins?|minutes?)?$/i)
+  if (!match) return null
+  const unit = (match[2] ?? '').toLowerCase()
+  const factor = /^(天|日|d|days?)$/.test(unit) ? 1440 : /^(小时|h|hours?)$/.test(unit) ? 60 : unit ? 1 : isMinute ? 1 : 1440
+  const duration = Number(match[1]) * factor
+  const input = duration / (isMinute ? 1 : 1440)
+  return Number.isSafeInteger(duration) && Number.isSafeInteger(input) && input > 0 ? String(input) : null
+}
+
 /** Excel/Sheets plain-text clipboard, including quoted tabs and newlines. */
 export function parseClipboardGrid(text: string): string[][] {
   const rows: string[][] = []
@@ -37,11 +57,21 @@ export function gridCellEditable(task: Task, col: string, tasks: Task[], deps: D
   return ['taskType', 'ddate', 'inactive', 'pred', 'succ'].includes(col)
 }
 
-export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string[], columns: string[], anchor: { taskId: string; col: string }, text: string, isMinute: boolean): { tasks: Task[]; dependencies: Dependency[]; editedIds: string[] } {
-  const grid = parseClipboardGrid(text)
+export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string[], columns: string[], anchor: GridCell, text: string, isMinute: boolean, extent?: GridCell | null) {
+  let grid = parseClipboardGrid(text)
+  const rect = gridSelectionRect(rowIds, columns, anchor, extent ?? anchor)
+  if (!rect) throw new Error('请先选中可见的目标单元格')
+  const { top: startRow, left: startCol } = rect
+  if (rect.bottom > startRow || rect.right > startCol) {
+    const height = rect.bottom - startRow + 1, width = rect.right - startCol + 1
+    const sourceWidth = grid[0].length
+    if (height * width > 5000) throw new Error('一次最多粘贴 5000 个单元格，请缩小选区')
+    if (!grid.some(row => row.length !== sourceWidth) && height % grid.length === 0 && width % sourceWidth === 0) {
+      const source = grid
+      grid = Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, col) => source[row % source.length][col % sourceWidth]))
+    }
+  }
   if (grid.reduce((n, r) => n + r.length, 0) > 5000) throw new Error('一次最多粘贴 5000 个单元格，请分批粘贴或使用 Excel 导入')
-  const startRow = rowIds.indexOf(anchor.taskId), startCol = columns.indexOf(anchor.col)
-  if (startRow < 0 || startCol < 0) throw new Error('请先选中可见的目标单元格')
   if (grid.length + startRow > rowIds.length || grid.some(r => r.length + startCol > columns.length)) throw new Error('粘贴范围超出可见任务或列，请调整目标位置')
   const byId = new Map(tasks.map(t => [t.id, { ...t }]))
   const nextDeps = deps.map(d => ({ ...d }))
@@ -53,7 +83,7 @@ export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string
       const fail = (message: string): never => { throw new Error(`第 ${r + 1} 行、第 ${c + 1} 列：${message}`) }
       if ((col === 'start' || col === 'end') && !tasks.some(candidate => !candidate.is_deleted && candidate.parent_id === task.id)) {
         const field = col === 'start' ? 'start_date' : 'end_date'
-        const parsed = parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear())
+        const parsed = parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear(), task[field])
         if (!parsed) fail('日期无效，应为年-月-日，可附带 HH:mm')
         if (normalizeScheduleDate(parsed, isMinute) === normalizeScheduleDate(task[field], isMinute)) continue
         // Explicit pasted dates follow bar movement: pin the user's dates.
@@ -64,9 +94,8 @@ export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string
       else if (col === 'assignee') task.assignee = value || null
       else if (['duration', 'start', 'end'].includes(col)) {
         const field = col === 'start' ? 'start_date' : col === 'end' ? 'end_date' : 'duration'
-        if (field === 'duration' && (!/^\d+$/.test(value) || Number(value) <= 0)) fail('工期应为正整数')
-        const parsed = field === 'duration' ? value : parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear())
-        if (parsed == null) fail('日期无效，应为年-月-日，可附带 HH:mm')
+        const parsed = field === 'duration' ? durationFromClipboard(value, isMinute) : parseDateInput(value, isMinute, Number((task[field] ?? '').slice(0, 4)) || new Date().getFullYear(), task[field])
+        if (parsed == null) fail(field === 'duration' ? `工期应为正整数${isMinute ? '分钟' : '天'}，也可填写明确单位` : '日期无效，应为年-月-日，可附带 HH:mm')
         const patch = buildTaskScheduleEdit(task, nextDeps, field, parsed!, isMinute)
         if (!Object.keys(patch).length) fail('日期或工期无效，请检查排程方式')
         Object.assign(task, patch)
@@ -100,5 +129,6 @@ export function applyGridPaste(tasks: Task[], deps: Dependency[], rowIds: string
   }
   const next = tasks.map(t => byId.get(t.id)!)
   for (const task of runFullCascade(next, nextDeps, { isMinute })) byId.set(task.id, task)
-  return { tasks: tasks.map(t => byId.get(t.id)!), dependencies: nextDeps, editedIds }
+  return { tasks: tasks.map(t => byId.get(t.id)!), dependencies: nextDeps, editedIds,
+    selection: { start: { taskId: rowIds[startRow], col: columns[startCol] }, end: { taskId: rowIds[startRow + grid.length - 1], col: columns[startCol + Math.max(...grid.map(row => row.length)) - 1] } } }
 }

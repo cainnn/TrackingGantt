@@ -1,7 +1,10 @@
 /** Unambiguous year-first dates from typed input and Excel plain-text cells. */
-export function parseDateInput(input: string, includeTime = false, referenceYear = new Date().getFullYear()): string | null {
+export function parseDateInput(input: string, includeTime = false, referenceYear = new Date().getFullYear(), referenceDate?: string | null): string | null {
   const text = input.normalize('NFKC').trim().replace(/^'/, '')
   if (!text) return null
+  if (includeTime && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(text) && /^\d{4}-\d{2}-\d{2}/.test(referenceDate ?? '')) {
+    return parseDateInput(`${referenceDate!.slice(0, 10)} ${text}`, true, referenceYear)
+  }
   const match = text.match(/^(\d{4}|\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/)
     ?? text.match(/^(\d{4})(\d{2})(\d{2})$/)
   if (match) {
