@@ -34,7 +34,9 @@ async function operation(ids, label) {
   await page.click(cell(ids[0]));
   for (const id of ids.slice(1)) await page.click(`[data-task-row="${id}"] input[type=checkbox]`);
   assert.deepEqual((await page.$$eval('[data-task-row] input:checked', inputs => inputs.map(el => el.closest('[data-task-row]').dataset.taskRow))).sort(), [...ids].sort());
-  await click('任务操作'); await click(label);
+  if (label === '提升任务层级' || label === '降为子任务') {
+    await click(label === '降为子任务' ? '降低任务层级' : label, '[data-toolbar-row="tasks"]');
+  } else { await click('任务操作'); await click(label); }
 }
 async function level(id, expected) {
   await page.waitForFunction((selector, expected) => Number.parseFloat(document.querySelector(selector)?.style.paddingLeft) === 4 + expected * 16, {}, cell(id), expected);
@@ -105,7 +107,7 @@ async function main() {
   await api(`/tasks/${project.id}`, 'POST', [make(a, '父任务 A', null, 0, 1), make(b, '子任务 B', a, 1, 2),
     make(c, '子任务 C', a, 0, 3), make(d, '父任务 D', null, 1, 4), make(e, '子任务 E', d, 0, 5), make(f, '任务 F', null, 2, 6)]);
   browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox'] });
-  page = await browser.newPage(); await page.setViewport({ width: 1680, height: 1080 });
+  page = await browser.newPage(); await page.setViewport({ width: 1680, height: 1080, deviceScaleFactor: 2 });
   page.setDefaultTimeout(30000); page.setDefaultNavigationTimeout(60000);
   await page.evaluateOnNewDocument(() => { window.__trustedClicks = 0; document.addEventListener('click', e => { if (e.isTrusted) window.__trustedClicks++; }, true); });
   page.on('pageerror', e => report.pageErrors.push(e.message));
@@ -126,6 +128,26 @@ async function main() {
   });
   await page.goto(`${base}/login`, { waitUntil: 'networkidle2' }); await loginAndOpen();
   const initialIds = [a, c, b, d, e, f], beforeDrag = await state();
+  for (const label of ['全部折叠', '全部展开', '提升任务层级', '降低任务层级']) {
+    const button = await page.$(`[data-toolbar-row="tasks"] button[aria-label="${label}"]`);
+    assert.ok(button, `Always visible toolbar icon: ${label}`);
+    assert.equal(await button.evaluate(element => element.textContent.trim()), '');
+    assert.equal(await button.evaluate(element => element.title), label);
+    assert.equal((await button.$$('svg')).length, 1);
+    if (label.includes('层级')) assert.equal(await button.evaluate(element => element.disabled), true);
+  }
+  await click('全部折叠', '[data-toolbar-row="tasks"]'); await expectIds([a, d, f]);
+  await click('全部折叠', '[data-toolbar-row="tasks"]'); await expectIds([a, d, f]);
+  await click('全部展开', '[data-toolbar-row="tasks"]'); await expectIds(initialIds);
+  assert.equal(await page.$eval('[data-action="save-plan"]', button => button.disabled), true);
+  await page.click(cell(b));
+  await page.waitForFunction(() => ['提升任务层级', '降低任务层级'].every(label => document.querySelector(`[data-toolbar-row="tasks"] button[aria-label="${label}"]`)?.disabled === false));
+  await page.$eval('[data-toolbar-row="tasks"]', element => element.scrollIntoView({ block: 'nearest' }));
+  await (await page.$('[data-toolbar-row="tasks"]')).screenshot({ path: path.join(output, 'main-toolbar-icons.png') });
+  await (await page.$('[role="group"][aria-label="任务层级"]')).screenshot({ path: path.join(output, 'toolbar-hierarchy-icons.png') });
+  await click('清除选择');
+  assert.equal(report.writes.length, 0); assert.deepEqual(await state(), beforeDrag);
+  pass('主工具栏常显四个纯图标按钮，悬停名称完整；无选择时升降级置灰，全部折叠/展开不产生待保存更改');
   assert.equal(await page.$eval(`[data-task-drag-handle="${f}"]`, el => getComputedStyle(el).opacity), '1');
   const rowTopBefore = await page.$eval(cell(a), el => el.getBoundingClientRect().top);
   await startNameDrag(f, a);

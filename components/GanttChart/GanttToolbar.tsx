@@ -87,7 +87,7 @@ const Ic = ({ children, title, onClick, disabled, active, variant = 'default' }:
   }
   return (
     <button className={`${base} ${size} ${colors[variant]}`}
-            title={title} onClick={!disabled ? onClick : undefined} disabled={disabled}>
+            type="button" aria-label={title} title={title} onClick={!disabled ? onClick : undefined} disabled={disabled}>
       {children}
     </button>
   )
@@ -127,6 +127,10 @@ const IcoSearch  = () => <svg viewBox="0 0 16 16" width="13" height="13" fill="n
 const IcoRefresh = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M14 8a6 6 0 0 0-10-4.5M2 8a6 6 0 0 1 10 4.5" strokeLinecap="round"/><path d="M14 2v4h-4M2 14v-4h4" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoDownload = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
 const IcoUpload   = () => <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M8 10V2M5 5l3-3 3 3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/></svg>
+const IcoCollapseAll = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 2 4 4 4-4M3 8h10m-9 6 4-4 4 4"/></svg>
+const IcoExpandAll = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="m4 6 4-4 4 4M3 8h10m-9 2 4 4 4-4"/></svg>
+const IcoPromote = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12M5 6 3 8l2 2M3 8h3"/></svg>
+const IcoDemote = () => <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h12M8 6.5h6M8 9.5h6M2 13h12M3 6l2 2-2 2M2 8h3"/></svg>
 
 async function copyText(text: string): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
@@ -1605,6 +1609,15 @@ export default function GanttToolbar({
           { label: '定位到选中任务', disabled: !hasSelection, onSelect: onFocusTask },
           ...(!readOnly ? [{ label: '删除选中任务', disabled: !hasSelection, danger: true, divider: true, onSelect: handleDeleteTasks }] : []),
         ]} />
+
+        {sep}
+
+        <div role="group" aria-label="任务层级" className="inline-flex items-center gap-1.5">
+          <Ic title="全部折叠" onClick={onCollapseAll}><IcoCollapseAll /></Ic>
+          <Ic title="全部展开" onClick={onExpandAll}><IcoExpandAll /></Ic>
+          <Ic title="提升任务层级" disabled={readOnly || !hasSelection} onClick={handlePromote}><IcoPromote /></Ic>
+          <Ic title="降低任务层级" disabled={readOnly || !hasSelection} onClick={handleDemote}><IcoDemote /></Ic>
+        </div>
 
         {sep}
 
