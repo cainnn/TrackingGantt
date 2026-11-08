@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { configureStore } from '@reduxjs/toolkit'
 import type { Task, Dependency } from '../types'
 import { parseDateInput, formatDateDisplay } from '../lib/clientDateInput'
-import { applyGridPaste, gridSelectionRect } from '../lib/clientGridEdit'
+import { applyGridPaste, gridSelectionRect, parseClipboardGrid, serializeClipboardGrid } from '../lib/clientGridEdit'
 import { taskBranchIds } from '../lib/taskTree'
 import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, labelDraftStep, snapshotDraft, undoDraft, redoDraft } from '../store/draftHistory'
@@ -84,6 +84,17 @@ test('rectangular selection uses visible order, fills single values and accepts 
   assert.deepEqual(smaller.tasks.map(t => t.duration), [2880, 1440, 1440])
   assert.deepEqual(smaller.selection.end, { taskId: 'a', col: 'start' })
   assert.deepEqual(tasks.map(t => t.duration), [1440, 1440, 1440])
+})
+
+test('copied cell ranges remain Excel-compatible with quoted names, tabs and multiline values', () => {
+  const grid = [['3天', '26-08-08', '26-08-11'], ['任务"名称', '带\t制表', '多行\r\n文本']]
+  assert.deepEqual(parseClipboardGrid(serializeClipboardGrid(grid)), [['3天', '26-08-08', '26-08-11'], ['任务"名称', '带\t制表', '多行\n文本']])
+  const tasks = [task('a'), task('b')]
+  const selected = { taskId: 'b', col: 'duration' }
+  const pasted = applyGridPaste(tasks, [], ['a', 'b'], ['duration', 'start', 'end'], { taskId: 'a', col: 'duration' }, '3天\t20260808\t20260811', false, { ...selected, col: 'end' })
+  assert.deepEqual(pasted.tasks.map(t => [t.start_date, t.end_date, t.duration]), [
+    ['2026-08-08T00:00:00', '2026-08-11T00:00:00', 4320], ['2026-08-08T00:00:00', '2026-08-11T00:00:00', 4320],
+  ])
 })
 
 test('selected minute/time regions preserve each task date and accept duration units', () => {

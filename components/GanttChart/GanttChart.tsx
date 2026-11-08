@@ -34,7 +34,7 @@ import { buildTaskRowMove, taskMoveSelection } from '@/lib/clientTaskMove'
 import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
 import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
-import { applyGridPaste, gridCellEditable, gridSelectionRect } from '@/lib/clientGridEdit'
+import { applyGridPaste, gridCellEditable, gridSelectionRect, serializeClipboardGrid } from '@/lib/clientGridEdit'
 import type { ChartViewState } from '@/lib/clientViewState'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -2905,6 +2905,15 @@ export default function GanttChart({
     const tab = e.key === 'Tab'
     const enter = e.key === 'Enter'
     const arrow = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)
+    if (!editing && arrow && e.shiftKey && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault(); e.stopPropagation()
+      const cursor = cellRangeEnd ?? selectedCell
+      const next = { taskId: e.key === 'ArrowUp' ? gridRowIds[0] : e.key === 'ArrowDown' ? gridRowIds.at(-1)! : cursor.taskId,
+        col: e.key === 'ArrowLeft' ? gridColumns[0] : e.key === 'ArrowRight' ? gridColumns.at(-1)! : cursor.col }
+      setCellRangeEnd(next)
+      leftRef.current?.querySelector(`[data-task-cell="${next.taskId}"][data-col="${next.col}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      return
+    }
     if ((!tab && !enter && !arrow) || (editing && arrow) || e.ctrlKey || e.metaKey || e.altKey) return
     e.preventDefault(); e.stopPropagation()
     const dateInput = (e.target as HTMLElement).closest('[data-date-editor]')?.querySelector<HTMLInputElement>('input[type="text"]')
@@ -2938,6 +2947,21 @@ export default function GanttChart({
       })
       return
     }
+  }
+  const handleGridCopy = (e: React.ClipboardEvent) => {
+    if (!selectedRect || (e.target as HTMLElement).closest('input,textarea,select,[contenteditable=true]')) return
+    const byId = new Map(tasks.map(task => [task.id, task]))
+    const rows = gridRowIds.slice(selectedRect.top, selectedRect.bottom + 1).map(id =>
+      gridColumns.slice(selectedRect.left, selectedRect.right + 1).map(col => {
+        const task = byId.get(id)!
+        if (col === 'name') return task.name
+        if (col === 'start' || col === 'end') return formatDateDisplay(col === 'start' ? task.start_date : task.end_date, isMinute)
+        if (col === 'cdate' || col === 'ddate') return formatDateDisplay(col === 'cdate' ? task.constraint_date : task.deadline)
+        return leftRef.current?.querySelector(`[data-task-cell="${id}"][data-col="${col}"]`)?.textContent?.trim() ?? ''
+      }))
+    e.preventDefault(); e.stopPropagation()
+    e.clipboardData.setData('text/plain', serializeClipboardGrid(rows))
+    setGridNotice(`已复制 ${rows.length} 行 × ${rows[0].length} 列，可粘贴到 Excel 或任务表格。`)
   }
   const handleGridPaste = (e: React.ClipboardEvent) => {
     if (readOnly || !selectedCell) return
@@ -3133,7 +3157,7 @@ export default function GanttChart({
         </div>
 
         {/* Rows */}
-        <div ref={leftRef} data-gantt-grid data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onPaste={handleGridPaste}
+        <div ref={leftRef} data-gantt-grid data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onCopy={handleGridCopy} onPaste={handleGridPaste}
              onMouseDownCapture={handleCellRangeStart} onMouseMoveCapture={handleCellRangeMove}
              onClickCapture={event => { if (cellRangeClickHandled.current) { cellRangeClickHandled.current = false; event.preventDefault(); event.stopPropagation(); leftRef.current?.focus({ preventScroll: true }) } }}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}

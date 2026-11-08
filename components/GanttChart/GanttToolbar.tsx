@@ -1564,7 +1564,7 @@ export default function GanttToolbar({
       if (readOnly) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); dispatch(e.shiftKey ? redoDraft() : undoDraft()); return }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); dispatch(redoDraft()); return }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') handleCopy()
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !(document.activeElement as HTMLElement)?.closest('[data-gantt-grid]')) handleCopy()
       if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !(document.activeElement as HTMLElement)?.closest('[data-gantt-grid]')) handlePaste()
       if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault() }
     }

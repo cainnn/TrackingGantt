@@ -28,6 +28,9 @@ async function fill(selector, value) { await page.click(selector, { count: 3 });
 async function paste(value) {
   await page.evaluate(value => { const data = new DataTransfer(); data.setData('text/plain', value); document.activeElement.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); }, value);
 }
+async function copy() {
+  return page.evaluate(() => { const data = new DataTransfer(); document.activeElement.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data })); return data.getData('text/plain'); });
+}
 async function saved() { await page.waitForFunction(() => { const button = document.querySelector('[data-action="save-plan"]'); return button?.disabled && !button.textContent.includes('保存中'); }); }
 async function aligned() {
   const delta = await page.evaluate(() => Math.abs(document.querySelector('[data-task-row]').getBoundingClientRect().top - document.querySelector('[data-timeline-scroll]').getBoundingClientRect().top));
@@ -143,6 +146,7 @@ async function main() {
   await page.waitForFunction(() => document.querySelector('[data-gantt-grid]').dataset.gridRange === '0,1,1,3');
   await paste('3天\t20260808\t20260811\n4天\t20260809\t20260813');
   await text(a, 'duration', '3天'); await text(a, 'start', '26-08-08'); await text(b, 'duration', '4天'); await text(b, 'end', '26-08-13');
+  assert.equal(await copy(), '3天\t26-08-08\t26-08-11\r\n4天\t26-08-09\t26-08-13');
   await page.screenshot({ path: path.join(output, 'selected-date-duration-region.png'), fullPage: true });
   await page.click('button[title^="撤销"]'); await text(a, 'start', '26-11-04'); await text(b, 'duration', '6天');
   await range(cell(a, 'duration'), cell(b, 'end')); await paste('2天\t20261104');
@@ -152,9 +156,13 @@ async function main() {
   await range(cell(a, 'start'), cell(a, 'end')); await paste('20260808\t20260810\n20260809\t20260812');
   await text(a, 'start', '26-08-08'); await text(b, 'end', '26-08-12');
   await aligned(); await page.click('button[title^="撤销"]'); await text(a, 'start', '26-11-04');
+  await page.click(cell(a, 'duration')); await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.press('ArrowDown'); await page.keyboard.up('Shift'); await page.keyboard.up('Control');
+  await page.waitForFunction(() => document.querySelector('[data-gantt-grid]').dataset.gridRange === '0,7,1,1');
+  await page.keyboard.down('Meta'); await page.keyboard.down('Shift'); await page.keyboard.press('ArrowRight'); await page.keyboard.up('Shift'); await page.keyboard.up('Meta');
+  await page.waitForFunction(() => document.querySelector('[data-gantt-grid]').dataset.gridRange === '0,7,1,4');
   await page.keyboard.press('Escape');
   assert.deepEqual(await state(), baseline); assert.equal(report.writes.length, 0);
-  pass('真实反向鼠标拖选、Shift 点击及方向键选区，日期/工期联合粘贴和单值填充；选区大小不同时按数据展开/缩小，左右行保持对齐，可整步撤销，保存前零写库');
+  pass('按 AG Grid 习惯鼠标反向拖选、Shift 连选、Ctrl/⌘+Shift 扩展至边缘，区域复制输出 Excel TSV；不同大小区域粘贴展开/缩小或重复填充，左右行对齐，可整步撤销且保存前零写库');
 
   await page.click(cell(a, 'ddate'), { count: 2 }); await page.waitForSelector(`${cell(a, 'ddate')} input[type=text]`);
   await fill(`${cell(a, 'ddate')} input[type=text]`, '26/12/1'); await page.keyboard.press('Enter'); await text(a, 'ddate', '26-12-01');

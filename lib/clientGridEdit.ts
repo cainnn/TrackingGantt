@@ -44,6 +44,10 @@ export function parseClipboardGrid(text: string): string[][] {
   return rows
 }
 
+export function serializeClipboardGrid(rows: string[][]): string {
+  return rows.map(row => row.map(value => /[\t\r\n"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value).join('\t')).join('\r\n')
+}
+
 export function gridCellEditable(task: Task, col: string, tasks: Task[], deps: Dependency[]): boolean {
   if (['name', 'assignee'].includes(col)) return true
   if (tasks.some(t => !t.is_deleted && t.parent_id === task.id)) return false
