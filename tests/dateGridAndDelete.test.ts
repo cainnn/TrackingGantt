@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { configureStore } from '@reduxjs/toolkit'
 import type { Task, Dependency } from '../types'
 import { parseDateInput, formatDateDisplay } from '../lib/clientDateInput'
-import { applyGridPaste, gridSelectionRect, parseClipboardGrid, serializeClipboardGrid } from '../lib/clientGridEdit'
+import { applyGridFillDown, applyGridPaste, gridSelectionRect, parseClipboardGrid, serializeClipboardGrid } from '../lib/clientGridEdit'
 import { taskBranchIds } from '../lib/taskTree'
 import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, labelDraftStep, snapshotDraft, undoDraft, redoDraft } from '../store/draftHistory'
@@ -108,6 +108,56 @@ test('selected minute/time regions preserve each task date and accept duration u
   assert.deepEqual(durations.tasks.map(t => t.duration), [90, 45])
   assert.equal(parseDateInput('9:30', true, 2026, '2026-11-04'), '2026-11-04T09:30')
   assert.equal(parseDateInput('25:30', true, 2026, '2026-11-04'), null)
+})
+
+test('fill down takes the visible top row even for reverse selection and preserves its automatic mode', () => {
+  const source = { ...task('b'), start_date: '2026-11-05T00:00:00', end_date: '2026-11-08T00:00:00', duration: 4320 }
+  const tasks = [task('a'), source, task('hidden')], before = structuredClone(tasks)
+  const deps: Dependency[] = [{ id: 'd', project_id: 'p', from_task_id: 'b', to_task_id: 'a', type: 2, lag: 0 }]
+  const result = applyGridFillDown(tasks, deps, ['b', 'a'], ['duration', 'start', 'end'], { taskId: 'a', col: 'end' }, { taskId: 'b', col: 'duration' }, false)
+  assert.deepEqual(result.tasks[1], source)
+  assert.deepEqual([result.tasks[0].start_date, result.tasks[0].end_date, result.tasks[0].duration, result.tasks[0].auto_schedule], ['2026-11-05T00:00:00', '2026-11-08T00:00:00', 4320, false])
+  assert.deepEqual(result.tasks[2], before[2])
+  assert.deepEqual(result.editedIds, ['a'])
+  assert.deepEqual(result.dependencies, deps)
+  assert.deepEqual(result.selection, { start: { taskId: 'b', col: 'duration' }, end: { taskId: 'a', col: 'end' } })
+  assert.deepEqual(tasks, before)
+})
+
+test('fill down preserves canonical full-year minute dates and can clear nullable cells', () => {
+  const tasks = [{ ...task('a'), auto_schedule: false, start_date: '1999-12-31T09:15:00', end_date: '1999-12-31T10:45:00', duration: 90 },
+    { ...task('b'), auto_schedule: false, deadline: '2026-12-01', assignee: '待清除' }]
+  const result = applyGridFillDown(tasks, [], ['a', 'b'], ['start', 'end'], { taskId: 'a', col: 'start' }, { taskId: 'b', col: 'end' }, true)
+  assert.deepEqual([result.tasks[1].start_date, result.tasks[1].end_date, result.tasks[1].duration], ['1999-12-31T09:15:00', '1999-12-31T10:45:00', 90])
+  const cleared = applyGridFillDown(tasks, [], ['a', 'b'], ['assignee', 'ddate'], { taskId: 'a', col: 'assignee' }, { taskId: 'b', col: 'ddate' }, false)
+  assert.equal(cleared.tasks[1].assignee, null)
+  assert.equal(cleared.tasks[1].deadline, null)
+})
+
+test('invalid fill selections reject atomically without altering source or earlier valid targets', () => {
+  const tasks = [task('a'), task('b'), task('parent'), task('child', 'parent')], before = structuredClone(tasks)
+  assert.throws(() => applyGridFillDown(tasks, [], ['a', 'b'], ['duration'], { taskId: 'a', col: 'duration' }, null, false), /至少两行/)
+  assert.throws(() => applyGridFillDown(tasks, [], ['a', 'b', 'parent', 'child'], ['duration'], { taskId: 'a', col: 'duration' }, { taskId: 'parent', col: 'duration' }, false), /第 2 行.*只读/)
+  assert.throws(() => applyGridFillDown(tasks, [], ['a', 'b'], ['status'], { taskId: 'a', col: 'status' }, { taskId: 'b', col: 'status' }, false), /只读/)
+  assert.deepEqual(tasks, before)
+})
+
+test('fill down and dependent scheduling are restored together by one undo', async () => {
+  const tasks = [{ ...task('a'), auto_schedule: false, end_date: '2026-11-04T00:00:00', duration: 4320 },
+    { ...task('b'), auto_schedule: false, start_date: '2026-11-02T00:00:00', end_date: '2026-11-03T00:00:00' },
+    { ...task('c'), start_date: '2026-11-03T00:00:00', end_date: '2026-11-04T00:00:00' }]
+  const dependencies: Dependency[] = [{ id: 'd', project_id: 'p', from_task_id: 'b', to_task_id: 'c', type: 2, lag: 0 }]
+  const store = configureStore({ reducer: rootReducer, middleware: get => get().concat(createDraftMiddleware()) })
+  store.dispatch(setCurrentProject({ id: 'p', user_id: 'u', name: 'P', start_date: null, end_date: null, status_date: null, planning_status: 'draft', created_at: '' }))
+  store.dispatch(setTasks({ tasks, dependencies }))
+  const baseline = snapshotDraft(store.getState()); store.dispatch(initializeDraft({ projectId: 'p', baseline }))
+  const result = applyGridFillDown(tasks, dependencies, ['a', 'b', 'c'], ['duration'], { taskId: 'a', col: 'duration' }, { taskId: 'b', col: 'duration' }, false)
+  store.dispatch(labelDraftStep('向下填充单元格')); store.dispatch(setTasks(result)); await Promise.resolve()
+  assert.equal(store.getState().tasks.tasks[1].duration, 4320)
+  assert.equal(store.getState().tasks.tasks[2].start_date, '2026-11-05T00:00:00')
+  assert.equal(store.getState().draft.past.length, 1)
+  store.dispatch(undoDraft()); assert.deepEqual(snapshotDraft(store.getState()), baseline)
+  store.dispatch(redoDraft()); assert.deepEqual(store.getState().tasks.tasks, result.tasks)
 })
 
 test('deleting a selected parent removes every descendant and their links as one undoable step', async () => {

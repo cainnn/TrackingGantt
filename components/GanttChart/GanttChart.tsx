@@ -34,7 +34,7 @@ import { buildTaskRowMove, taskMoveSelection } from '@/lib/clientTaskMove'
 import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
 import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
-import { applyGridPaste, gridCellEditable, gridSelectionRect, serializeClipboardGrid } from '@/lib/clientGridEdit'
+import { applyGridFillDown, applyGridPaste, gridCellEditable, gridSelectionRect, serializeClipboardGrid } from '@/lib/clientGridEdit'
 import type { ChartViewState } from '@/lib/clientViewState'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -2889,10 +2889,33 @@ export default function GanttChart({
     else setActiveEditor({ taskId: task.id, col: cell.col })
   }, [tasks, deps, isMinute, readOnly, handleTaskFieldChange])
 
+  const handleGridFillDown = () => {
+    if (readOnly || !selectedCell) return
+    try {
+      const next = applyGridFillDown(tasks, deps, gridRowIds, gridColumns, selectedCell, cellRangeEnd, isMinute)
+      const diff = buildSaveDiff(tasks, deps, next.tasks, next.dependencies)
+      if (!diff.tasksToUpdate.length && !diff.depsToUpdate.length) {
+        setGridError(''); setGridNotice('选区下方已与首行相同，无需重复填充。'); return
+      }
+      const original = new Map(tasks.map(task => [task.id, task]))
+      const manualCount = next.tasks.filter(task => original.get(task.id)?.auto_schedule !== false && task.auto_schedule === false).length
+      dispatch(labelDraftStep('向下填充单元格'))
+      dispatch(setTasks(next))
+      dispatch(markDirty(next.editedIds))
+      for (const taskId of next.editedIds) dispatch(setEditDescription({ taskId, description: '向下填充表格数据' }))
+      setSelectedCell({ ...next.selection.start, col: next.selection.start.col as OptionalCol | 'name' })
+      setCellRangeEnd({ ...next.selection.end, col: next.selection.end.col as OptionalCol | 'name' })
+      setGridError('')
+      setGridNotice(`已将选区首行向下填充，可一步撤销。${manualCount ? `${manualCount} 个自动排程任务已按填充日期转为手动排程。` : ''}`)
+    } catch (err) { setGridNotice(''); setGridError(err instanceof Error ? err.message : String(err)) }
+  }
   const handleGridKey = (e: React.KeyboardEvent) => {
     if (!selectedCell || e.nativeEvent.isComposing) return
     const editing = !!(editId || cellEdit || activeEditor)
     if (drag || connect || statusDateDrag || depDrag || rowDrag) return
+    if (!editing && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'd') {
+      e.preventDefault(); e.stopPropagation(); handleGridFillDown(); return
+    }
     if (e.key === 'Escape') {
       e.preventDefault(); e.stopPropagation()
       cancelEditorRef.current = true; cellCommittedRef.current = true; nameCommittedRef.current = true
@@ -3078,7 +3101,7 @@ export default function GanttChart({
       {gridError && <div role="alert" className="flex-none bg-red-50 text-red-700 text-xs px-3 py-2">{gridError}<button className="ml-2" onClick={() => setGridError('')}>关闭</button></div>}
       {gridNotice && <div role="status" className="flex-none bg-blue-50 text-blue-700 text-xs px-3 py-2">{gridNotice}<button className="ml-2" onClick={() => setGridNotice('')}>关闭</button></div>}
       <div role="status" className="flex-none bg-blue-50 text-blue-700 text-xs px-3 py-1 whitespace-nowrap overflow-hidden">{selectedRect && (selectedRect.bottom > selectedRect.top || selectedRect.right > selectedRect.left)
-        ? `已选 ${selectedRect.bottom - selectedRect.top + 1} 行 × ${selectedRect.right - selectedRect.left + 1} 列，可粘贴 Excel 区域或用单个值填充；Esc 取消选区。`
+        ? `已选 ${selectedRect.bottom - selectedRect.top + 1} 行 × ${selectedRect.right - selectedRect.left + 1} 列，可粘贴 Excel 区域；Ctrl/⌘+D 向下填充，Esc 取消选区。`
         : '拖选或 Shift 连选日期、时间、持续时间单元格，可批量粘贴。'}</div>
       <div className="flex flex-1 min-h-0 overflow-hidden">
 

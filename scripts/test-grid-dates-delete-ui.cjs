@@ -31,6 +31,9 @@ async function paste(value) {
 async function copy() {
   return page.evaluate(() => { const data = new DataTransfer(); document.activeElement.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: data })); return data.getData('text/plain'); });
 }
+async function fillDown(modifier = 'Control') {
+  await page.keyboard.down(modifier); await page.keyboard.press('d'); await page.keyboard.up(modifier);
+}
 async function saved() { await page.waitForFunction(() => { const button = document.querySelector('[data-action="save-plan"]'); return button?.disabled && !button.textContent.includes('保存中'); }); }
 async function aligned() {
   const delta = await page.evaluate(() => Math.abs(document.querySelector('[data-task-row]').getBoundingClientRect().top - document.querySelector('[data-timeline-scroll]').getBoundingClientRect().top));
@@ -164,8 +167,30 @@ async function main() {
   assert.deepEqual(await state(), baseline); assert.equal(report.writes.length, 0);
   pass('按 AG Grid 习惯鼠标反向拖选、Shift 连选、Ctrl/⌘+Shift 扩展至边缘，区域复制输出 Excel TSV；不同大小区域粘贴展开/缩小或重复填充，左右行对齐，可整步撤销且保存前零写库');
 
+  await range(cell(b, 'end'), cell(a, 'duration')); await fillDown();
+  await text(a, 'start', '26-11-04'); await text(a, 'duration', '4天');
+  await text(b, 'start', '26-11-04'); await text(b, 'end', '26-11-08'); await text(b, 'duration', '4天');
+  await page.waitForFunction(() => document.querySelector('[data-gantt-grid]').dataset.gridRange === '0,1,1,3');
+  await page.screenshot({ path: path.join(output, 'ctrl-d-fill-down.png'), fullPage: true });
+  await fillDown(); await page.waitForFunction(() => document.body.textContent.includes('无需重复填充'));
+  await page.click('button[title^="撤销"]'); await text(b, 'start', '26-11-05'); await text(b, 'end', '26-11-11');
+  await page.click('button[title^="重做"]'); await text(b, 'start', '26-11-04'); await text(b, 'end', '26-11-08');
+  await page.click('button[title^="撤销"]'); await text(b, 'start', '26-11-05');
+  await range(cell(a, 'duration'), cell(b, 'duration'), true); await fillDown('Meta');
+  await text(b, 'start', '26-11-05'); await text(b, 'end', '26-11-09'); await text(b, 'duration', '4天');
+  await page.click('button[title^="撤销"]'); await text(b, 'duration', '6天'); await text(b, 'end', '26-11-11');
+  await range(cell(a, 'duration'), cell(c, 'duration')); await fillDown();
+  await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(element => element.textContent.includes('只读')));
+  await text(b, 'duration', '6天'); await text(a, 'duration', '4天');
+  await page.click(cell(a, 'duration')); await fillDown();
+  await page.waitForFunction(() => [...document.querySelectorAll('[role=alert]')].some(element => element.textContent.includes('至少两行')));
+  await page.keyboard.press('Escape');
+  assert.deepEqual(await state(), baseline); assert.equal(report.writes.length, 0);
+  pass('真实 Ctrl+D/⌘+D 将选区可见首行向下填充，反向框选与多列日期/工期均正确；重复填充无新撤销步，错误选区整体拒绝，一步撤销重做且保存前零写库');
+
   await page.click(cell(a, 'ddate'), { count: 2 }); await page.waitForSelector(`${cell(a, 'ddate')} input[type=text]`);
   await fill(`${cell(a, 'ddate')} input[type=text]`, '26/12/1'); await page.keyboard.press('Enter'); await text(a, 'ddate', '26-12-01');
+  await range(cell(a, 'ddate'), cell(b, 'ddate')); await fillDown(); await text(b, 'ddate', '26-12-01');
   await page.click(cell(moved, 'name')); await click('提升任务层级', '[data-toolbar-row="tasks"]');
   await page.waitForFunction(selector => parseFloat(document.querySelector(selector).style.paddingLeft) === 4, {}, cell(moved, 'name'));
   await click('全部折叠', '[data-toolbar-row="tasks"]'); await page.click(cell(p, 'name'));
@@ -189,6 +214,7 @@ async function main() {
   assert.equal(persisted.tasks.find(task => task.id === a).duration, 5760); assert.equal(persisted.tasks.find(task => task.id === b).duration, 8640);
   assert.equal(persisted.tasks.find(task => task.id === b).auto_schedule, false);
   assert.equal(persisted.tasks.find(task => task.id === a).deadline.slice(0, 10), '2026-12-01');
+  assert.equal(persisted.tasks.find(task => task.id === b).deadline.slice(0, 10), '2026-12-01');
   assert.equal(persisted.dependencies.length, 1); assert.equal(persisted.dependencies[0].from_task_id, a); assert.equal(persisted.dependencies[0].to_task_id, b);
   assert.equal((await api(`/versions/${project.id}?list=1`)).length, 0);
   assert.equal((await api(`/projects/${project.id}`)).status_date, projectBefore.status_date);
@@ -208,6 +234,9 @@ async function main() {
   await text(minuteId, 'start', '26-11-04 09:15'); await text(minuteId, 'end', '26-11-04 10:45');
   await page.click(cell(minuteId, 'end'), { count: 2 }); await fill(`${cell(minuteId, 'end')} input[type=text]`, '2026/11/4 11:00');
   await page.keyboard.press('Enter'); await text(minuteId, 'end', '26-11-04 11:00');
+  await range(cell(minuteSecond, 'end'), cell(minuteId, 'start')); await fillDown();
+  await text(minuteSecond, 'start', '26-11-04 09:15'); await text(minuteSecond, 'end', '26-11-04 11:00');
+  await page.click('button[title^="撤销"]'); await text(minuteSecond, 'start', '26-11-05 09:15'); await text(minuteSecond, 'end', '26-11-05 10:45');
   await range(cell(minuteId, 'start'), cell(minuteSecond, 'end')); await paste('10:15\t11:45');
   await text(minuteId, 'start', '26-11-04 10:15'); await text(minuteSecond, 'start', '26-11-05 10:15'); await text(minuteSecond, 'end', '26-11-05 11:45');
   await page.click('button[title^="撤销"]'); await text(minuteId, 'end', '26-11-04 11:00'); await text(minuteSecond, 'start', '26-11-05 09:15');
@@ -218,7 +247,7 @@ async function main() {
   await text(minuteId, 'start', '26-11-04 10:15'); await text(minuteId, 'end', '26-11-04 11:45');
   await click('保存', '[data-toolbar-row="progress"]'); await saved();
   const minute = (await state()).tasks[0]; assert.equal(minute.start_date.slice(0, 16), '2026-11-04T10:15'); assert.equal(minute.end_date.slice(0, 16), '2026-11-04T11:45'); assert.equal(minute.duration, 90);
-  pass('分钟级跨行选区可粘贴纯时分并保留各自日期，可批量粘贴分钟/小时工期；保存保持完整年份和90分钟工期');
+  pass('分钟级 Ctrl+D 精确复制来源日期及时分并可整步撤销，跨行粘贴纯时分保留各自日期，支持分钟/小时工期；保存保持完整年份和90分钟工期');
   assert.deepEqual(report.pageErrors, []);
   report.passed = true;
 }
