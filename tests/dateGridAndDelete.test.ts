@@ -35,6 +35,18 @@ test('Excel date serials preserve day/minute precision and reject its fictitious
   assert.equal(parseDateInput('2028年2月29日'), '2028-02-29')
 })
 
+test('compact date input is a calendar date rather than a distant Excel serial', () => {
+  const year = new Date().getFullYear()
+  assert.equal(parseDateInput('20260814', false, 2026), '2026-08-14')
+  assert.equal(parseDateInput('260814', false, 2026), '2026-08-14')
+  assert.equal(parseDateInput('0814', false, 1999), `${year}-08-14`)
+  for (const value of ['20260814 09:35', '260814 09:35']) assert.equal(parseDateInput(value, true, 2026), '2026-08-14T09:35')
+  for (const value of ['20260230', '260230', '0230', '1332', '999999', '260814 25:00']) assert.equal(parseDateInput(value, false, 2026), null, value)
+  const result = applyGridPaste([task('a'), task('b')], [], ['a', 'b'], ['start', 'end'], { taskId: 'a', col: 'start' }, '260814\t260816\n0814\t0816', false)
+  assert.deepEqual(result.tasks.map(t => t.start_date), ['2026-08-14T00:00:00', `${year}-08-14T00:00:00`])
+  assert.deepEqual(result.tasks.map(t => t.duration), [2880, 2880])
+})
+
 test('two-row Excel date paste pins explicit dates, retains dependencies and computes durations once per row', () => {
   const tasks = [task('a'), task('b')]
   const dependencies: Dependency[] = [{ id: 'd', project_id: 'p', from_task_id: 'a', to_task_id: 'b', type: 2, lag: 0 }]

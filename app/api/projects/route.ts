@@ -201,7 +201,7 @@ export async function POST(req: NextRequest) {
     //   分钟级：每个 1 小时（60 分钟），按 09:00 起每小时一格
     //   天级：每个 1 天（1440 分钟），按当天 00:00 起每天一格
     try {
-      const projectStart = newProject.start_date as Date | string | null
+      const projectStart = start_date ?? newProject.start_date as Date | string | null
       let startDt = projectStart instanceof Date
         ? projectStart
         : (projectStart ? new Date(projectStart as string) : new Date())
@@ -243,5 +243,6 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  return NextResponse.json(success(newProject), { status: 201 })
+  const savedProject = await pool.query('SELECT * FROM projects WHERE id = $1', [newProject.id])
+  return NextResponse.json(success(savedProject.rows[0]), { status: 201 })
 }

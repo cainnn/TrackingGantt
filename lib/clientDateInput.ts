@@ -5,8 +5,16 @@ export function parseDateInput(input: string, includeTime = false, referenceYear
   if (includeTime && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(text) && /^\d{4}-\d{2}-\d{2}/.test(referenceDate ?? '')) {
     return parseDateInput(`${referenceDate!.slice(0, 10)} ${text}`, true, referenceYear)
   }
+  const compact = text.match(/^(\d{8}|\d{6}|\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/)
+  // Compact calendar input takes precedence over Excel serials. Interpreting
+  // 260814 as an Excel serial creates a centuries-long chart and blocks rendering.
+  const digits = compact?.[1]
+  const compactMatch = compact && digits ? [compact[0],
+    digits.length === 4 ? String(new Date().getFullYear()) : digits.slice(0, -4),
+    digits.slice(-4, -2), digits.slice(-2), ...compact.slice(2),
+  ] : null
   const match = text.match(/^(\d{4}|\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/)
-    ?? text.match(/^(\d{4})(\d{2})(\d{2})$/)
+    ?? compactMatch
   if (match) {
     const [, y, m, d, h = '0', min = '0', sec = '0'] = match
     let year = +y

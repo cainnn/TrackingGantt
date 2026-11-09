@@ -57,6 +57,7 @@ async function initDatabase() {
     await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-planning-status.sql'), 'utf8'));
     await client.query(fs.readFileSync(path.join(__dirname, 'migrate-task-custom-fields.sql'), 'utf8'));
     await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-view-preferences.sql'), 'utf8'));
+    await client.query(fs.readFileSync(path.join(__dirname, 'migrate-project-start-from-tasks.sql'), 'utf8'));
     console.log('✓ 数据库初始化完成');
 
     // 显示测试数据

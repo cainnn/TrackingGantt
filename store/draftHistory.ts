@@ -9,6 +9,7 @@ import { customFieldsEqual } from '../lib/taskCustomFields'
 import { buildSaveDiff, hasAnyDiff, mergeSavedRecords } from '../lib/clientSave'
 import { toDateTimeStr } from '../lib/clientTime'
 import { normalizePlanningStatus } from '../lib/planningStatus'
+import { earliestTaskStart } from '../lib/projectStart'
 
 export interface DraftSnapshot {
   tasks: Task[]
@@ -100,7 +101,7 @@ function rebase(saved: DraftSnapshot, submitted: DraftSnapshot, current: DraftSn
     descriptions: Object.fromEntries(Object.entries(current.descriptions).filter(([id, text]) => submitted.descriptions[id] !== text)),
   }
 }
-export function rootReducer(state: DraftRootState | undefined, action: UnknownAction): DraftRootState {
+function reduceDraftState(state: DraftRootState | undefined, action: UnknownAction): DraftRootState {
   let next = combined(state, action)
   if (action.type === 'tasks/clearTasks' || action.type === 'auth/logout') return { ...next, draft: empty }
   if (initializeDraft.match(action)) {
@@ -150,6 +151,18 @@ export function rootReducer(state: DraftRootState | undefined, action: UnknownAc
     return restore(next, action.payload)
   }
   return next
+}
+
+export function rootReducer(state: DraftRootState | undefined, action: UnknownAction): DraftRootState {
+  const next = reduceDraftState(state, action)
+  const current = next.project.currentProject
+  if (!current) return next
+  const start = earliestTaskStart(next.tasks.tasks.filter(task => task.project_id === current.id))
+  if (current.start_date === start) return next
+  return { ...next, project: { ...next.project,
+    currentProject: { ...current, start_date: start },
+    projects: next.project.projects.map(p => p.id === current.id ? { ...p, start_date: start } : p),
+  } }
 }
 
 // A user event may dispatch several synchronous updates (task, dependencies,

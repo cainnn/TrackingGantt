@@ -1898,48 +1898,6 @@ export default function GanttChart({
           }
         }
 
-        // ── 项目边界检查：拖动后若任务越过项目开始日期，按 project_boundary 策略处理
-        const projStart = currentProject?.start_date?.split('T')[0]
-        if (projStart && dirtyList.length > 0) {
-          const violating = dirtyList.filter(t => {
-            const s = t.start_date ? String(t.start_date).split('T')[0] : null
-            const boundary = t.project_boundary ?? 'ask'
-            return !!(s && s < projStart) && boundary !== 'ignore'
-          })
-          if (violating.length > 0) {
-            const honored = violating.filter(t => (t.project_boundary ?? 'ask') === 'honor')
-            const askList = violating.filter(t => (t.project_boundary ?? 'ask') === 'ask')
-            let userWantsClamp = false
-            if (askList.length > 0) {
-              const names = askList.map(t => `「${t.name}」`).join('、')
-              userWantsClamp = !window.confirm(
-                `${names} 的开始日期早于项目开始日期 ${projStart}。\n\n确定 = 允许越界\n取消 = 吸附到项目开始日期`
-              )
-            }
-            const clampIds = new Set<string>([
-              ...honored.map(t => t.id),
-              ...(userWantsClamp ? askList.map(t => t.id) : []),
-            ])
-            if (clampIds.size > 0) {
-              const clamp = (t: Task): Task => {
-                if (!clampIds.has(t.id)) return t
-                const s = t.start_date ? String(t.start_date).split('T')[0] : null
-                const e = t.end_date ? String(t.end_date).split('T')[0] : null
-                if (!s || s >= projStart) return t
-                const shift = diffDays(new Date(s), new Date(projStart))
-                const newEnd = e ? addDays(new Date(e), shift) : null
-                return {
-                  ...t,
-                  start_date: projStart,
-                  end_date: newEnd ? newEnd.toISOString().slice(0,10) : t.end_date,
-                }
-              }
-              dirtyList = dirtyList.map(clamp)
-              for (let i = 0; i < allUpdated.length; i++) allUpdated[i] = clamp(allUpdated[i])
-            }
-          }
-        }
-
         if (dirtyList.length > 0 || allUpdated.length > 0) {
           if (dirtyList.length > 0) {
             const dirtyById = new Map(dirtyList.map(t => [t.id, t]))

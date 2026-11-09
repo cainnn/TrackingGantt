@@ -14,7 +14,7 @@ import { CustomFieldError, normalizeCustomValues, formatCustomValue, submittedTa
 import type { TaskCustomField } from '@/types'
 import {
   type TaskLike,
-  toDateStr, addDaysStr,
+  toDateStr,
   cascadeDependencies, collapseDeletedTaskSuccessors, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
   snapTasksToDayLevel,
 } from '@/lib/scheduling'
@@ -238,21 +238,6 @@ export async function POST(req: NextRequest, { params }: Params) {
           failure(err instanceof Error ? err.message : '工期格式错误', 400),
           { status: 400 },
         )
-      }
-
-      // 限制开始日期不早于项目开始日期
-      {
-        const projRes = await client.query('SELECT start_date FROM projects WHERE id = $1', [projectId])
-        const projStart = projRes.rows[0]?.start_date ? toDateStr(projRes.rows[0].start_date) : null
-        if (!submittedPlan && projStart && normalizedStart && normalizedStart < projStart) {
-          const dur = normalizedDuration ?? 0
-          normalizedStart = projStart
-          if (is_milestone) {
-            normalizedEnd = projStart
-          } else {
-            normalizedEnd = addDaysStr(projStart, dur)
-          }
-        }
       }
 
       const ownFields = submittedTaskCustomFields(task, {}, customFields)

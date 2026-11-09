@@ -88,6 +88,14 @@ node --env-file=.env.local scripts/migrate-project-view-preferences.cjs
 
 新数据库初始化和常规 VPS 部署会自动执行迁移。本地服务启动后运行 `node scripts/test-project-views.cjs` 验证项目与账号隔离、保存恢复、并发冲突及浏览器操作；使用 `LAYOUT_TEST_URL` 指定服务地址，添加 `--api-only` 仅验证接口。
 
+### 项目开始时间与日期输入
+
+项目开始时间自动取所有未删除任务的最早开始时间，任务提前、延后、删除、恢复、导入或历史恢复后同步更新；没有有效任务日期时为空，项目卡片不再单独编辑该字段。分钟项目保留时分。此同步只更新项目元数据，不会改写任务日期或历史快照；前端草稿、撤销和放弃更改也按当前任务同步预览。
+
+日期输入支持 `20260814`、`260814` 和 `0814`（当前年份的 8 月 14 日），以及带分隔符的日期。Enter、Tab 或离开输入框后确认，无效日期保留在输入框内供修改；六位、四位数字优先按日历日期识别，避免被误当成 Excel 序列号生成跨越数百年的时间轴。
+
+已有数据库运行 `node --env-file=.env.local scripts/migrate-project-start-from-tasks.cjs`；新库初始化和常规部署自动迁移。验证：`node --env-file=.env.local scripts/test-project-start-migration.cjs` 使用独立测试 schema；`node scripts/test-date-input-project-start.cjs http://127.0.0.1:3127` 使用临时项目及普通编辑账号验证真实页面输入、保存和“封网”案例，结束后清理。
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 ### Excel 导入导出

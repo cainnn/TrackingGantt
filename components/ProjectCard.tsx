@@ -6,7 +6,6 @@ import { useAppDispatch } from '@/store/hooks'
 import { deleteProject, updateProject } from '@/store/slices/projectSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import type { Project } from '@/types'
-import YmdDateInput from '@/components/YmdDateInput'
 
 interface ProjectCardProps {
   project: Project
@@ -136,24 +135,7 @@ export default function ProjectCard({ project, readOnly, selected, onToggleSelec
                 const sliceLen = isMinute ? 16 : 10
                 const ctlVal = (project.start_date ?? '').slice(0, sliceLen)
                 const dispVal = isMinute ? ctlVal.replace('T', ' ') : ctlVal
-                if (readOnly) return <span className="text-gray-700 text-xs">{dispVal}</span>
-                return (
-                  <YmdDateInput
-                    value={ctlVal}
-                    includeTime={isMinute}
-                    size="compact"
-                    onChange={async e => {
-                      const val = e.target.value || null
-                      const res = await authFetch(`/api/projects/${project.id}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ start_date: val }),
-                      })
-                      const data = await res.json()
-                      if (data.ok) dispatch(updateProject({ ...project, start_date: val }))
-                    }}
-                  />
-                )
+                return <span data-project-start={project.id} title="自动取未删除任务的最早开始时间" className="text-gray-700 text-xs">{dispVal || '—'}</span>
               })()}
             </div>
             {project.estimated_end_date && (

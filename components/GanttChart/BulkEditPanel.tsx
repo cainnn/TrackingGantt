@@ -29,9 +29,7 @@ export default function BulkEditPanel({ onClose }: { onClose: () => void }) {
         shiftMinutes: Number(shift) * (isMinute ? 1 : 1440),
       }, isMinute, anchor)
       const constraints = findUpperConstraintViolations(updates)
-      const outside = updates.filter(t => t.start_date && project?.start_date && t.start_date < project.start_date && t.project_boundary !== 'ignore')
-      if (outside.some(t => t.project_boundary === 'honor')) throw new Error('部分任务不允许移到项目开始日期之前，请调整移动量')
-      if ((constraints.length || outside.length) && !confirm(`本次修改有 ${constraints.length} 项限制日期冲突、${outside.length} 项越过项目开始日期。确认应用到草稿？`)) return
+      if (constraints.length && !confirm(`本次修改有 ${constraints.length} 项限制日期冲突。确认应用到草稿？`)) return
       dispatch(labelDraftStep('批量修改任务'))
       dispatch(updateTasks(updates))
       dispatch(markDirty(updates.map(t => t.id)))

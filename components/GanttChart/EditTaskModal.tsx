@@ -388,8 +388,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const startReadonly = !manualSchedule && (activeIncoming.length === 0 || hasFS_SS)
   const endReadonly = !manualSchedule && hasFF_SF
 
-  const projStart = (currentProject?.start_date ?? '').slice(0, dtSlice)
-
   const handleDateChange = (field: 'start' | 'end', value: string) => {
     setFormError('')
     const start = field === 'start' ? value : startDate
@@ -414,9 +412,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (val.trim() !== '' && Number.isSafeInteger(n * durMul) && n >= 0 && (isMinute || Number.isInteger(n))) {
       const totalMins = n * durMul
       if (endReadonly && endDate) {
-        let s = addMinutesStr(normalizeScheduleDate(endDate, isMinute), -totalMins)?.slice(0, dtSlice)
+        const s = addMinutesStr(normalizeScheduleDate(endDate, isMinute), -totalMins)?.slice(0, dtSlice)
         if (!s) return
-        if (projStart && s < projStart) s = projStart
         setStartDate(s)
         const span = scheduleDurationMinutes(s, endDate, isMinute)
         if (span != null && span >= 0) setDurationIn(String(span / durMul))
@@ -434,12 +431,11 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     let normalizedValues: TaskCustomValues
     try { normalizedValues = normalizeCustomValues(customValues, normalizedFields, task.custom_values) }
     catch (err) { setFormError(err instanceof Error ? err.message : '任务属性填写无效'); setTab('custom'); return }
-    const clampedStart = (startDate && projStart && startDate < projStart) ? projStart : startDate
     if (!isMilestone && durationIn.trim() !== '' && (!Number.isSafeInteger(Number(durationIn) * durMul) || Number(durationIn) < 0 || (!isMinute && !Number.isInteger(Number(durationIn))))) {
       setFormError(isMinute ? '工期必须是非负整数分钟' : '工期必须是非负整数天')
       return
     }
-    const normalizedStart = normalizeScheduleDate(clampedStart, isMinute)
+    const normalizedStart = normalizeScheduleDate(startDate, isMinute)
     const normalizedEnd = isMilestone ? normalizedStart : normalizeScheduleDate(endDate, isMinute)
     if (normalizedStart && normalizedEnd && normalizedStart > normalizedEnd) {
       setFormError('开始日期不能晚于结束日期')
@@ -727,11 +723,10 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   ) : (
                     <YmdDateInput
                       value={startDate}
-                      min={projStart || undefined}
                       includeTime={isMinute}
                       onChange={e => {
                         const v = e.target.value
-                        handleDateChange('start', projStart && v && v < projStart ? projStart : v)
+                        handleDateChange('start', v)
                       }}
                     />
                   )}
@@ -848,15 +843,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                 <label className="text-sm text-gray-600 pl-4">打包</label>
                 <Toggle checked={rollup} onChange={setRollup} />
 
-                <label className="text-sm text-gray-600">项目边界</label>
-                <select
-                  value={projectBoundary}
-                  onChange={e => setProjectBoundary(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-blue-400 cursor-pointer">
-                  <option value="ask">询问用户</option>
-                  <option value="honor">遵守边界</option>
-                  <option value="ignore">忽略边界</option>
-                </select>
+                <label className="text-sm text-gray-600">项目开始</label>
+                <span className="text-sm text-gray-500">随最早任务自动调整</span>
                 <label className="text-sm text-gray-600 pl-4">无效</label>
                 <Toggle checked={inactive} onChange={setInactive} />
               </div>
