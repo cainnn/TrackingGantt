@@ -74,6 +74,20 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 保存流程回归：启动本地服务后执行 `SAVE_TEST_URL=http://localhost:3000 npm run test:save`，验证首个任务及全部删除、重复创建与审计记录、保存断网重试、快照异常恢复、保存期间的新编辑和项目状态日期。测试会清理本轮临时项目；可用 `SAVE_TEST_ROOT`、`SAVE_TEST_PASSWORD` 指定管理员，或加 `-- --api-only` 仅验证接口。
 
+### 按项目保存布局
+
+在项目工具栏进入「显示设置 → 常用布局」，点击「保存当前布局」。显示列及其顺序、列宽、面板宽度、任务折叠、筛选、排序、搜索、关键路径、日期标记、时间轴缩放和滚动位置都会按当前账号与项目保存到数据库。重新打开项目或使用另一台设备登录后会自动恢复；布局保存独立于计划草稿和版本确认。只读账号也可以保存自己的布局，分享访客需登录后保存。
+
+可用「另存为常用布局」保存最多 20 个命名布局，选择布局后点击「更新此布局」覆盖保存。旧浏览器中的常用布局会在首次保存时一起迁移。多个窗口同时保存时会提示重新加载，避免覆盖另一个窗口刚保存的结果。
+
+已有数据库在启动新版前执行：
+
+```bash
+node --env-file=.env.local scripts/migrate-project-view-preferences.cjs
+```
+
+新数据库初始化和常规 VPS 部署会自动执行迁移。本地服务启动后运行 `node scripts/test-project-views.cjs` 验证项目与账号隔离、保存恢复、并发冲突及浏览器操作；使用 `LAYOUT_TEST_URL` 指定服务地址，添加 `--api-only` 仅验证接口。
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 ### Excel 导入导出

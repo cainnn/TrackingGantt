@@ -669,6 +669,7 @@ export default function GanttChart({
   const [panelW, setPanelW]           = useState(INIT_LEFT_W)
   const [panelCollapsed, setPanelCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [restoringView, setRestoringView] = useState(!!viewRestore)
   const [splitterDrag, setSplitterDrag] = useState<{ startX: number; startW: number } | null>(null)
   const prevPanelW = useRef(INIT_LEFT_W)
 
@@ -986,6 +987,7 @@ export default function GanttChart({
   const scrolledForProject = useRef<string>('')
   useEffect(() => {
     if (scrolledForProject.current === projectId || !tasks.length) return
+    if (viewRestore) { scrolledForProject.current = projectId; return }
     // statusDate === undefined means project data hasn't loaded yet; wait for it
     if (statusDate === undefined) return
     scrolledForProject.current = projectId
@@ -995,7 +997,7 @@ export default function GanttChart({
       const vw = rightRef.current?.clientWidth ?? 600
       syncTimelineScrollLeft(Math.max(0, x - (isMinute ? vw / 2 : vw / 3)))
     })
-  }, [tasks.length, statusDate, dateToX, taskRangeCenterX, syncTimelineScrollLeft, projectId, isMinute])
+  }, [tasks.length, statusDate, dateToX, taskRangeCenterX, syncTimelineScrollLeft, projectId, isMinute, viewRestore])
 
   // ── Display rows: apply previewMap + search filter ──────────────────────
   const displayRows = useMemo((): FlatRow[] => {
@@ -2571,7 +2573,7 @@ export default function GanttChart({
   // ── Dynamic panel sizing ─────────────────────────────────────────────────
   const effectivePanelW = panelCollapsed ? 0 : panelW
 
-  // 列宽覆盖（用户拖动调整后持久化到 localStorage）
+  // Preserve the legacy browser cache until a saved project layout overrides it.
   const colWidthStorageKey = `gantt-col-widths-${projectId}`
   const [colWidthOverrides, setColWidthOverrides] = useState<Partial<Record<OptionalCol, number>>>(() => {
     if (typeof window === 'undefined') return {}
@@ -3059,6 +3061,8 @@ export default function GanttChart({
 
   useEffect(() => {
     if (!viewRestore) return
+    // Restore geometry without transitions before calculating the viewport center.
+    setRestoringView(true)
     const view = viewRestore.state
     setExpanded(view.expanded)
     const validKeys = new Set(OPTIONAL_COL_META.map(c => c.key))
@@ -3067,13 +3071,15 @@ export default function GanttChart({
     setSortDir(view.sortDir)
     setColWidthOverrides(Object.fromEntries(Object.entries(view.widths).filter(([k]) => validKeys.has(k as OptionalCol))))
     setNameW(Math.max(MIN_NAME_W, view.nameWidth))
-    setPanelW(Math.max(200, Math.min(1200, view.panelWidth)))
+    setPanelW(Math.max(200, view.panelWidth))
+    prevPanelW.current = Math.max(200, view.panelWidth)
     setPanelCollapsed(view.panelCollapsed); setRightCollapsed(view.rightCollapsed)
     let frame = requestAnimationFrame(() => {
       frame = requestAnimationFrame(() => {
         syncTimelineScrollLeft(Math.max(0, dateToX(new Date(view.centerTime)) - (rightRef.current?.clientWidth ?? 0) / 2))
         if (leftRef.current) leftRef.current.scrollTop = view.scrollTop
         if (rightRef.current) rightRef.current.scrollTop = view.scrollTop
+        setRestoringView(false)
       })
     })
     return () => cancelAnimationFrame(frame)
@@ -3132,7 +3138,7 @@ export default function GanttChart({
 
       {/* ── Left panel ───────────────────────────────────────────────── */}
       <div className={`${rightCollapsed ? 'flex-1' : 'flex-none'} bg-white`}
-           style={{ width: rightCollapsed ? undefined : effectivePanelW, minWidth: 0, overflowX: 'scroll', overflowY: 'hidden', transition: splitterDrag ? undefined : 'width 0.15s ease' }}>
+           style={{ width: rightCollapsed ? undefined : effectivePanelW, minWidth: 0, overflowX: 'scroll', overflowY: 'hidden', transition: splitterDrag || restoringView ? undefined : 'width 0.15s ease' }}>
        <div className="flex flex-col h-full" style={{ width: leftInnerW }}>
         {/* Column headers */}
         <div className="flex-none flex items-end border-b border-gray-300 bg-gray-50
@@ -3799,7 +3805,7 @@ export default function GanttChart({
       {/* ── Right timeline（上：日期头冻结；上下同步横向滚动，仅下方纵向滚动）──── */}
       <div className="flex flex-col min-h-0 bg-white"
            style={{ flex: rightCollapsed ? '0 0 0px' : '1 1 0%', overflow: 'hidden',
-                    transition: splitterDrag ? undefined : 'flex 0.2s ease' }}>
+                    transition: splitterDrag || restoringView ? undefined : 'flex 0.2s ease' }}>
         <div
           ref={rightHeaderRef}
           onScroll={onRightHeaderScroll}

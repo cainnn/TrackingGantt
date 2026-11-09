@@ -17,10 +17,12 @@ export function authFetch(input: RequestInfo | URL, init: RequestInit = {}): Pro
   const token = state.auth.token
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  // view 角色：本地可以体验编辑，但所有写操作不落库（返回空 OK 响应）
+  // Personal layout preferences are writable even for read-only project members.
   const method = (init.method ?? 'GET').toUpperCase()
   const isWrite = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
-  if (isWrite && state.auth.user?.role === 'view') {
+  const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url
+  const isLayoutSave = method === 'PUT' && /^\/api\/projects\/[\da-f-]+\/view-preferences$/i.test(path)
+  if (isWrite && !isLayoutSave && state.auth.user?.role === 'view') {
     return Promise.resolve(new Response(JSON.stringify({ ok: true, value: null }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },

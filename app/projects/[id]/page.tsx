@@ -17,7 +17,8 @@ import GanttToolbar from '@/components/GanttChart/GanttToolbar'
 import AIChatPanel from '@/components/GanttChart/AIChatPanel'
 import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
 import SavedViewsMenu from '@/components/GanttChart/SavedViewsMenu'
-import type { ChartViewState } from '@/lib/clientViewState'
+import type { ChartViewState, SavedGanttView } from '@/lib/clientViewState'
+import { useProjectViews } from '@/lib/client/useProjectViews'
 import Link from 'next/link'
 import { authFetch } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
@@ -39,6 +40,11 @@ const ZOOM_LEVELS_MINUTE = [24, 60, 120, 240, 480, 720, 1440, 2880]
 export default function ProjectPage() {
   const params    = useParams()
   const projectId = params.id as string
+  const userId = useAppSelector(s => s.auth.user?.id)
+  return <ProjectWorkspace key={`${userId}-${projectId}`} projectId={projectId} />
+}
+
+function ProjectWorkspace({ projectId }: { projectId: string }) {
   const dispatch  = useAppDispatch()
   const router    = useRouter()
   const { user, token }    = useAppSelector(s => s.auth)
@@ -69,16 +75,6 @@ export default function ProjectPage() {
   const zoomMax = zoomLevels[zoomLevels.length - 1]
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
-  // 分钟级项目首次加载时把默认列宽提到 1440（1px/分钟），
-  // 用户继续放大到 2880（2px/分钟）。
-  const colWInitRef = useRef(false)
-  useEffect(() => {
-    if (colWInitRef.current) return
-    if (currentProject?.time_granularity === 'minute' && colW === 28) {
-      setColW(1440)
-    }
-    if (currentProject) colWInitRef.current = true
-  }, [currentProject, colW])
   const [searchQuery,       setSearchQuery]       = useState('')
   const [expandAllSignal,   setExpandAllSignal]   = useState(0)
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
@@ -108,6 +104,7 @@ export default function ProjectPage() {
           }
           return filtered
         }
+        if (Array.isArray(parsed) && parsed.length === 0) return []
       }
     } catch { /* ignore */ }
     return DEFAULT_VISIBLE_COLS
@@ -132,6 +129,16 @@ export default function ProjectPage() {
     setIndicators(next)
     try { localStorage.setItem(`gantt-indicators-${projectId}`, JSON.stringify(next)) } catch { /* ignore */ }
   }, [projectId])
+
+  const applyLayout = useCallback((view: SavedGanttView) => {
+    setSearchQuery(view.search)
+    setVisibleCols(view.columns.filter(c => OPTIONAL_COL_META.some(m => m.key === c)) as OptionalCol[])
+    setIndicators(view.indicators)
+    setColW(view.colW)
+    setShowCriticalPath(view.critical)
+    setViewRestore(prev => ({ state: view.chart, id: (prev?.id ?? 0) + 1 }))
+  }, [])
+  const layouts = useProjectViews(projectId, loadedBaseline?.projectId === projectId, applyLayout)
 
   const handleRestoreViewedSnapshot = useCallback(async () => {
     if (!viewSnapshot) return
@@ -197,6 +204,7 @@ export default function ProjectPage() {
         }
         if (!tr.ok || !tr.value || !plr.ok || !Array.isArray(plr.value)) throw new Error(tr.error ?? '加载项目数据失败')
         dispatch(setCurrentProject(pr.value))
+        setColW(pr.value.time_granularity === 'minute' ? 1440 : 28)
         if (tr.ok && tr.value) {
           const loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
           const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
@@ -306,6 +314,9 @@ export default function ProjectPage() {
           </div>
         </div>
       </div>}
+      {layouts.error && <div role="alert" className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+        <span>{layouts.error}</span><button type="button" disabled={layouts.loading || layouts.saving} className="text-blue-600" onClick={layouts.reload}>重新加载布局</button>
+      </div>}
       {loadedBaseline?.projectId === projectId && currentProject?.id === projectId && <GanttToolbar
         key={`${projectId}-${baselineRevision}`}
         initialBaseline={loadedBaseline}
@@ -325,17 +336,10 @@ export default function ProjectPage() {
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
         onFocusTask={() => setFocusSignal(n => n + 1)}
         onTimelineNavigate={kind => setTimelineRequest(prev => ({ kind, id: (prev?.id ?? 0) + 1 }))}
-        viewControls={<SavedViewsMenu projectId={projectId} capture={() => {
+        viewControls={<SavedViewsMenu projectId={projectId} layouts={layouts} capture={() => {
           const chart = chartCapture.current?.()
           return chart ? { search: searchQuery, columns: visibleCols, indicators, colW, critical: showCriticalPath, chart } : null
-        }} apply={view => {
-          setSearchQuery(view.search)
-          handleVisibleColsChange(view.columns.filter(c => OPTIONAL_COL_META.some(m => m.key === c)) as OptionalCol[])
-          handleIndicatorsChange(view.indicators)
-          setColW(Math.max(0.1, Math.min(zoomMax, view.colW)))
-          setShowCriticalPath(view.critical)
-          setViewRestore(prev => ({ state: view.chart, id: (prev?.id ?? 0) + 1 }))
-        }} />}
+        }} apply={applyLayout} />}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
         onToggleAI={() => setShowAI(v => !v)}
@@ -362,7 +366,7 @@ export default function ProjectPage() {
 
       <div className="flex-1 overflow-hidden flex">
         <div className="flex-1 overflow-hidden">
-          <GanttChart
+          {loadedBaseline?.projectId === projectId && !layouts.loading ? <GanttChart
             projectId={projectId}
             isMinute={isMinute}
             statusDate={effectiveStatusDate}
@@ -383,7 +387,7 @@ export default function ProjectPage() {
             showComparison={showComparison}
             onStatusDatePreviewChange={setPreviewStatusDate}
             discardSignal={discardSignal}
-          />
+          /> : <div role="status" className="flex h-64 items-center justify-center text-sm text-gray-500">正在加载项目布局…</div>}
         </div>
         {showAI && (
           <AIChatPanel
