@@ -274,14 +274,14 @@ EXCLUDES=(
   --exclude='source-pdf-output'
   --exclude='aspose-tasks-cli/bin'
   --exclude='aspose-tasks-cli/obj'
-  --exclude='aspose-tasks-cli/publish-linux-x64'
+  --exclude='aspose-tasks-cli/publish'
 )
 
 if [[ "$LOCAL_BUILD" -eq 1 ]]; then
   # 本地构建模式：包含 .next 和 node_modules
   EXCLUDES=( --exclude='.git' --exclude='.env' --exclude='.env.*' --exclude='.cursor' --exclude='*.log' --exclude='.DS_Store'
              --exclude='aspose-tasks-cli/bin' --exclude='aspose-tasks-cli/obj'
-             --exclude='aspose-tasks-cli/publish-linux-x64' )
+             --exclude='aspose-tasks-cli/publish' )
 fi
 
 export COPYFILE_DISABLE=1
@@ -403,6 +403,16 @@ fi
 if [[ -f "$APP_DIR/aspose-tasks-cli/AsposeTasksCli.csproj" ]]; then
   echo ">> 构建 Aspose Tasks CLI..."
   cli_source_hash=$(cd "$APP_DIR/aspose-tasks-cli" && sha256sum ./*.cs ./*.csproj | sha256sum | cut -d' ' -f1)
+  # Mac development builds must never overwrite the server's Linux executable.
+  # A matching self-contained cross-build also works on hosts without dotnet.
+  bundled_cli="$APP_DIR/aspose-tasks-cli/publish-linux-x64"
+  if [[ -x "$bundled_cli/aspose-tasks-cli" ]] && [[ -f "$bundled_cli/source.sha256" ]] &&
+     [[ "$(cat "$bundled_cli/source.sha256")" == "$cli_source_hash" ]] &&
+     file "$bundled_cli/aspose-tasks-cli" | grep -q 'ELF'; then
+    mkdir -p "$APP_DIR/aspose-tasks-cli/publish"
+    install -m 755 "$bundled_cli/aspose-tasks-cli" "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli"
+    cp "$bundled_cli/source.sha256" "$APP_DIR/aspose-tasks-cli/publish/source.sha256"
+  fi
   if [[ -x "$APP_DIR/aspose-tasks-cli/publish/aspose-tasks-cli" ]] &&
      [[ -f "$APP_DIR/aspose-tasks-cli/publish/source.sha256" ]] &&
      [[ "$(cat "$APP_DIR/aspose-tasks-cli/publish/source.sha256")" == "$cli_source_hash" ]] &&
