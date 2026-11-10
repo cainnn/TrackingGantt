@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Task, TaskCustomField } from '../types'
-import { attributeQueryMessage, buildTaskAttributeCatalog, isTaskAttributeQueryIntent, queryTaskAttributes, queryTaskAttributeReports, type AttributeQuery, type AttributeQueryReport } from '../lib/ai/taskAttributeQuery'
+import { attributeQueryMessage, buildTaskAttributeCatalog, deduplicateAttributeReports, isTaskAttributeQueryIntent, queryTaskAttributes, queryTaskAttributeReports, type AttributeQuery, type AttributeQueryReport } from '../lib/ai/taskAttributeQuery'
 import { resolveAttributeDateRange } from '../lib/ai/attributeDateRange'
 import { AI_TOOLS, buildSystemPrompt } from '../lib/ai/tools'
 
@@ -71,6 +71,153 @@ test('summary, deleted, inherited inactive and archived values do not inflate de
   assert.equal(result.total, '10'); assert.equal(result.skipped.summary, 2); assert.equal(result.skipped.inactive, 1); assert.equal(result.skipped.archived, 1)
   const inclusive = query(tasks, { include_summary: true, include_inactive: true, include_archived: true })
   assert.equal(inclusive.total, '210'); assert.match(inclusive.warnings[0], /重复统计/)
+})
+
+test('parent-only requests cannot include child values even when the model uses the legacy include_summary flag', () => {
+  const tasks = [task('parent', '30'), task('a', '10', undefined, { parent_id: 'parent' }), task('b', '20', undefined, { parent_id: 'parent' }), task('independent', '5')]
+  const input = { attribute_name: '搬迁服务器台数', operation: 'sum', group_by: 'none', include_summary: true }
+  const [parent] = queryTaskAttributeReports(tasks, input, [], { text: '只汇总父任务的搬迁服务器台数，不计子任务，覆盖全部计划' })
+  assert.equal(parent.ok, true)
+  if (parent.ok) { assert.equal(parent.total, '30'); assert.equal(parent.matchedTasks, 1); assert.equal(parent.query.task_scope, 'summary'); assert.equal(parent.skipped.leaf, 3) }
+  const [leaf] = queryTaskAttributeReports(tasks, input, [], { text: '只汇总子任务的搬迁服务器台数，不计父任务，覆盖全部计划' })
+  assert.equal(leaf.ok, true)
+  if (leaf.ok) { assert.equal(leaf.total, '35'); assert.equal(leaf.query.task_scope, 'leaf'); assert.match(attributeQueryMessage(leaf), /避免父子重复累计/) }
+  const separate = queryTaskAttributeReports(tasks, input, [], { text: '父任务和子任务的搬迁服务器台数分别汇总，不要把父子相加' })
+  assert.deepEqual(separate.map(report => report.ok && report.total), ['30', '35'])
+  assert.ok(separate.every(report => report.ok && report.total !== '65'))
+})
+
+test('nested parents are reported per level and never combined with their descendants', () => {
+  const tasks = [task('root', '30'), task('sub', '30', undefined, { parent_id: 'root' }), task('a', '10', undefined, { parent_id: 'sub' }), task('b', '20', undefined, { parent_id: 'sub' })]
+  const before = structuredClone(tasks)
+  const parents = queryTaskAttributeReports(tasks, { attribute_name: '搬迁服务器台数', task_scope: 'summary' })
+  assert.deepEqual(parents.map(report => report.ok && report.total), ['30', '30'])
+  assert.ok(parents[0].ok && parents[0].scope.includes('第1层父任务'))
+  assert.ok(parents[1].ok && parents[1].scope.includes('第2层父任务'))
+  assert.equal(query(tasks).total, '30')
+  const separate = queryTaskAttributeReports(tasks, { attribute_name: '搬迁服务器台数', task_scope: 'separate' })
+  assert.equal(separate.length, 3)
+  assert.ok(separate.every(report => report.ok && report.total === '30'))
+  assert.deepEqual(tasks, before)
+  assert.equal(queryTaskAttributes(tasks, { attribute_name: '搬迁服务器台数', task_scope: 'invalid' }).ok, false)
+})
+
+test('duplicate model calls produce one result for each actual unit, type and hierarchy scope', () => {
+  const tasks = [task('parent', '12'), task('child', '12', undefined, { parent_id: 'parent' })]
+  const input = { attribute_name: '搬迁服务器台数', group_by: 'none' }
+  const reports = [true, false].flatMap(include_summary => queryTaskAttributeReports(tasks, { ...input, include_summary }, [], { text: '父子分别统计搬迁服务器台数' }))
+  assert.equal(reports.length, 4)
+  const unique = deduplicateAttributeReports(reports)
+  assert.equal(unique.length, 2)
+  assert.deepEqual(unique.map(report => report.ok && report.query.task_scope), ['summary', 'leaf'])
+})
+
+test('numeric attribute names with empty values are not treated as quantities or announced as zero', () => {
+  const result = query([task('a', undefined, undefined, { custom_fields: [field('field-a', { name: '6' })] })], { attribute_name: '6' })
+  const answer = attributeQueryMessage(result)
+  assert.match(answer, /尚未填写属性值，无法汇总/)
+  assert.match(answer, /属性名称中的数字不会当作填报数量/)
+  assert.doesNotMatch(answer, /合计0|合计6/)
+  assert.match(attributeQueryMessage(query([task('a', '0')])), /合计0台/)
+})
+
+test('a populated parent cannot turn unreported children into a reported zero', () => {
+  const result = query([task('parent', '193'), task('child', undefined, undefined, { parent_id: 'parent' })])
+  assert.equal(result.matchedTasks, 0)
+  assert.equal(result.skipped.empty, 1)
+  const answer = attributeQueryMessage(result)
+  assert.match(answer, /没有符合条件的已填记录，暂时无法汇总/)
+  assert.doesNotMatch(answer, /合计0台|合计193台/)
+})
+
+test('partial reporting follows current task values, preserves explicit zeros and discloses blanks', () => {
+  for (const [values, expected] of [[['13.25', '-1.25', '0'], '12'], [['21', '3.5', '0'], '24.5'], [['0', '0', '0'], '0']] as [string[], string][]) {
+    const tasks = [task('parent', '999'), ...values.map((value, index) => task(String(index), value, undefined, { parent_id: 'parent' })),
+      task('empty', '', undefined, { parent_id: 'parent' }), task('missing', undefined, undefined, { parent_id: 'parent' })]
+    const before = structuredClone(tasks), result = query(tasks)
+    assert.equal(result.total, expected); assert.equal(result.matchedTasks, 3); assert.equal(result.skipped.empty, 2)
+    const answer = attributeQueryMessage(result)
+    assert.ok(answer.includes(`合计${expected}台`)); assert.match(answer, /未填属性2项/)
+    assert.deepEqual(tasks, before)
+  }
+})
+
+test('zero filled-task count is valid even though an unreported numeric total cannot be claimed as zero', () => {
+  const tasks = [task('a', undefined), task('b', '')]
+  const result = query(tasks, { operation: 'count', group_by: 'none' })
+  assert.equal(result.total, '0'); assert.equal(result.matchedTasks, 0)
+  const answer = attributeQueryMessage(result)
+  assert.match(answer, /合计0个任务/); assert.match(answer, /未填属性2项/)
+  assert.doesNotMatch(answer, /合计0台|无法汇总/)
+})
+
+test('本月安装多少台服务器 selects a dedicated installation attribute without requiring it in task names', () => {
+  const tasks = [task('a', '3', '2026-11-01'), task('b', '5', '2026-11-30'), task('old', '100', '2026-10-31'), task('next', '200', '2026-12-01')]
+    .map(task => ({ ...task, name: `机房${task.id}`, custom_fields: [field(`field-${task.id}`, { name: '安装服务器台数' })] }))
+  const [report] = queryTaskAttributeReports(tasks, { attribute_name: '安装服务器台数', operation: 'count', task_name: '安装服务器', from_date: '2026-01-01', to_date: '2026-12-31' }, [], { text: '本月安装多少台服务器', today: '2026-11-10' })
+  assert.equal(isTaskAttributeQueryIntent('本月安装多少台服务器', buildTaskAttributeCatalog(tasks)), true)
+  assert.equal(isTaskAttributeQueryIntent('本月安装多少 台服务器', []), true)
+  assert.equal(report.ok, true)
+  if (report.ok) {
+    assert.equal(report.total, '8'); assert.equal(report.query.operation, 'sum'); assert.equal(report.matchedTasks, 2)
+    assert.equal(report.query.from_date, '2026-11-01'); assert.equal(report.query.to_date, '2026-11-30')
+    assert.equal(report.query.task_name, undefined); assert.deepEqual(report.query.task_keywords, ['安装', '服务器'])
+    assert.deepEqual(report.details.map(row => row.value), ['3', '5'])
+    assert.match(attributeQueryMessage(report), /安装服务器台数/)
+  }
+})
+
+test('installation quantity queries filter generic attributes by both action and object in either word order', () => {
+  const tasks = [task('a', '2', '2026-11-01', { name: '安装服务器999A' }), task('b', '5', '2026-11-30', { name: '服务器B安装' }),
+    task('move', '100', '2026-11-15', { name: '搬迁服务器C' }), task('switch', '40', '2026-11-15', { name: '安装交换机D' }),
+    task('outside', '200', '2026-10-31', { name: '安装服务器E' }), task('empty', undefined, '2026-11-15', { name: '安装服务器F' })]
+    .map(task => ({ ...task, custom_fields: [field(`field-${task.id}`, { name: '设备台数' })] }))
+  const before = structuredClone(tasks)
+  for (const task_name of [undefined, '安装', '安装服务器', '服务器安装']) {
+    const [report] = queryTaskAttributeReports(tasks, { attribute_name: '设备台数', operation: 'sum', task_name }, [], { text: '本月安装多少台服务器', today: '2026-11-10' })
+    assert.equal(report.ok, true)
+    if (report.ok) {
+      assert.equal(report.total, '7'); assert.equal(report.matchedTasks, 2); assert.equal(report.skipped.empty, 1)
+      assert.deepEqual(report.details.map(row => row.taskId), ['a', 'b'])
+      assert.match(attributeQueryMessage(report), /「安装」、「服务器」/)
+    }
+  }
+  assert.deepEqual(tasks, before)
+})
+
+test('installation filters inherit parent context without inheriting a conflicting leaf action or device type', () => {
+  const tasks = [task('parent', '7', '2026-11-15', { name: '服务器安装' }),
+    task('a', '2', '2026-11-15', { name: '设备上架', parent_id: 'parent' }), task('b', '5', '2026-11-15', { name: '系统部署', parent_id: 'parent' }),
+    task('move', '100', '2026-11-15', { name: '搬迁服务器', parent_id: 'parent' }), task('switch', '40', '2026-11-15', { name: '安装交换机', parent_id: 'parent' })]
+    .map(task => ({ ...task, custom_fields: [field(`field-${task.id}`, { name: '设备台数' })] }))
+  const input = { attribute_name: '设备台数', operation: 'sum' }, context = { text: '本月安装多少台服务器', today: '2026-11-10' }
+  const [report] = queryTaskAttributeReports(tasks, input, [], context)
+  assert.equal(report.ok, true)
+  if (report.ok) {
+    assert.equal(report.total, '7'); assert.equal(report.skipped.summary, 1)
+    assert.deepEqual(report.details.map(row => row.taskPath), ['服务器安装 / 设备上架', '服务器安装 / 系统部署'])
+  }
+  const updated = tasks.map(task => task.id === 'b' ? { ...task, custom_values: { 'field-b': '9' } } : task)
+  const [changed] = queryTaskAttributeReports(updated, input, [], context)
+  assert.ok(changed.ok && changed.total === '11')
+})
+
+test('task keyword filters validate input and retain explicit task-name selections', () => {
+  const tasks = [task('a', '2', '2026-11-15', { name: '安装服务器' }), task('b', '5', '2026-11-15', { name: '服务器安装' })]
+  for (const task_keywords of ['安装', [1], [''], Array(21).fill('安装')]) assert.equal(queryTaskAttributes(tasks, { attribute_name: '搬迁服务器台数', task_keywords }).ok, false)
+  const [report] = queryTaskAttributeReports(tasks, { attribute_name: '搬迁服务器台数', task_name: '安装服务器' }, [], { text: '本月任务名称包含安装服务器的共有多少台', today: '2026-11-10' })
+  assert.ok(report.ok && report.total === '2' && report.query.task_name === '安装服务器')
+})
+
+test('服务器 attributes on equipment racking tasks answer installation questions without changing their names or dates', () => {
+  const tasks = [task('a', '2', '2026-11-15', { name: '设备上架' }), task('b', '3', '2026-11-15', { name: '系统部署' }),
+    task('c', '5', '2026-11-15', { name: '服务器安装' }), task('remove', '80', '2026-11-15', { name: '设备下架' }),
+    task('move', '90', '2026-11-15', { name: '服务器搬迁' })]
+    .map(task => ({ ...task, custom_fields: [field(`field-${task.id}`, { name: '服务器' })] }))
+  const before = structuredClone(tasks)
+  const [report] = queryTaskAttributeReports(tasks, { attribute_name: '服务器', operation: 'sum' }, [], { text: '本月安装多少台服务器', today: '2026-11-10' })
+  assert.ok(report.ok && report.total === '10' && report.matchedTasks === 3)
+  assert.deepEqual(tasks, before)
 })
 
 test('an AI-guessed unit or type cannot bypass a real ambiguity without user selection', () => {

@@ -24,8 +24,10 @@ export const AI_TOOLS = [
           attribute_type: { type: 'string', enum: ['number', 'money', 'text', 'date', 'select'], description: '仅按实际目录或用户明确指定的类型筛选；同名多类型不确定时省略，工具将分别统计' },
           unit: { type: 'string', description: '仅按用户明确指定的单位筛选；同名多单位不确定时省略，工具将分别统计。空字符串代表未设置单位' },
           task_name: { type: 'string', description: '可选任务名称关键词筛选' },
+          task_keywords: { type: 'array', items: { type: 'string' }, description: '可选多个关键词，必须同时匹配任务、父级任务或属性名称。例如“本月安装多少台服务器”使用["安装","服务器"]，不要混入搬迁任务或交换机；数量仍从属性值读取' },
           assignee: { type: 'string', description: '可选责任人关键词筛选' },
           value_equals: { type: 'string', description: '可选属性值精确筛选，例如机房属性等于北京；数值也用字符串' },
+          task_scope: { type: 'string', enum: ['leaf', 'summary', 'separate', 'all'], description: '默认leaf仅叶子任务，避免父子重复；只统计父任务用summary（不同父级层次分别统计）；父子分别统计用separate；仅用户明确要求父子一起相加时用all' },
           include_summary: { type: 'boolean', description: '默认false；只有用户明确要求包含父级/摘要任务才为true，避免重复计数' },
           include_inactive: { type: 'boolean', description: '默认false；只有用户明确要求包含无效任务才为true' },
           include_archived: { type: 'boolean', description: '默认false；只有用户明确要求包含停用属性才为true' },
@@ -356,6 +358,9 @@ ${JSON.stringify(buildTaskAttributeCatalog(tasks, customFields))}
 - 未指定时间范围时统计全计划；本月/今年按自然月/自然年边界，包含尚未发生的计划。属性查询中的“本月”“汇总”不是进展月报，不适用下面的周报一句话或工期优先格式。
 - “后3个月/未来三个月/接下来3个月”默认从下月1日起算三个完整自然月；若明确“含本月”则从本月1日起，明确“从今天起”则从今天起到三个月后对应日期的前一天。其他月数同理。使用Today的本地日期计算范围，直接回答，不要求用户操作范围控件或确认默认口径。
 - 默认只统计叶子任务，排除无效任务与停用属性，明确披露未填、无效值或缺少日期的排除数；空值不当0，不存在的属性不猜数字。
+- 只以任务实际填写的属性值为准，不预设固定总数，不从任务名称或属性名称补数量；尚未填报或所选范围无已填记录时说明无法汇总。已明确填写的0保留为有效值。
+- 用户可直接问“本月安装多少台服务器”，无需说出精确属性名。匹配目录中实际存在的数量属性，使用sum计算台数；若属性名是“设备台数”等通用名称，须使用task_keywords=["安装","服务器"]限定任务，兼容“服务器安装”及父级上下文，不能混入交换机或搬迁数量。“本月”取Today所在自然月，默认按任务结束日期；说明所用属性、日期口径，并提供任务及填报值明细。
+- 父任务填报可能是子任务合计，默认task_scope=leaf。只统计父任务用summary，父子分别统计用separate；父任务有多个层级时分层给出结果，不能把不同层级继续相加。相同查询只调用一次，程序会处理不同类型、单位和父子层级，不要为每一种重复调用。
 - 这类问题只读，不可调用创建、修改、删除任务工具。程序会直接用中文文本回答起止日期、各月数量和合计，并附可展开的明细，不需要再次调用工具重复计算。
 
 ## Core Tracking Logic — Time-Based Progress

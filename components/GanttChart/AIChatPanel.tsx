@@ -12,7 +12,7 @@ import { collapseDeletedTaskSuccessors, runFullCascade } from '@/lib/clientSched
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
 import { hasDraftChanges } from '@/store/draftHistory'
-import { attributeQueryMessage, buildTaskAttributeCatalog, isTaskAttributeQueryIntent, queryTaskAttributeReports, type AttributeQueryContext, type AttributeQueryResult } from '@/lib/ai/taskAttributeQuery'
+import { attributeQueryMessage, buildTaskAttributeCatalog, deduplicateAttributeReports, isTaskAttributeQueryIntent, queryTaskAttributeReports, type AttributeQueryContext, type AttributeQueryResult } from '@/lib/ai/taskAttributeQuery'
 import AIAttributeReport from './AIAttributeReport'
 import {
   isWeeklySummaryIntent,
@@ -640,9 +640,9 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
         const previousQuery = previousReports.length === 1 ? previousReports[0] : undefined
         const toolResults = await executeToolCalls(assistantMsg.tool_calls, attributeQuestion, { text, today, previousQuery: previousQuery?.ok ? previousQuery.query : undefined })
         if (attributeQuestion || assistantMsg.tool_calls.every(call => call.function.name === 'query_task_attributes')) {
-          const attributeQueries = toolResults.flatMap(result => result.attributeQueries ?? [])
+          const attributeQueries = deduplicateAttributeReports(toolResults.flatMap(result => result.attributeQueries ?? []))
           setMessages(prev => [...prev, {
-            role: 'assistant', content: toolResults.map(result => result.attributeQueries ? result.attributeQueries.map(query => attributeQueryMessage(query, unsavedChanges)).join('\n\n') : result.result).join('\n'),
+            role: 'assistant', content: [...attributeQueries.map(query => attributeQueryMessage(query, unsavedChanges)), ...toolResults.filter(result => !result.attributeQueries).map(result => result.result)].join('\n\n'),
             attributeQueries, includesUnsavedChanges: unsavedChanges,
           }])
           return
