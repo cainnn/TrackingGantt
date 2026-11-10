@@ -146,6 +146,25 @@ test('fill down preserves canonical full-year minute dates and can clear nullabl
   assert.equal(cleared.tasks[1].deadline, null)
 })
 
+test('filtered fill skips ancestor context rows and hidden siblings, including reverse selections', () => {
+  for (const isMinute of [false, true]) {
+    const source = { ...task('a', 'p1'), auto_schedule: false, assignee: '张三',
+      start_date: '2026-11-05T09:15:00', end_date: isMinute ? '2026-11-05T10:45:00' : '2026-11-08T09:15:00', duration: isMinute ? 90 : 4320 }
+    const tasks = [task('p1'), source, task('hidden1', 'p1'), task('p2'), task('b', 'p2'), task('hidden2', 'p2')]
+    const before = structuredClone(tasks)
+    const result = applyGridFillDown(tasks, [], ['p1', 'a', 'p2', 'b'], ['assignee', 'duration'],
+      { taskId: 'b', col: 'duration' }, { taskId: 'p1', col: 'assignee' }, isMinute, ['p1', 'p2'])
+    assert.deepEqual(result.editedIds, ['b'])
+    assert.equal(result.tasks.find(task => task.id === 'b')!.duration, source.duration)
+    assert.equal(result.tasks.find(task => task.id === 'b')!.assignee, '张三')
+    for (const id of ['a', 'hidden1', 'hidden2']) assert.deepEqual(result.tasks.find(task => task.id === id), before.find(task => task.id === id))
+    assert.equal(result.tasks.find(task => task.id === 'p2')!.assignee, null)
+    assert.deepEqual(tasks, before)
+    assert.throws(() => applyGridFillDown(tasks, [], ['p1', 'a', 'p2'], ['duration'],
+      { taskId: 'p1', col: 'duration' }, { taskId: 'p2', col: 'duration' }, isMinute, ['p1', 'p2']), /至少两行符合筛选/)
+  }
+})
+
 test('invalid fill selections reject atomically without altering source or earlier valid targets', () => {
   const tasks = [task('a'), task('b'), task('parent'), task('child', 'parent')], before = structuredClone(tasks)
   assert.throws(() => applyGridFillDown(tasks, [], ['a', 'b'], ['duration'], { taskId: 'a', col: 'duration' }, null, false), /至少两行/)

@@ -21,6 +21,12 @@ export default function SavedViewsMenu({ projectId, capture, apply, layouts }: {
     setSelected(currentViewId && views.some(v => v.id === currentViewId) ? currentViewId : '')
   }, [currentViewId])
   const disabled = loading || saving || readOnly || !preferences
+  const activate = async (view: SavedGanttView) => {
+    if (disabled) return
+    setError(''); setSelected(view.id)
+    apply(view)
+    await persist({ ...preferences, currentView: view })
+  }
   const save = async (kind: 'current' | 'new' | 'update') => {
     if (disabled) return
     setError('')
@@ -50,13 +56,13 @@ export default function SavedViewsMenu({ projectId, capture, apply, layouts }: {
     </div>}
     {views.length > 0 ? <>
     <label className="block text-xs font-medium text-gray-600" htmlFor={`saved-layout-${projectId}`}>选择已保存的布局</label>
-    <select id={`saved-layout-${projectId}`} aria-label="已保存布局" disabled={loading || saving} className="h-9 w-full rounded border border-gray-300 bg-white px-2" value={selected} onChange={e => {
+    <select id={`saved-layout-${projectId}`} aria-label="已保存布局" disabled={disabled} className="h-9 w-full rounded border border-gray-300 bg-white px-2" value={selected} onChange={e => {
       setSelected(e.target.value)
       const view = views.find(v => v.id === e.target.value)
-      if (view) apply(view)
+      if (view) void activate(view)
     }}><option value="">选择布局…</option>{views.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</select>
     {selected && <div className="flex items-center gap-4 text-xs">
-      <button type="button" className="text-blue-600" onClick={() => { const v = views.find(x => x.id === selected); if (v) apply(v) }}>应用布局</button>
+      <button type="button" disabled={disabled} className="text-blue-600 disabled:opacity-40" onClick={() => { const v = views.find(x => x.id === selected); if (v) void activate(v) }}>应用布局</button>
       <button type="button" disabled={disabled} className="text-blue-600 disabled:opacity-40" onClick={() => void save('update')}>更新此布局</button>
       <button type="button" disabled={disabled} className="text-gray-500 hover:text-red-600 disabled:opacity-40" onClick={async () => {
         if (preferences && await persist({ ...preferences, views: views.filter(v => v.id !== selected) })) setSelected('')

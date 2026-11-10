@@ -57,7 +57,7 @@ async function navigate(p) {
   if (!new URL(page.url()).pathname.startsWith('/dashboard')) await page.click('a[href="/dashboard"]');
   await page.waitForSelector(`a[href="/projects/${p.id}"]`);
   await page.click(`a[href="/projects/${p.id}"]`);
-  await page.waitForSelector('[data-timeline-scroll]');
+  await page.waitForSelector(`[data-gantt-grid][data-project-id="${p.id}"]`);
 }
 async function browserLogin(username, pwd) {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle0' });
@@ -173,6 +173,20 @@ async function main() {
     assert.deepEqual(await api(route(a)), named, 'failed save preserves database state');
     await saveCurrent(); assert.equal((await api(route(a))).currentView.search, '采购任务 2');
     pass('named layout creation/update and failed-save retry without losing saved data');
+    const beforeActivation = await api(route(a));
+    failNextSave = true; await page.select('select[aria-label="已保存布局"]', namedId);
+    await page.waitForSelector(`${settings} [role="alert"]`);
+    assert.deepEqual(await api(route(a)), beforeActivation, 'failed layout activation preserves the last saved active layout');
+    await click('应用布局', settings);
+    await page.waitForFunction(() => document.querySelector('input[placeholder="搜索任务..."]').value === '采购任务 1');
+    await page.waitForFunction(() => document.querySelector('[role="dialog"]')?.textContent.includes('布局已保存'));
+    assert.equal((await api(route(a))).currentView.id, namedId, 'applying a named layout also saves the active layout');
+    await click('关闭显示设置'); await navigate(b); await navigate(a);
+    assert.equal(await page.$eval('input[placeholder="搜索任务..."]', e => e.value), '采购任务 1');
+    await openLayouts(); assert.equal(await page.$eval('select[aria-label="已保存布局"]', e => e.value), namedId);
+    await click('关闭显示设置'); await fill('input[placeholder="搜索任务..."]', '采购任务 2');
+    await openLayouts(); await saveCurrent();
+    pass('applying a named layout persists it for reopening the project');
     await click('关闭显示设置');
     await page.click('a[href="/dashboard"]'); await page.waitForSelector(`a[href="/projects/${b.id}"]`);
     await page.click(`a[href="/projects/${b.id}"]`); await page.waitForSelector('[data-timeline-scroll]');

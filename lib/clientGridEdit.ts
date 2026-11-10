@@ -62,11 +62,14 @@ export function gridCellEditable(task: Task, col: string, tasks: Task[], deps: D
 }
 
 /** Fill only the rows below the visible top row, using canonical source values. */
-export function applyGridFillDown(tasks: Task[], deps: Dependency[], rowIds: string[], columns: string[], anchor: GridCell, extent: GridCell | null | undefined, isMinute: boolean) {
+export function applyGridFillDown(tasks: Task[], deps: Dependency[], rowIds: string[], columns: string[], anchor: GridCell, extent: GridCell | null | undefined, isMinute: boolean, contextRowIds: readonly string[] = []) {
   const rect = gridSelectionRect(rowIds, columns, anchor, extent ?? anchor)
   if (!rect || rect.top === rect.bottom) throw new Error('请先选中至少两行单元格，首行为来源，其余行向下填充')
   if ((rect.bottom - rect.top + 1) * (rect.right - rect.left + 1) > 5000) throw new Error('一次最多填充 5000 个单元格，请缩小选区')
-  const source = tasks.find(task => task.id === rowIds[rect.top] && !task.is_deleted)
+  const context = new Set(contextRowIds)
+  const fillRowIds = rowIds.slice(rect.top, rect.bottom + 1).filter(id => !context.has(id))
+  if (fillRowIds.length < 2) throw new Error('请先选中至少两行符合筛选条件的任务，父级上下文行不参与填充')
+  const source = tasks.find(task => task.id === fillRowIds[0] && !task.is_deleted)
   if (!source) throw new Error('来源任务不存在，请重新选择')
   const values = columns.slice(rect.left, rect.right + 1).map(col => {
     if (col === 'name') return source.name
@@ -85,7 +88,7 @@ export function applyGridFillDown(tasks: Task[], deps: Dependency[], rowIds: str
   })
   const start = { taskId: rowIds[rect.top], col: columns[rect.left] }
   const end = { taskId: rowIds[rect.bottom], col: columns[rect.right] }
-  const result = applyGridPaste(tasks, deps, rowIds, columns, { ...start, taskId: rowIds[rect.top + 1] }, serializeClipboardGrid([values]), isMinute, end)
+  const result = applyGridPaste(tasks, deps, fillRowIds, columns, { ...start, taskId: fillRowIds[1] }, serializeClipboardGrid([values]), isMinute, { ...end, taskId: fillRowIds.at(-1)! })
   return { ...result, selection: { start, end } }
 }
 

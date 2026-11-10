@@ -339,7 +339,7 @@ function timeBasedPercent(task: Task, statusDate: Date | null): number {
 }
 
 // ─── Flat tree row ─────────────────────────────────────────────────────────
-interface FlatRow { task: Task; level: number; hasChildren: boolean; expanded: boolean }
+interface FlatRow { task: Task; level: number; hasChildren: boolean; expanded: boolean; contextOnly?: boolean }
 
 // ─── Dependency cascade helper ─────────────────────────────────────────────
 function getDownstreamIds(taskId: string, deps: Dependency[]): string[] {
@@ -1017,18 +1017,18 @@ export default function GanttChart({
         cur = tasks.find(x => x.id === cur!.parent_id)
       }
     }
+    const filterRows = (matches: (task: Task) => boolean) => {
+      const direct = new Set(tasks.filter(matches).map(task => task.id))
+      const matched = new Set(direct)
+      tasks.forEach(task => { if (direct.has(task.id)) addAncestors(task, matched) })
+      // Ancestors remain visible for orientation, but are not fill targets.
+      rows = rows.filter(row => matched.has(row.task.id)).map(row => ({ ...row, contextOnly: row.contextOnly || !direct.has(row.task.id) }))
+    }
 
     // 搜索过滤
     if (searchQuery) {
       const q = searchQuery.toLowerCase()
-      const matched = new Set<string>()
-      tasks.forEach(t => {
-        if (t.name.toLowerCase().includes(q)) {
-          matched.add(t.id)
-          addAncestors(t, matched)
-        }
-      })
-      rows = rows.filter(r => matched.has(r.task.id))
+      filterRows(task => task.name.toLowerCase().includes(q))
     }
 
     // 列筛选（多列并列）
@@ -1062,28 +1062,13 @@ export default function GanttChart({
           case 'inactive':   return t.inactive ? '是' : '否'
         }
       }
-      const matched = new Set<string>()
-      tasks.forEach(t => {
-        const pass = activeFilterEntries.every(([k, set]) => set.has(colVal(t, k)))
-        if (pass) {
-          matched.add(t.id)
-          addAncestors(t, matched)
-        }
-      })
-      rows = rows.filter(r => matched.has(r.task.id))
+      filterRows(task => activeFilterEntries.every(([key, values]) => values.has(colVal(task, key))))
     }
 
     // 差异筛选：只显示版本对比中变更的任务
     if (diffFilter?.taskCodes?.length) {
       const codes = new Set(diffFilter.taskCodes)
-      const matched = new Set<string>()
-      tasks.forEach(t => {
-        if (codes.has(t.task_code)) {
-          matched.add(t.id)
-          addAncestors(t, matched)
-        }
-      })
-      rows = rows.filter(r => matched.has(r.task.id))
+      filterRows(task => codes.has(task.task_code))
     }
 
     // 排序（保持树形结构：仅对同层级兄弟排序）
@@ -2808,7 +2793,7 @@ export default function GanttChart({
     cellRangeClickHandled.current = false
     const element = (e.target as HTMLElement).closest<HTMLElement>('[data-task-cell]')
     const col = element?.dataset.col as OptionalCol | undefined
-    if (!element?.dataset.taskCell || !col || !['duration', 'start', 'end', 'cdate', 'ddate'].includes(col) || e.ctrlKey || e.metaKey) {
+    if (!element?.dataset.taskCell || !col || !['assignee', 'duration', 'start', 'end', 'cdate', 'ddate'].includes(col) || e.ctrlKey || e.metaKey) {
       setCellRangeEnd(null); return
     }
     e.preventDefault()
@@ -2852,7 +2837,8 @@ export default function GanttChart({
   const handleGridFillDown = () => {
     if (readOnly || !selectedCell) return
     try {
-      const next = applyGridFillDown(tasks, deps, gridRowIds, gridColumns, selectedCell, cellRangeEnd, isMinute)
+      const contextRows = displayRows.filter(row => row.contextOnly).map(row => row.task.id)
+      const next = applyGridFillDown(tasks, deps, gridRowIds, gridColumns, selectedCell, cellRangeEnd, isMinute, contextRows)
       const diff = buildSaveDiff(tasks, deps, next.tasks, next.dependencies)
       if (!diff.tasksToUpdate.length && !diff.depsToUpdate.length) {
         setGridError(''); setGridNotice('选区下方已与首行相同，无需重复填充。'); return
@@ -3144,7 +3130,7 @@ export default function GanttChart({
         </div>
 
         {/* Rows */}
-        <div ref={leftRef} data-gantt-grid data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onCopy={handleGridCopy} onPaste={handleGridPaste}
+        <div ref={leftRef} data-gantt-grid data-project-id={projectId} data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onCopy={handleGridCopy} onPaste={handleGridPaste}
              onMouseDownCapture={handleCellRangeStart} onMouseMoveCapture={handleCellRangeMove}
              onClickCapture={event => { if (cellRangeClickHandled.current) { cellRangeClickHandled.current = false; event.preventDefault(); event.stopPropagation(); leftRef.current?.focus({ preventScroll: true }) } }}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
