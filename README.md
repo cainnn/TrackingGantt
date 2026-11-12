@@ -243,6 +243,27 @@ bash scripts/db-restore-latest.sh
 
 On VPS, `deploy-vps.sh` already performs automatic backup before each deploy.
 
+VPS 历史查询备份由两个 systemd 定时任务管理，每天北京时间 03:00 运行：
+
+- `gantt-db-history@day1.timer`：生成当天完整快照，并将昨天最新的完整快照恢复到 `gantt_app_backup_day1`。
+- `gantt-db-history@day7.timer`：将 7 个自然日前最新的完整快照恢复到 `gantt_app_backup_day7`。
+
+“昨天”和“7 天前”指完整数据库快照，不是按业务日期过滤行；实际快照时间可在各备份库的 `backup_metadata.snapshot` 表中查询。先在临时库恢复并核对所有公共表的行数，再切换历史库。历史库默认只读；业务库持续在线。缺失指定日期或恢复失败时保留上一次可用历史库并记录失败，不会用其他日期冒充。
+
+在数据库服务器上以 root 执行 `bash scripts/install-db-history-backups.sh` 安装。安装会实际恢复两个历史库，成功后启用两个定时器，并保存、替换旧的每日备份 cron。每日新快照保存在 `/var/backups/gantt-app/history`，保留最近 14 天；既有部署备份保留。运行脚本和配置安装在 `/usr/local/lib/gantt-db-history` 与 `/etc/gantt-db-history.env`，不受应用代码部署影响。
+
+检查状态：`systemctl list-timers 'gantt-db-history@*'`；查看日志：`journalctl -u gantt-db-history@day1.service -u gantt-db-history@day7.service`；手动补跑：`systemctl start gantt-db-history@day1.service gantt-db-history@day7.service`。最近成功的快照信息还会写入 `/var/lib/gantt-db-history/day1.json`、`day7.json`。纯逻辑回归：`python3 scripts/test-db-history-backup.py`。
+
+安装后以 root 运行 `python3 scripts/test-db-history-live.py`，在独立临时库验证新格式恢复、损坏备份失败时保留旧快照、两个历史库的真实日期和所有表行数，结束后清理临时库。
+
+### 删除任务与依赖衔接
+
+工具栏、右键与 AI 删除使用同一套逻辑，作为一次可撤销的草稿操作。删除中间任务时，尽量衔接保留的前置与后续任务：保留两端的开始/完成关系类型，累加间隔分钟数，移除被删任务本身的工期；连续删除和分支链同样处理。已有直接关系原样保留，重复路径不重复建边，不创建自依赖、环路或父子依赖。数据库每对任务只能保存一条关系，多个新路径合并时优先启用路径，并选择当前工期下约束最强的一条。
+
+因本次删除而失去全部有效前置的任务，起点重设到删除当天（北京时间；分钟项目使用删除时刻），工期保留，后续任务与摘要日期联动；显式日期约束仍然生效。仍有有效前置或删除后能衔接前置的任务按依赖继续排程。不会把项目状态日期当作删除日期。接口显式提交 `ids` 数组时仅删除列出的任务，保留的子任务挂到最近的保留祖先；单个 `id` 与界面删除包含整条子树。正式保存提交的日期与依赖按草稿原样入库，接口不会重复生成衔接关系。
+
+回归：`npm run check`；`node scripts/test-task-delete-relations.cjs http://127.0.0.1:3138` 在独立临时项目中验证真实接口、工具栏和右键删除、日期与前置显示、撤销重做、保存重试和重开项目，结束后清理。通过 `DELETE_TEST_USER`、`DELETE_TEST_PASSWORD` 指定测试账号。
+
 ## AI 查询与汇总任务属性
 
 AI 助手支持直接用自然语言查询任务自定义属性，如“按任务结束日期统计每月搬迁服务器台数”“后3个月搬迁多少台”“汇总2027年1月至3月的支出金额”或“查询任务 A 的机房属性”。欢迎区提供可点击的示例，优先使用当前项目已有数字/金额属性的名称；无需选择范围控件。

@@ -1,6 +1,7 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit'
 import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField } from '@/types'
-import { taskBranchIds } from '../../lib/taskTree'
+import { deletionAnchor, planTaskDeletion } from '../../lib/taskDeletion'
+import { uuid } from '../../lib/uuid'
 
 interface Comparison {
   tasks: Task[]
@@ -83,11 +84,18 @@ const tasksSlice = createSlice({
         if (idx !== -1) state.tasks[idx] = updated
       }
     },
-    deleteTasks(state, action: PayloadAction<string[]>) {
-      const ids = taskBranchIds(state.tasks, action.payload)
-      state.tasks = state.tasks.filter(task => !ids.has(task.id))
-      state.dependencies = state.dependencies.filter(dep => !ids.has(dep.from_task_id) && !ids.has(dep.to_task_id))
-      state.selectedIds = state.selectedIds.filter(id => !ids.has(id))
+    deleteTasks: {
+      prepare(ids: string[], options: { isMinute?: boolean; deletionDate?: string } = {}) {
+        return { payload: { ids, isMinute: options.isMinute, deletionDate: options.deletionDate ?? deletionAnchor(options.isMinute),
+          operationId: uuid() } }
+      },
+      reducer(state, action: PayloadAction<{ ids: string[]; isMinute?: boolean; deletionDate: string; operationId: string }>) {
+        const plan = planTaskDeletion(state.tasks, state.dependencies, action.payload.ids, action.payload)
+        state.tasks = plan.tasks
+        state.dependencies = plan.dependencies
+        state.selectedIds = state.selectedIds.filter(id => !plan.deletedIds.has(id))
+        state.dirtyIds = [...new Set([...state.dirtyIds.filter(id => !plan.deletedIds.has(id)), ...plan.updatedTasks.map(t => t.id)])]
+      },
     },
     copyTasks(state, action: PayloadAction<string[]>) {
       const ids = new Set(action.payload)

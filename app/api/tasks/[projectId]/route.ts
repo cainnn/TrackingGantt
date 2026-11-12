@@ -10,12 +10,13 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { normalizeDurationMinutes } from '@/lib/taskNumbers'
+import { planTaskDeletion } from '@/lib/taskDeletion'
 import { CustomFieldError, normalizeCustomValues, formatCustomValue, submittedTaskCustomFields, taskCustomFields, customFieldsEqual } from '@/lib/taskCustomFields'
-import type { TaskCustomField } from '@/types'
+import type { TaskCustomField, Task, Dependency } from '@/types'
 import {
   type TaskLike,
   toDateStr,
-  cascadeDependencies, collapseDeletedTaskSuccessors, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
+  cascadeDependencies, updateSummaryTasksDates, updateSummaryTaskDateRecursive,
   snapTasksToDayLevel,
 } from '@/lib/scheduling'
 
@@ -840,21 +841,28 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     await client.query('BEGIN')
     await lockProjectTx(client, projectId)
 
-    // Collect all descendants recursively for cascade soft-delete
-    const allIds = new Set<string>(ids)
-    let frontier = Array.isArray(body.ids) ? [] : [...ids]
-    while (frontier.length) {
-      const ph = frontier.map((_, i) => `$${i + 1}`).join(',')
-      const children = await client.query(
-        `SELECT id FROM tasks WHERE parent_id IN (${ph}) AND project_id = $${frontier.length + 1} AND is_deleted = false`,
-        [...frontier, projectId]
-      )
-      const childIds = children.rows.map((r: { id: string }) => r.id).filter((id: string) => !allIds.has(id))
-      childIds.forEach((id: string) => allIds.add(id))
-      frontier = childIds
+    const [taskRows, depRows, projectRows] = await Promise.all([
+      client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false', [projectId]),
+      client.query(`SELECT d.* FROM dependencies d
+        JOIN tasks f ON f.id = d.from_task_id AND f.is_deleted = false
+        JOIN tasks t ON t.id = d.to_task_id AND t.is_deleted = false WHERE d.project_id = $1`, [projectId]),
+      client.query('SELECT time_granularity FROM projects WHERE id = $1', [projectId]),
+    ])
+    const liveTasks: Task[] = taskRows.rows.map(t => ({ ...t,
+      start_date: toDateStr(t.start_date), end_date: toDateStr(t.end_date), constraint_date: toDateStr(t.constraint_date),
+      original_start_date: toDateStr(t.original_start_date), original_end_date: toDateStr(t.original_end_date),
+    }))
+    // Confirmed saves already contain the user's complete computed plan. Rebuilding it
+    // here would duplicate the replacement dependencies posted later in the save.
+    const confirmed = req.headers.get('x-gantt-confirmed-save') === '1'
+    const deletion = planTaskDeletion(liveTasks, confirmed ? [] : depRows.rows as Dependency[], ids, {
+      includeDescendants: !Array.isArray(body.ids), isMinute: projectRows.rows[0]?.time_granularity === 'minute', operationId: randomUUID(),
+    })
+    const allIdArr = [...deletion.deletedIds]
+    if (!allIdArr.length) {
+      await client.query('COMMIT')
+      return NextResponse.json(success({ deleted: [], dependencies: [], updatedTasks: [] }))
     }
-
-    const allIdArr = [...allIds]
     const ph = allIdArr.map((_, i) => `$${i + 2}`).join(',')
 
     // Fetch tasks for lifecycle before soft-deleting
@@ -870,19 +878,35 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       [projectId, ...allIdArr]
     )
 
-    // Retained children must not vanish just because the old parent is removed.
-    const retained = await client.query(`WITH children AS (
-      SELECT id, parent_id FROM tasks WHERE project_id = $1 AND is_deleted = false AND parent_id = ANY($2::uuid[])
-    ) UPDATE tasks t SET parent_id = NULL, updated_at = NOW() FROM children c WHERE t.id = c.id
-      RETURNING t.id, t.task_code, t.name, c.parent_id AS old_parent_id`, [projectId, allIdArr])
-    await addLifecycleBatch(client, retained.rows.map(t => ({ taskId: t.id, taskCode: t.task_code ?? t.id,
-      projectId, userId: auth.value.userId, event_type: 'moved', field_name: 'parent_id',
-      old_value: t.old_parent_id, new_value: null,
-      description: `删除旧父任务时保留任务「${t.name}」，暂列为顶级任务，后续提交按用户指定父级保存`,
-    })))
-    if (!Array.isArray(body.ids)) {
-      await collapseDeletedTaskSuccessors(client, projectId, allIdArr)
-      await updateSummaryTasksDates(client, projectId)
+    const byId = new Map(liveTasks.map(t => [t.id, t]))
+    const changedTasks: Task[] = []
+    for (const task of deletion.updatedTasks) {
+      const previous = byId.get(task.id)!
+      if (confirmed) {
+        if (task.parent_id === previous.parent_id) continue
+        await client.query('UPDATE tasks SET parent_id = $1, updated_at = NOW() WHERE id = $2 AND project_id = $3',
+          [task.parent_id, task.id, projectId])
+      } else {
+        await client.query(`UPDATE tasks SET parent_id = $1, start_date = $2, end_date = $3, duration = $4,
+          percent_done = $5, original_start_date = $6, original_end_date = $7, updated_at = NOW()
+          WHERE id = $8 AND project_id = $9`, [task.parent_id, task.start_date, task.end_date, task.duration,
+          task.percent_done, task.original_start_date, task.original_end_date, task.id, projectId])
+        changedTasks.push(task)
+      }
+      if (task.parent_id !== previous.parent_id) await addLifecycle(client, {
+        taskId: task.id, taskCode: task.task_code, projectId, userId: auth.value.userId,
+        event_type: 'moved', field_name: 'parent_id', old_value: previous.parent_id, new_value: task.parent_id,
+        description: `删除父任务后保留「${task.name}」，挂到最近的保留祖先任务`,
+      })
+    }
+    for (const dep of deletion.newDependencies) {
+      await client.query(`INSERT INTO dependencies (id, project_id, from_task_id, to_task_id, type, lag, active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)`, [dep.id, projectId, dep.from_task_id, dep.to_task_id, dep.type, dep.lag, dep.active ?? true])
+      const successor = byId.get(dep.to_task_id)!
+      await addLifecycle(client, { taskId: successor.id, taskCode: successor.task_code, projectId, userId: auth.value.userId,
+        event_type: 'dep_added', field_name: 'dependency',
+        description: `删除中间任务后衔接依赖：「${byId.get(dep.from_task_id)?.name}」→「${successor.name}」，间隔 ${dep.lag} 分钟`,
+      })
     }
 
     // Lifecycle events
@@ -897,7 +921,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     }
 
     await client.query('COMMIT')
-    return NextResponse.json(success({ deleted: allIdArr }))
+    return NextResponse.json(success({ deleted: allIdArr, dependencies: deletion.newDependencies, updatedTasks: changedTasks }))
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     const msg = err instanceof Error ? err.message : 'Unknown error'

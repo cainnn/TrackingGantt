@@ -2,13 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { dayLevelDurationFromDates, wouldCreateCycle } from '../lib/scheduling'
 import {
-  collapseDeletedTaskSuccessors,
   findUpperConstraintViolations,
   rollupSummaryTasks,
   runFullCascade,
   snapTaskUpdatesToDayLevel,
 } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
+import { planTaskDeletion } from '../lib/taskDeletion'
 
 function task(partial: Partial<Task> & Pick<Task, 'id'>): Task {
   const base: Task = {
@@ -71,7 +71,7 @@ test('computes day level duration from start and end dates', () => {
   )
 })
 
-test('collapses deleted task successors back to status date and cascades downstream', () => {
+test('collapses deleted task successors to the deletion date and cascades downstream', () => {
   const tasks = [
     task({ id: 'summary', start_date: '2026-06-10T00:00:00', end_date: '2026-06-14T00:00:00', duration: 4 * 1440 }),
     task({ id: 'deleted', start_date: '2026-06-01T00:00:00', end_date: '2026-06-03T00:00:00', duration: 2880 }),
@@ -82,10 +82,8 @@ test('collapses deleted task successors back to status date and cascades downstr
     dep({ from_task_id: 'deleted', to_task_id: 'successor' }),
     dep({ from_task_id: 'successor', to_task_id: 'downstream' }),
   ]
-  const remainingTasks = tasks.filter(t => t.id !== 'deleted')
-  const remainingDeps = deps.filter(d => d.from_task_id !== 'deleted' && d.to_task_id !== 'deleted')
 
-  const updates = collapseDeletedTaskSuccessors(remainingTasks, deps, remainingDeps, ['deleted'], '2026-06-05T00:00:00')
+  const updates = planTaskDeletion(tasks, deps, ['deleted'], { deletionDate: '2026-06-05T00:00:00' }).updatedTasks
   const byId = new Map(updates.map(t => [t.id, t]))
 
   assert.equal(byId.get('successor')?.start_date, '2026-06-05T00:00:00')
@@ -99,18 +97,17 @@ test('collapses deleted task successors back to status date and cascades downstr
   assert.equal(byId.get('summary')?.duration, 3 * 1440)
 })
 
-test('does not collapse deleted task successors that already started before status date', () => {
+test('resets earlier planned successors to the deletion day after losing their last predecessor', () => {
   const tasks = [
     task({ id: 'deleted', start_date: '2026-06-01T00:00:00', end_date: '2026-06-03T00:00:00', duration: 2880 }),
     task({ id: 'successor', start_date: '2026-06-04T00:00:00', end_date: '2026-06-06T00:00:00', duration: 2880 }),
   ]
   const deps = [dep({ from_task_id: 'deleted', to_task_id: 'successor' })]
-  const remainingTasks = tasks.filter(t => t.id !== 'deleted')
-  const remainingDeps: Dependency[] = []
 
-  const updates = collapseDeletedTaskSuccessors(remainingTasks, deps, remainingDeps, ['deleted'], '2026-06-05T00:00:00')
+  const updates = planTaskDeletion(tasks, deps, ['deleted'], { deletionDate: '2026-06-05T00:00:00' }).updatedTasks
 
-  assert.equal(updates.length, 0)
+  assert.equal(updates[0]?.start_date, '2026-06-05T00:00:00')
+  assert.equal(updates[0]?.end_date, '2026-06-07T00:00:00')
 })
 
 test('rolls up summary duration on every child duration preview change', () => {
@@ -274,7 +271,7 @@ test('manual successor ignores predecessor dependency during automatic cascade',
   assert.equal(updates.length, 0)
 })
 
-test('does not collapse deleted task successors that are manual', () => {
+test('resets newly orphaned manual tasks without changing their scheduling mode', () => {
   const tasks = [
     task({ id: 'deleted', start_date: '2026-06-01T00:00:00', end_date: '2026-06-03T00:00:00', duration: 2880 }),
     task({
@@ -286,10 +283,9 @@ test('does not collapse deleted task successors that are manual', () => {
     }),
   ]
   const deps = [dep({ from_task_id: 'deleted', to_task_id: 'manual-successor' })]
-  const remainingTasks = tasks.filter(t => t.id !== 'deleted')
-  const remainingDeps: Dependency[] = []
 
-  const updates = collapseDeletedTaskSuccessors(remainingTasks, deps, remainingDeps, ['deleted'], '2026-06-05T00:00:00')
+  const updates = planTaskDeletion(tasks, deps, ['deleted'], { deletionDate: '2026-06-05T00:00:00' }).updatedTasks
 
-  assert.equal(updates.length, 0)
+  assert.equal(updates[0]?.start_date, '2026-06-05T00:00:00')
+  assert.equal(updates[0]?.end_date, '2026-06-07T00:00:00')
 })

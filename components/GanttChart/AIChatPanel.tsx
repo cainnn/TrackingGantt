@@ -8,7 +8,7 @@ import {
 } from '@/store/slices/tasksSlice'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
-import { collapseDeletedTaskSuccessors, runFullCascade } from '@/lib/clientScheduling'
+import { runFullCascade } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
 import { hasDraftChanges } from '@/store/draftHistory'
@@ -277,23 +277,7 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             const ids = (args.task_codes as string[]).map(c => codeToId(tasks, c)).filter(Boolean) as string[]
             if (ids.length === 0) { result = 'No matching tasks found'; break }
             const idSet = taskBranchIds(tasks, ids)
-            const relatedDeps = dependencies.filter(d => idSet.has(d.from_task_id) || idSet.has(d.to_task_id))
-            const remainTasks = tasks.filter(t => !idSet.has(t.id))
-            const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
-            const cascaded = collapseDeletedTaskSuccessors(
-              remainTasks,
-              dependencies,
-              remainDeps,
-              idSet,
-              currentProject?.status_date,
-              { isMinute },
-            )
-            for (const d of relatedDeps) dispatch(removeDependency(d.id))
-            dispatch(deleteTasks([...idSet]))
-            if (cascaded.length > 0) {
-              dispatch(updateTasks(cascaded))
-              dispatch(markDirty(cascaded.map(t => t.id)))
-            }
+            dispatch(deleteTasks([...idSet], { isMinute }))
             result = `Deleted ${idSet.size} task(s), including descendants`
             break
           }

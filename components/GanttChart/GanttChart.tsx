@@ -19,7 +19,6 @@ import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { authFetch } from '@/lib/client/authFetch'
 import {
   runFullCascade,
-  collapseDeletedTaskSuccessors,
   rollupSummaryTasks,
   findUpperConstraintViolations,
   snapTaskUpdatesToDayLevel,
@@ -2315,18 +2314,8 @@ export default function GanttChart({
     const ids = taskBranchIds(tasks, [taskId])
     if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
     dispatch(labelDraftStep('删除任务及子任务'))
-    // 同时移除关联依赖（本地）
-    const relatedDeps = deps.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
-    const remainDeps = deps.filter(d => !relatedDeps.some(x => x.id === d.id))
-    const remainTasks = tasks.filter(t => !ids.has(t.id))
-    const cascaded = collapseDeletedTaskSuccessors(remainTasks, deps, remainDeps, ids, currentProject?.status_date, { isMinute })
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([...ids]))
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-    }
-  }, [dispatch, tasks, deps, currentProject?.status_date, isMinute, readOnly])
+    dispatch(deleteTasks([...ids], { isMinute }))
+  }, [dispatch, tasks, isMinute, readOnly])
 
   const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)

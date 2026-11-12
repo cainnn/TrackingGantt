@@ -33,7 +33,7 @@ import type { OptionalCol, IndicatorsConfig } from './GanttChart'
 import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
-import { runFullCascade, collapseDeletedTaskSuccessors } from '@/lib/clientScheduling'
+import { runFullCascade } from '@/lib/clientScheduling'
 import { buildSaveDiff, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
@@ -1022,25 +1022,8 @@ export default function GanttToolbar({
     const ids = taskBranchIds(tasks, selectedIds)
     if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
     dispatch(labelDraftStep('删除任务及子任务'))
-    // 同时移除关联依赖
-    const relatedDeps = dependencies.filter(d => ids.has(d.from_task_id) || ids.has(d.to_task_id))
-    const remainDeps = dependencies.filter(d => !relatedDeps.some(x => x.id === d.id))
-    const remainTasks = tasks.filter(t => !ids.has(t.id))
-      const cascaded = collapseDeletedTaskSuccessors(
-        remainTasks,
-        dependencies,
-        remainDeps,
-        ids,
-        currentProject?.status_date,
-        { isMinute },
-      )
-    for (const d of relatedDeps) dispatch(removeDependency(d.id))
-    dispatch(deleteTasks([...ids]))
-    if (cascaded.length > 0) {
-      dispatch(updateTasks(cascaded))
-      dispatch(markDirty(cascaded.map(t => t.id)))
-    }
-  }, [dispatch, selectedIds, hasSelection, tasks, dependencies, currentProject?.status_date, isMinute, readOnly])
+    dispatch(deleteTasks([...ids], { isMinute }))
+  }, [dispatch, selectedIds, hasSelection, tasks, isMinute, readOnly])
 
   // ── Promote (升级) ────────────────────────────────────────────────────
   const handlePromote = useCallback(async () => {
