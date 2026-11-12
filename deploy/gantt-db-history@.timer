@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily 03:00 Gantt PostgreSQL historical snapshot (%i)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+RandomizedDelaySec=0
+Unit=gantt-db-history@%i.service
+
+[Install]
+WantedBy=timers.target

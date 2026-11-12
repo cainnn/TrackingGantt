@@ -12,6 +12,7 @@
 
 # testing
 /coverage
+__pycache__/
 /.test-dist
 /aspose-tasks-tests/bin/
 /aspose-tasks-tests/obj/
