@@ -110,9 +110,10 @@ const tasksSlice = createSlice({
         }
       }
       state.clipboard = state.tasks.filter(t => ids.has(t.id))
-      // 同时复制剪贴板内任务之间的依赖
+      // Keep boundary links in the clipboard too; paste reconnects eligible
+      // external predecessors that still exist in the destination project.
       state.clipboardDeps = state.dependencies.filter(
-        d => ids.has(d.from_task_id) && ids.has(d.to_task_id)
+        d => ids.has(d.from_task_id) || ids.has(d.to_task_id)
       )
     },
     clearClipboard(state) {

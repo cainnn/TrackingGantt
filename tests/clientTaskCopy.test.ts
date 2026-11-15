@@ -4,6 +4,7 @@ import { buildTaskCopies } from '../lib/clientTaskCopy'
 import { buildSaveDiff } from '../lib/clientSave'
 import { runFullCascade } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
+import tasksReducer, { setTasks, copyTasks } from '../store/slices/tasksSlice'
 
 function task(id: string, order: number, parentId: string | null = null, extra: Partial<Task> = {}): Task {
   return {
@@ -129,4 +130,80 @@ test('empty or stale selection and missing targets do not create copies or reord
     })
   }
   assert.equal(tasks[0].order_index, 7)
+})
+
+const link = (from: string, to: string, type = 2, lag = 0, active = true): Dependency => ({
+  id: `${from}-${to}`, project_id: 'project-1', from_task_id: from, to_task_id: to, type, lag, active,
+})
+
+test('copying a task keeps its external predecessors without attaching the original successors to the copy', () => {
+  const tasks = [task('1', 0), task('2', 1), task('3', 2)]
+  const deps = [link('1', '2', 3, -45, false), link('2', '3')]
+  const original = structuredClone({ tasks, deps })
+  const result = buildTaskCopies(tasks, deps, ['2'], '3', 'after')
+  const copy = result.tasksToAdd[0]
+  assert.deepEqual(result.dependenciesToAdd.map(d => [d.from_task_id, d.to_task_id, d.type, d.lag, d.active]), [['1', copy.id, 3, -45, false]])
+  assert.deepEqual({ tasks, deps }, original)
+  const diff = buildSaveDiff(tasks, deps, apply(tasks, result), [...deps, ...result.dependenciesToAdd])
+  assert.equal(diff.depsToAdd.length, 1)
+  assert.deepEqual(diff.depsToDelete, [])
+  assert.deepEqual(diff.depsToUpdate, [])
+})
+
+test('copying a chain maps internal links to copies and retains incoming links from unselected tasks', () => {
+  const tasks = ['1', '2', '3', '4'].map((id, i) => task(id, i))
+  const deps = [link('1', '2', 0, 15), link('2', '3', 2, 60), link('3', '4')]
+  const result = buildTaskCopies(tasks, deps, ['3', '2'], '4', 'before')
+  const [b, c] = result.tasksToAdd
+  assert.deepEqual(result.dependenciesToAdd.map(d => [d.from_task_id, d.to_task_id, d.type, d.lag]), [['1', b.id, 0, 15], [b.id, c.id, 2, 60]])
+  assert.ok(!result.dependenciesToAdd.some(d => d.to_task_id === '4'))
+})
+
+test('clipboard paste retains captured incoming relations after the original task has been removed', () => {
+  const tasks = [task('1', 0), task('2', 1), task('3', 2)]
+  const deps = [link('1', '2'), link('2', '3')]
+  const seeded = tasksReducer(undefined, setTasks({ tasks, dependencies: deps }))
+  const clipboard = tasksReducer(seeded, copyTasks(['2']))
+  assert.equal(clipboard.clipboardDeps.length, 2)
+  const result = buildTaskCopies(tasks.filter(t => t.id !== '2'), [], ['2'], '3', 'after', {
+    tasks: clipboard.clipboard, dependencies: clipboard.clipboardDeps,
+  })
+  assert.equal(result.dependenciesToAdd.length, 1)
+  assert.equal(result.dependenciesToAdd[0].from_task_id, '1')
+  assert.equal(result.dependenciesToAdd[0].to_task_id, result.tasksToAdd[0].id)
+})
+
+test('missing external tasks and summary endpoints are reported while valid copied relations remain', () => {
+  const tasks = [task('1', 0), task('2', 1), task('3', 2), task('child', 0, '1')]
+  const deps = [link('1', '2'), link('missing', '2'), link('3', '2')]
+  const result = buildTaskCopies(tasks, deps, ['2'], '3', 'after')
+  assert.equal(result.dependenciesToAdd.length, 1)
+  assert.equal(result.dependenciesToAdd[0].from_task_id, '3')
+  assert.equal(result.skippedDependencies?.length, 2)
+  assert.ok(result.skippedDependencies?.some(w => w.reason.includes('摘要任务')))
+  assert.ok(result.skippedDependencies?.some(w => w.reason.includes('不存在')))
+})
+
+test('copy policies can preserve both boundary directions or only internal links without creating cycles', () => {
+  const tasks = [task('a', 0), task('x', 1), task('y', 2)]
+  const snapshot = { tasks: [tasks[0]], dependencies: [link('x', 'a'), link('a', 'y')] }
+  const both = buildTaskCopies(tasks, [], ['a'], 'y', 'after', snapshot, { externalDependencies: 'all' })
+  assert.deepEqual(both.dependenciesToAdd.map(d => [d.from_task_id, d.to_task_id]), [['x', both.tasksToAdd[0].id], [both.tasksToAdd[0].id, 'y']])
+  const none = buildTaskCopies(tasks, [], ['a'], 'y', 'after', snapshot, { externalDependencies: 'none' })
+  assert.deepEqual(none.dependenciesToAdd, [])
+  const cyclic = buildTaskCopies(tasks, [link('y', 'x')], ['a'], 'y', 'after', snapshot, { externalDependencies: 'all' })
+  assert.equal(cyclic.dependenciesToAdd.length, 1)
+  assert.equal(cyclic.skippedDependencies?.length, 1)
+  assert.match(cyclic.skippedDependencies![0].reason, /循环/)
+})
+
+test('every copied incoming relation retains its event type, signed lag, active flag and manual task mode', () => {
+  for (const type of [0, 1, 2, 3]) for (const active of [true, false]) {
+    const tasks = [task('1', 0), task('2', 1, null, { auto_schedule: false })]
+    const result = buildTaskCopies(tasks, [link('1', '2', type, -30, active)], ['2'], '2', 'after')
+    assert.equal(result.tasksToAdd[0].auto_schedule, false)
+    assert.equal(result.dependenciesToAdd[0].type, type)
+    assert.equal(result.dependenciesToAdd[0].lag, -30)
+    assert.equal(result.dependenciesToAdd[0].active, active)
+  }
 })

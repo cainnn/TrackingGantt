@@ -1522,9 +1522,10 @@ export default function GanttChart({
             const updates = new Map(plan.updates.map(t => [t.id, t]))
             const next = tasks.map(t => updates.get(t.id) ?? t)
             for (const summary of rollupSummaryTasks(next)) updates.set(summary.id, summary)
+            const linked = cascadeDragSuccessors(tasks, deps, Object.fromEntries(updates), [])
             dispatch(labelDraftStep('拖动任务顺序'))
-            dispatch(updateTasks([...updates.values()]))
-            dispatch(markDirty([...updates.keys()]))
+            dispatch(updateTasks(Object.values(linked)))
+            dispatch(markDirty(Object.keys(linked)))
             if (plan.parentId) setExpanded(prev => ({ ...prev, [plan.parentId!]: true }))
           }
         }
@@ -1546,7 +1547,7 @@ export default function GanttChart({
       window.removeEventListener('keydown', onKey, true)
       window.removeEventListener('blur', cancel)
     }
-  }, [!!rowDrag, readOnly, tasks, displayRows.length, rowDropTarget, dispatch, onLeftBodyScroll])
+  }, [!!rowDrag, readOnly, tasks, deps, displayRows.length, rowDropTarget, dispatch, onLeftBodyScroll])
 
   // ── 节流函数：限制setState频率，trailing 确保最后一帧一定生效 ──────────
   const throttleTimer = useRef<NodeJS.Timeout | null>(null)
@@ -2395,7 +2396,7 @@ export default function GanttChart({
   const handleCtxCopyTo = useCallback((targetId: string, position: 'before' | 'after') => {
     setCtxMenu(null)
     if (readOnly || viewSnapshot) return
-    const { tasksToAdd, tasksToUpdate, dependenciesToAdd } = buildTaskCopies(tasks, deps, selectedIds, targetId, position)
+    const { tasksToAdd, tasksToUpdate, dependenciesToAdd, skippedDependencies } = buildTaskCopies(tasks, deps, selectedIds, targetId, position)
     if (tasksToAdd.length === 0) return
     dispatch(labelDraftStep(position === 'before' ? '复制任务到上方' : '复制任务到下方'))
     if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
@@ -2405,6 +2406,7 @@ export default function GanttChart({
     const updates = new Map(tasksToUpdate.map(t => [t.id, t]))
     recascade([...deps, ...dependenciesToAdd], [...tasks.map(t => updates.get(t.id) ?? t), ...tasksToAdd])
     dispatch(setSelectedIds(tasksToAdd.map(t => t.id)))
+    if (skippedDependencies?.length) alert(`任务已复制，${skippedDependencies.length} 条依赖无法保留：\n${[...new Set(skippedDependencies.map(w => w.reason))].join('\n')}`)
   }, [dispatch, tasks, deps, selectedIds, readOnly, viewSnapshot, recascade])
 
   const handleCtxConvertMilestone = useCallback(async (taskId: string) => {

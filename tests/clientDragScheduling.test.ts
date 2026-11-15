@@ -84,3 +84,33 @@ test('a manual task stops upstream shifts from propagating through its unchanged
   const preview = cascadeDragSuccessors([purchase, delivery, auto], [dependency, nextDependency], { purchase: resized }, ['auto', 'delivery'])
   assert.deepEqual(Object.keys(preview), ['purchase'])
 })
+
+test('dragging preserves dependency data and honors a successor start constraint', () => {
+  const next = { ...delivery, auto_schedule: true, constraint_type: 'startnoearlierthan', constraint_date: '2026-12-20T00:00:00' }
+  const tasks = [purchase, next], deps = [{ ...dependency, active: true }]
+  const before = structuredClone({ tasks, deps })
+  const preview = cascadeDragSuccessors(tasks, deps, { purchase: resized }, ['delivery'])
+  assert.equal(preview.delivery.start_date, '2026-12-20T00:00:00')
+  assert.equal(preview.delivery.duration, delivery.duration)
+  assert.equal(preview.delivery.auto_schedule, true)
+  assert.deepEqual({ tasks, deps }, before)
+})
+
+test('inactive predecessors do not move automatic successors while dragging', () => {
+  const pred = { ...purchase, inactive: true }, next = { ...delivery, auto_schedule: true }
+  const preview = cascadeDragSuccessors([pred, next], [dependency], { purchase: { ...resized, inactive: true } }, ['delivery'])
+  assert.equal(preview.delivery, undefined)
+})
+
+test('moving a child updates its summary and follows the summary dependency chain', () => {
+  const summary = { ...purchase, id: 'summary', auto_schedule: true }
+  const child = { ...purchase, parent_id: summary.id, auto_schedule: true }
+  const next = { ...delivery, auto_schedule: true, start_date: purchase.end_date, end_date: '2026-11-17T00:00:00', duration: 1440 }
+  const last = { ...next, id: 'last', start_date: '2026-11-17T00:00:00', end_date: '2026-11-18T00:00:00' }
+  const deps = [{ ...dependency, from_task_id: summary.id, lag: 0 }, { ...dependency, id: 'last-dep', from_task_id: next.id, to_task_id: last.id, lag: 0 }]
+  const preview = cascadeDragSuccessors([summary, child, next, last], deps, { purchase: { ...resized, parent_id: summary.id, auto_schedule: true } }, [])
+  assert.equal(preview.summary.end_date, resized.end_date)
+  assert.equal(preview.delivery.start_date, resized.end_date)
+  assert.equal(preview.last.start_date, '2026-11-20T00:00:00')
+  assert.equal(preview.purchase.auto_schedule, true)
+})

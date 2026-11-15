@@ -11,13 +11,13 @@ export class PlanSaveConflict extends Error {
 
 /** Caller holds the project write lock, or uses a repeatable-read transaction. */
 export async function readPlanState(client: PoolClient, projectId: string): Promise<SaveBaseline & { revision: string }> {
-  const [tasks, dependencies, project, lines] = await Promise.all([
-    client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index', [projectId]),
-    client.query(`SELECT d.* FROM dependencies d JOIN tasks f ON f.id = d.from_task_id AND f.is_deleted = false
-      JOIN tasks t ON t.id = d.to_task_id AND t.is_deleted = false WHERE d.project_id = $1`, [projectId]),
-    client.query('SELECT status_date, planning_status, custom_fields FROM projects WHERE id = $1', [projectId]),
-    client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId]),
-  ])
+  // One PostgreSQL client executes queries serially; keep the same transaction
+  // snapshot without queueing simultaneous query calls on that connection.
+  const tasks = await client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index', [projectId])
+  const dependencies = await client.query(`SELECT d.* FROM dependencies d JOIN tasks f ON f.id = d.from_task_id AND f.is_deleted = false
+    JOIN tasks t ON t.id = d.to_task_id AND t.is_deleted = false WHERE d.project_id = $1`, [projectId])
+  const project = await client.query('SELECT status_date, planning_status, custom_fields FROM projects WHERE id = $1', [projectId])
+  const lines = await client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId])
   const state: SaveBaseline = { tasks: tasks.rows, dependencies: dependencies.rows, lines: lines.rows,
     statusDate: toDateTimeStr(project.rows[0]?.status_date), planningStatus: project.rows[0]?.planning_status,
     customFields: project.rows[0]?.custom_fields ?? [] }

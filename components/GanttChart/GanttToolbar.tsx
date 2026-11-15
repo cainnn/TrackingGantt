@@ -1205,6 +1205,7 @@ export default function GanttToolbar({
     dispatch(markDirty([...result.tasksToAdd, ...result.tasksToUpdate, ...cascaded].map(t => t.id)))
     dispatch(setSelectedIds(result.tasksToAdd.map(t => t.id)))
     requestAnimationFrame(() => onFocusTask())
+    if (result.skippedDependencies?.length) alert(`任务已复制，${result.skippedDependencies.length} 条依赖无法保留：\n${[...new Set(result.skippedDependencies.map(w => w.reason))].join('\n')}`)
   }, [dispatch, tasks, dependencies, clipboard, clipboardDeps, selectedIds, isMinute, readOnly, onFocusTask])
 
   // ── Status date: free movement + separate confirm button ────────

@@ -1,5 +1,8 @@
 import type { Dependency, Task } from '../types'
 import { uuid } from './uuid'
+import { wouldCreateCycle } from './clientScheduling'
+
+export interface CopyDependencyWarning { dependency: Dependency; reason: string }
 
 /** 将选中任务（含摘要的全部后代）复制为目标任务的同级任务。 */
 export function buildTaskCopies(
@@ -9,7 +12,8 @@ export function buildTaskCopies(
   targetId: string | null,
   position: 'before' | 'after',
   source?: { tasks: Task[]; dependencies: Dependency[] },
-): { tasksToAdd: Task[]; tasksToUpdate: Task[]; dependenciesToAdd: Dependency[] } {
+  options: { externalDependencies?: 'predecessors' | 'all' | 'none' } = {},
+): { tasksToAdd: Task[]; tasksToUpdate: Task[]; dependenciesToAdd: Dependency[]; skippedDependencies?: CopyDependencyWarning[] } {
   const empty = { tasksToAdd: [], tasksToUpdate: [], dependenciesToAdd: [] }
   const target = targetId ? tasks.find(t => t.id === targetId && !t.is_deleted)
     : { id: '', parent_id: null, project_id: source?.tasks[0]?.project_id ?? tasks[0]?.project_id }
@@ -81,15 +85,41 @@ export function buildTaskCopies(
       updated_at: now,
     }
   })
-  const dependenciesToAdd = (source?.dependencies ?? dependencies)
-    .filter(d => idMap.has(d.from_task_id) && idMap.has(d.to_task_id))
-    .map(d => ({
-      ...d,
-      id: uuid(),
-      project_id: target.project_id,
-      from_task_id: idMap.get(d.from_task_id)!,
-      to_task_id: idMap.get(d.to_task_id)!,
-    }))
+  const nextTasks = [...tasks.filter(t => !t.is_deleted), ...tasksToAdd]
+  const nextById = new Map(nextTasks.map(t => [t.id, t]))
+  const summaries = new Set(nextTasks.map(t => t.parent_id).filter(Boolean))
+  const ancestor = (parentId: string, childId: string) => {
+    const seen = new Set<string>()
+    let node = nextById.get(childId)
+    while (node?.parent_id && !seen.has(node.id)) {
+      seen.add(node.id)
+      if (node.parent_id === parentId) return true
+      node = nextById.get(node.parent_id)
+    }
+    return false
+  }
+  const policy = options.externalDependencies ?? 'predecessors'
+  const dependenciesToAdd: Dependency[] = []
+  const skippedDependencies: CopyDependencyWarning[] = []
+  const pairs = new Set(dependencies.map(d => `${d.from_task_id}/${d.to_task_id}`))
+  for (const dep of source?.dependencies ?? dependencies) {
+    const copyFrom = idMap.has(dep.from_task_id), copyTo = idMap.has(dep.to_task_id)
+    if (!(copyFrom && copyTo) && !(copyTo && policy !== 'none') && !(copyFrom && policy === 'all')) continue
+    const from = idMap.get(dep.from_task_id) ?? dep.from_task_id
+    const to = idMap.get(dep.to_task_id) ?? dep.to_task_id
+    const pair = `${from}/${to}`
+    let reason: string | null = null
+    if (!nextById.has(from) || !nextById.has(to)) reason = '原前置或后续任务已不存在'
+    else if (nextById.get(from)!.project_id !== target.project_id || nextById.get(to)!.project_id !== target.project_id) reason = '依赖两端不属于当前项目'
+    else if (from === to) reason = '不能创建自依赖'
+    else if (ancestor(from, to) || ancestor(to, from)) reason = '依赖两端变为父子任务'
+    else if (summaries.has(from) || summaries.has(to)) reason = '依赖端点是摘要任务，不能新增连线'
+    else if (pairs.has(pair)) continue
+    else if (wouldCreateCycle(from, to, [...dependencies, ...dependenciesToAdd])) reason = '保留该连线会形成循环依赖'
+    if (reason) { skippedDependencies.push({ dependency: dep, reason }); continue }
+    dependenciesToAdd.push({ ...dep, id: uuid(), project_id: target.project_id, from_task_id: from, to_task_id: to })
+    pairs.add(pair)
+  }
 
-  return { tasksToAdd, tasksToUpdate, dependenciesToAdd }
+  return { tasksToAdd, tasksToUpdate, dependenciesToAdd, ...(skippedDependencies.length ? { skippedDependencies } : {}) }
 }

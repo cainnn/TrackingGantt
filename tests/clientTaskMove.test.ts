@@ -1,8 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { Task } from '../types'
+import type { Task, Dependency } from '../types'
 import { buildTaskRowMove, taskMoveSelection } from '../lib/clientTaskMove'
 import { buildSaveDiff } from '../lib/clientSave'
+import { rollupSummaryTasks } from '../lib/clientScheduling'
+import { cascadeDragSuccessors } from '../lib/clientDragScheduling'
 
 const task = (id: string, parent_id: string | null, order_index: number): Task => ({ id, project_id: 'p', parent_id, order_index,
   task_code: id, name: id, assignee: null, start_date: '2026-11-01', end_date: '2026-11-03', duration: 2880, duration_unit: 'day',
@@ -66,4 +68,22 @@ test('unchanged positions, deleted tasks and missing targets do not generate wri
   assert.deepEqual(buildTaskRowMove(tasks, ['a'], 'b', 'before').updates, [])
   assert.deepEqual(buildTaskRowMove(tasks, ['deleted'], 'b', 'after').updates, [])
   assert.deepEqual(buildTaskRowMove(tasks, ['a'], 'missing', 'before').updates, [])
+})
+
+test('reparenting a task preserves existing relations and reschedules successors of the changed summary', () => {
+  const tasks = [task('source', null, 0), { ...task('moved', 'source', 0), end_date: '2026-11-09', duration: 8 * 1440 },
+    task('destination', null, 1), task('child', 'destination', 0), { ...task('after', null, 2), start_date: '2026-11-03', end_date: '2026-11-05' }]
+  const deps: Dependency[] = [{ id: 'retained', project_id: 'p', from_task_id: 'destination', to_task_id: 'after', type: 2, lag: 0, active: true }]
+  const before = structuredClone(deps)
+  const move = buildTaskRowMove(tasks, ['moved'], 'child', 'after')
+  const updates = new Map(move.updates.map(t => [t.id, t]))
+  for (const summary of rollupSummaryTasks(apply(tasks, move.updates))) updates.set(summary.id, summary)
+  const linked = cascadeDragSuccessors(tasks, deps, Object.fromEntries(updates), [])
+  assert.equal(linked.moved.parent_id, 'destination')
+  assert.equal(linked.destination.end_date, '2026-11-09T00:00:00')
+  assert.equal(linked.after.start_date, '2026-11-09T00:00:00')
+  assert.deepEqual(deps, before)
+  const diff = buildSaveDiff(tasks, deps, apply(tasks, Object.values(linked)), deps)
+  assert.deepEqual(diff.depsToDelete, [])
+  assert.ok(diff.tasksToUpdate.some(t => t.id === 'after'))
 })
