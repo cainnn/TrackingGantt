@@ -259,7 +259,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (addingPred) return
     if (deps.some(d => d.from_task_id === fromTaskId && d.to_task_id === taskId)) return '已经关联此任务'
     if (wouldCreateCycle(fromTaskId, taskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
-    dispatch(labelDraftStep('添加前置任务'))
+    dispatch(labelDraftStep({ label: '添加前置任务', directTaskIds: [taskId] }))
     setAddingPred(true)
     try {
       const newDep: Dependency = {
@@ -285,6 +285,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── Remove predecessor ───────────────────────────────────────────────
   const handleRemovePredecessor = useCallback((depId: string) => {
+    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
     dispatch(removeDependency(depId))
     setLagEdits(prev => { const n = { ...prev }; delete n[depId]; return n })
     const remainDeps = deps.filter(d => d.id !== depId)
@@ -296,7 +297,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     if (addingSucc) return
     if (deps.some(d => d.from_task_id === taskId && d.to_task_id === toTaskId)) return '已经关联此任务'
     if (wouldCreateCycle(taskId, toTaskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
-    dispatch(labelDraftStep('添加后续任务'))
+    dispatch(labelDraftStep({ label: '添加后续任务', directTaskIds: [toTaskId] }))
     setAddingSucc(true)
     try {
       const newDep: Dependency = {
@@ -321,6 +322,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── Remove successor ────────────────────────────────────────────────
   const handleRemoveSuccessor = useCallback((depId: string) => {
+    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
     dispatch(removeDependency(depId))
     const remainDeps = deps.filter(d => d.id !== depId)
     recascadeAndUpdate(remainDeps)
@@ -328,6 +330,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // ── Change dep type ──────────────────────────────────────────────────
   const handleDepTypeChange = useCallback((depId: string, newType: number) => {
+    dispatch(labelDraftStep({ label: '修改依赖类型', directTaskIds: [] }))
     dispatch(updateDependency({ id: depId, type: newType }))
     const nextDeps = deps.map(d => d.id === depId ? { ...d, type: newType } : d)
     recascadeAndUpdate(nextDeps)
@@ -336,6 +339,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   // ── Toggle manual mode ───────────────────────────────────────────────
   const handleToggleManual = useCallback(async (manual: boolean) => {
     if (!task) return
+    dispatch(labelDraftStep({ label: '切换排程模式', directTaskIds: [task.id] }))
     if (manual) {
       const updated = { ...task, auto_schedule: false }
       dispatch(updateTasks([updated]))
@@ -463,6 +467,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     const updated = task.auto_schedule === false && !manualSchedule
       ? buildAutoScheduleTask(formTask, true, allTasks.map(t => t.id === task.id ? formTask : t), deps)
       : formTask
+    dispatch(labelDraftStep({ label: '编辑任务属性', directTaskIds: [task.id] }))
     dispatch(updateTasks([updated]))
     dispatch(markDirty([task.id]))
     dispatch(setEditDescription({ taskId: task.id, description: `编辑了任务「${task.name}」` }))

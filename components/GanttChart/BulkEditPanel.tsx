@@ -30,7 +30,7 @@ export default function BulkEditPanel({ onClose }: { onClose: () => void }) {
       }, isMinute, anchor)
       const constraints = findUpperConstraintViolations(updates)
       if (constraints.length && !confirm(`本次修改有 ${constraints.length} 项限制日期冲突。确认应用到草稿？`)) return
-      dispatch(labelDraftStep('批量修改任务'))
+      dispatch(labelDraftStep({ label: '批量修改任务', directTaskIds: [...selectedTreeIds(tasks, selectedIds)] }))
       dispatch(updateTasks(updates))
       dispatch(markDirty(updates.map(t => t.id)))
       for (const id of selectedIds) dispatch(setEditDescription({ taskId: id, description: '批量修改责任人、排程或日期' }))

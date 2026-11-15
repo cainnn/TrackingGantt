@@ -1521,7 +1521,7 @@ export default function GanttChart({
             const next = tasks.map(t => updates.get(t.id) ?? t)
             for (const summary of rollupSummaryTasks(next)) updates.set(summary.id, summary)
             const linked = cascadeDragSuccessors(tasks, deps, Object.fromEntries(updates), [])
-            dispatch(labelDraftStep('拖动任务顺序'))
+            dispatch(labelDraftStep({ label: '拖动任务顺序', directTaskIds: session.taskIds }))
             dispatch(updateTasks(Object.values(linked)))
             dispatch(markDirty(Object.keys(linked)))
             if (plan.parentId) setExpanded(prev => ({ ...prev, [plan.parentId!]: true }))
@@ -1904,7 +1904,8 @@ export default function GanttChart({
           }
 
           // All linked changes from this gesture form one undo step.
-          dispatch(labelDraftStep(drag.mode === 'move' ? '移动任务' : '调整任务工期'))
+          dispatch(labelDraftStep({ label: drag.mode === 'move' ? '移动任务' : '调整任务工期',
+            directTaskIds: drag.mode === 'move' ? [...taskBranchIds(tasks, selectedIds.includes(drag.taskId) ? selectedIds : [drag.taskId])] : [drag.taskId] }))
           dispatch(updateTasks(allUpdated.length > 0 ? allUpdated : dirtyList))
           // 只标记需要服务端保存的任务为脏（下游级联由服务端自动完成）
           dispatch(markDirty(dirtyList.map(t => t.id)))
@@ -1944,6 +1945,7 @@ export default function GanttChart({
                   from_task_id: connect.fromTaskId, to_task_id: toTask.id,
                   type: 2, lag: 0, active: true,
                 }
+                dispatch(labelDraftStep({ label: '添加任务依赖', directTaskIds: [toTask.id] }))
                 dispatch(addDependency(newDep))
                 // 添加依赖时，后继任务自动切换为自动排程
                 let nextTasks = tasks
@@ -1982,7 +1984,7 @@ export default function GanttChart({
     }
     window.addEventListener('mouseup', onUp)
     return () => window.removeEventListener('mouseup', onUp)
-  }, [drag, connect, previewMap, displayRows, tasks, deps, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot, isMinute])
+  }, [drag, connect, previewMap, displayRows, tasks, deps, selectedIds, dispatch, projectId, dateToX, getSvgX, colW, splitterDrag, nameDrag, depDrag, statusDateDrag, previewStatusDate, onStatusDatePreviewChange, readOnly, viewSnapshot, isMinute])
 
   // ── Commit name edit ────────────────────────────────────────────────────
   const commitName = useCallback(async () => {
@@ -1994,7 +1996,7 @@ export default function GanttChart({
     if (!orig) { setEditId(null); return }
     if (orig.name !== name) {
       const updated = { ...orig, name }
-
+      dispatch(labelDraftStep({ label: '重命名任务', directTaskIds: [editId] }))
       dispatch(updateTasks([updated]))
       dispatch(markDirty([editId]))
       dispatch(setEditDescription({ taskId: editId, description: `重命名「${orig.name}」→「${name}」` }))
@@ -2024,6 +2026,7 @@ export default function GanttChart({
     const nextTasks = tasks.map(t => t.id === updated.id ? updated : t)
     const cascadedRaw = runFullCascade(nextTasks, deps, { isMinute }).filter(t => t.id !== updated.id)
     const cascaded = isMinute ? cascadedRaw : snapTaskUpdatesToDayLevel(cascadedRaw)
+    dispatch(labelDraftStep({ label: '修改任务单元格', directTaskIds: [orig.id] }))
     dispatch(updateTasks([updated, ...cascaded]))
     dispatch(markDirty([orig.id, ...cascaded.map(t => t.id)]))
     // 自动描述：单元格编辑
@@ -2046,7 +2049,7 @@ export default function GanttChart({
     const merged = new Map<string, Task>([[updated.id, updated]])
     for (const c of cascaded) merged.set(c.id, c)
     const updates = Array.from(merged.values())
-
+    dispatch(labelDraftStep({ label: isConstraintChange ? '修改任务限制' : '修改任务属性', directTaskIds: [taskId] }))
     dispatch(updateTasks(updates))
     dispatch(markDirty(updates.map(x => x.id)))
     const fields = Object.keys(patch)
@@ -2134,6 +2137,7 @@ export default function GanttChart({
     if (!t) return
 
     const updated = buildAutoScheduleTask(t, autoSchedule, deps, tasks)
+    dispatch(labelDraftStep({ label: '切换排程模式', directTaskIds: [taskId] }))
     dispatch(updateTasks([updated]))
     dispatch(markDirty([taskId]))
     dispatch(setEditDescription({ taskId, description: `「${t.name}」切换为${autoSchedule ? '自动' : '手动'}排程` }))
@@ -2144,6 +2148,7 @@ export default function GanttChart({
 
   // ── Change dependency lag ───────────────────────────────────────────────
   const handleDepLagChange = useCallback(async (depId: string, newLag: number) => {
+    dispatch(labelDraftStep({ label: '修改依赖间隔', directTaskIds: [] }))
     dispatch(updateDependency({ id: depId, lag: newLag }))
     const nextDeps = deps.map(d => d.id === depId ? { ...d, lag: newLag } : d)
     recascade(nextDeps)
@@ -2171,6 +2176,7 @@ export default function GanttChart({
 
   // ── Change dependency type ──────────────────────────────────────────────
   const handleDepTypeChange = useCallback(async (depId: string, newType: number) => {
+    dispatch(labelDraftStep({ label: '修改依赖类型', directTaskIds: [] }))
     dispatch(updateDependency({ id: depId, type: newType }))
     const nextDeps = deps.map(d => d.id === depId ? { ...d, type: newType } : d)
     recascade(nextDeps)
@@ -2181,6 +2187,7 @@ export default function GanttChart({
     const t = tasks.find(x => x.id === taskId)
     if (!t) return
 
+    dispatch(labelDraftStep({ label: '修改排程模式', directTaskIds: [taskId] }))
     if (value === 'empty') {
       // 空：删除所有入依赖并自动排程；已在今天之前开始的任务保留原日期。
       const incoming = deps.filter(d => d.to_task_id === taskId)
@@ -2214,6 +2221,7 @@ export default function GanttChart({
     if (readOnly) return
     const existing = deps.find(d => d.from_task_id === fromTaskId && d.to_task_id === toTaskId)
     if (existing) {
+      dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [toTaskId] }))
       dispatch(removeDependency(existing.id))
       const remainDeps = deps.filter(d => d.id !== existing.id)
       recascade(remainDeps)
@@ -2221,7 +2229,7 @@ export default function GanttChart({
     }
 
     if (wouldCreateCycle(fromTaskId, toTaskId, deps)) return '此关系会形成循环依赖，请选择其他任务'
-    dispatch(labelDraftStep('修改任务依赖'))
+    dispatch(labelDraftStep({ label: '修改任务依赖', directTaskIds: [toTaskId] }))
     const newDep: Dependency = {
       id: uuid(), project_id: projectId,
       from_task_id: fromTaskId, to_task_id: toTaskId,
@@ -2243,6 +2251,7 @@ export default function GanttChart({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDep && document.activeElement?.tagName !== 'INPUT') {
+        dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
         dispatch(removeDependency(selectedDep))
         const remainDeps = deps.filter(d => d.id !== selectedDep)
         recascade(remainDeps)
@@ -2312,7 +2321,7 @@ export default function GanttChart({
     if (readOnly) return
     const ids = taskBranchIds(tasks, [taskId])
     if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
-    dispatch(labelDraftStep('删除任务及子任务'))
+    dispatch(labelDraftStep({ label: '删除任务及子任务', directTaskIds: [...ids] }))
     dispatch(deleteTasks([...ids], { isMinute }))
   }, [dispatch, tasks, isMinute, readOnly])
 
@@ -2381,6 +2390,7 @@ export default function GanttChart({
 
   const handleCtxDeleteDep = useCallback((depId: string) => {
     setCtxMenu(null)
+    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
     dispatch(removeDependency(depId))
     const remainDeps = deps.filter(d => d.id !== depId)
     recascade(remainDeps)
@@ -2396,7 +2406,7 @@ export default function GanttChart({
     if (readOnly || viewSnapshot) return
     const { tasksToAdd, tasksToUpdate, dependenciesToAdd, skippedDependencies } = buildTaskCopies(tasks, deps, selectedIds, targetId, position)
     if (tasksToAdd.length === 0) return
-    dispatch(labelDraftStep(position === 'before' ? '复制任务到上方' : '复制任务到下方'))
+    dispatch(labelDraftStep({ label: position === 'before' ? '复制任务到上方' : '复制任务到下方', directTaskIds: tasksToAdd.map(t => t.id) }))
     if (tasksToUpdate.length > 0) dispatch(updateTasks(tasksToUpdate))
     dispatch(addTasks(tasksToAdd))
     for (const dep of dependenciesToAdd) dispatch(addDependency(dep))
@@ -2838,7 +2848,7 @@ export default function GanttChart({
       }
       const original = new Map(tasks.map(task => [task.id, task]))
       const manualCount = next.tasks.filter(task => original.get(task.id)?.auto_schedule !== false && task.auto_schedule === false).length
-      dispatch(labelDraftStep('向下填充单元格'))
+      dispatch(labelDraftStep({ label: '向下填充单元格', directTaskIds: next.editedIds }))
       dispatch(setTasks(next))
       dispatch(markDirty(next.editedIds))
       for (const taskId of next.editedIds) dispatch(setEditDescription({ taskId, description: '向下填充表格数据' }))
@@ -2964,7 +2974,7 @@ export default function GanttChart({
       const manualCount = next.tasks.filter(task => original.get(task.id)?.auto_schedule !== false && task.auto_schedule === false).length
       cellCommittedRef.current = true; cancelEditorRef.current = true
       setCellEdit(null); setActiveEditor(null)
-      dispatch(labelDraftStep('粘贴单元格区域'))
+      dispatch(labelDraftStep({ label: '粘贴单元格区域', directTaskIds: next.editedIds }))
       dispatch(setTasks(next))
       setSelectedCell({ ...next.selection.start, col: next.selection.start.col as OptionalCol | 'name' })
       setCellRangeEnd({ ...next.selection.end, col: next.selection.end.col as OptionalCol | 'name' })
@@ -4248,6 +4258,7 @@ export default function GanttChart({
                       <g style={{ cursor:'pointer' }}
                          onClick={e=>{
                            e.stopPropagation()
+                           dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
                            dispatch(removeDependency(dep.id))
                            const remainDeps = deps.filter(d => d.id !== dep.id)
                            recascade(remainDeps)

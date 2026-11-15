@@ -182,6 +182,8 @@ interface GanttToolbarProps {
   onAutoAI?: (msg: string) => void
   showCriticalPath?: boolean
   onToggleCriticalPath?: () => void
+  impactOpen?: boolean
+  onToggleImpact?: () => void
   onToggleProjectLines?: () => void
   showComparison?: boolean
   onToggleComparison?: () => void
@@ -215,7 +217,7 @@ export default function GanttToolbar({
   indicators,
   onIndicatorsChange,
   onDiscardChanges,
-  onTimelineNavigate, viewControls,
+  onTimelineNavigate, viewControls, impactOpen, onToggleImpact,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
   const reduxStore = useStore<RootState>()
@@ -1029,7 +1031,7 @@ export default function GanttToolbar({
     if (!hasSelection || readOnly) return
     const ids = taskBranchIds(tasks, selectedIds)
     if (!ids.size || !confirm(`确定删除 ${ids.size} 个任务（包含所有层级的子任务）？`)) return
-    dispatch(labelDraftStep('删除任务及子任务'))
+    dispatch(labelDraftStep({ label: '删除任务及子任务', directTaskIds: [...ids] }))
     dispatch(deleteTasks([...ids], { isMinute }))
   }, [dispatch, selectedIds, hasSelection, tasks, isMinute, readOnly])
 
@@ -1199,7 +1201,7 @@ export default function GanttToolbar({
       tasks: clipboard, dependencies: clipboardDeps,
     })
     if (!result.tasksToAdd.length) return
-    dispatch(labelDraftStep('粘贴任务'))
+    dispatch(labelDraftStep({ label: '粘贴任务', directTaskIds: result.tasksToAdd.map(t => t.id) }))
     dispatch(updateTasks(result.tasksToUpdate))
     dispatch(addTasks(result.tasksToAdd))
     result.dependenciesToAdd.forEach(d => dispatch(addDependency(d)))
@@ -1685,6 +1687,8 @@ export default function GanttToolbar({
           <button className="text-blue-600 hover:underline" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>
         </div>}
         <button type="button" onClick={() => setScheduleIssuesOpen(true)} className="h-8 whitespace-nowrap rounded border border-gray-300 bg-white px-2.5 text-[13px] text-gray-700 hover:bg-gray-50">排程检查</button>
+        {onToggleImpact && <button type="button" aria-expanded={impactOpen} aria-controls="schedule-impact-panel" onClick={onToggleImpact}
+          className={`h-8 whitespace-nowrap rounded border px-2.5 text-[13px] ${impactOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>影响预览</button>}
         {!viewSnapshot && currentProject?.plan_baseline && <button type="button" aria-label="显示固定基线" title={`固定基线：${currentProject.plan_baseline.sourceVersionName}；偏差列始终以此为准`}
           className="h-8 max-w-56 truncate rounded border border-blue-200 bg-blue-50 px-2 text-xs text-blue-800"
           onClick={() => { dispatch(clearComparison()); if (!showComparison || comparison) onShowComparison?.(); else onToggleComparison?.() }}>

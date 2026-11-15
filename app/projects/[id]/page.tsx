@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { initializeDraft, resetDraft, hasDraftChanges, beginDraftSave, failDraftSave } from '@/store/draftHistory'
-import { setTasks, clearTasks, clearViewSnapshot } from '@/store/slices/tasksSlice'
+import { setTasks, clearTasks, clearViewSnapshot, setSelectedIds } from '@/store/slices/tasksSlice'
 import { toDateTimeStr } from '@/lib/clientTime'
 import type { SaveBaseline } from '@/lib/clientSave'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
@@ -13,6 +13,7 @@ import type { Task } from '@/types'
 import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
+import ScheduleImpactPanel from '@/components/GanttChart/ScheduleImpactPanel'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
 import AIChatPanel from '@/components/GanttChart/AIChatPanel'
 import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
@@ -82,6 +83,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
   const [viewRestore, setViewRestore] = useState<{ state: ChartViewState; id: number } | undefined>()
   const [timelineRequest, setTimelineRequest] = useState<{ kind: 'all' | 'selection' | 'status'; id: number } | undefined>()
   const [focusSignal,       setFocusSignal]       = useState(0)
+  const [impactOpen, setImpactOpen] = useState(false)
   const [showAI,            setShowAI]            = useState(false)
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
   const [showProjectLines,  setShowProjectLines]  = useState(false)
@@ -344,6 +346,8 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         onSearchChange={setSearchQuery}
         onToggleAI={() => setShowAI(v => !v)}
         onAutoAI={(msg: string) => { setShowAI(true); setPendingAIMessage(msg) }}
+        impactOpen={impactOpen}
+        onToggleImpact={() => setImpactOpen(v => !v)}
         showCriticalPath={showCriticalPath}
         onToggleCriticalPath={() => setShowCriticalPath(v => !v)}
         onToggleProjectLines={() => setShowProjectLines(v => !v)}
@@ -364,8 +368,8 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         <ProjectLinesPanel readOnly={isViewOnly} projectId={projectId} onClose={() => setShowProjectLines(false)} />
       )}
 
-      <div className="flex-1 overflow-hidden flex">
-        <div className="flex-1 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden flex">
+        <div className="flex-1 min-w-0 overflow-hidden">
           {loadedBaseline?.projectId === projectId && !layouts.loading ? <GanttChart
             projectId={projectId}
             isMinute={isMinute}
@@ -389,6 +393,12 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
             discardSignal={discardSignal}
           /> : <div role="status" className="flex h-64 items-center justify-center text-sm text-gray-500">正在加载项目布局…</div>}
         </div>
+        {impactOpen && <ScheduleImpactPanel readOnly={isViewOnly} isMinute={isMinute}
+          onClose={() => setImpactOpen(false)} onLocate={id => {
+            setSearchQuery('')
+            dispatch(setSelectedIds([id]))
+            setFocusSignal(n => n + 1)
+          }} />}
         {showAI && (
           <AIChatPanel
             projectId={projectId}

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { configureStore } from '@reduxjs/toolkit'
-import { rootReducer, createDraftMiddleware, initializeDraft, snapshotDraft, undoDraft, redoDraft, beginDraftSave, finishDraftSave, failDraftSave, resetDraft, hasDraftChanges } from '../store/draftHistory'
+import { rootReducer, createDraftMiddleware, labelDraftStep, initializeDraft, snapshotDraft, undoDraft, redoDraft, beginDraftSave, finishDraftSave, failDraftSave, resetDraft, hasDraftChanges } from '../store/draftHistory'
 import { setCurrentProject, setStatusDate } from '../store/slices/projectSlice'
 import { setTasks, updateTasks, addDependency, setSelectedIds, clearTasks, deleteTasks, setViewSnapshot, clearViewSnapshot } from '../store/slices/tasksSlice'
 import { addProjectLine } from '../store/slices/projectLinesSlice'
@@ -123,4 +123,37 @@ test('history is isolated from historical viewing and cleared when switching pro
   store.dispatch(clearTasks())
   assert.equal(store.getState().draft.past.length, 0)
   assert.equal(store.getState().draft.baseline, null)
+})
+
+test('impact attribution follows the whole operation across undo, redo and save rebase', async () => {
+  const store = setup()
+  store.dispatch(labelDraftStep({ label: '移动任务', directTaskIds: ['a', 'a'] }))
+  store.dispatch(updateTasks([{ ...task, start_date: '2026-11-02T00:00:00' }]))
+  store.dispatch(updateTasks([{ ...store.getState().tasks.tasks[1], start_date: '2026-11-03T00:00:00' }]))
+  await Promise.resolve()
+  assert.equal(store.getState().draft.past.length, 1)
+  assert.deepEqual(store.getState().draft.past[0].directTaskIds, ['a'])
+  store.dispatch(undoDraft()); store.dispatch(redoDraft())
+  assert.deepEqual(store.getState().draft.past[0].directTaskIds, ['a'])
+  store.dispatch(beginDraftSave())
+  const submitted = snapshotDraft(store.getState())
+  store.dispatch(labelDraftStep({ label: '重命名', directTaskIds: ['b'] }))
+  store.dispatch(updateTasks([{ ...store.getState().tasks.tasks[1], name: 'During save' }]))
+  await Promise.resolve()
+  store.dispatch(finishDraftSave(submitted))
+  assert.equal(store.getState().draft.past.length, 1)
+  assert.equal(store.getState().draft.past[0].label, '重命名')
+  assert.deepEqual(store.getState().draft.past[0].directTaskIds, ['b'])
+  store.dispatch(undoDraft())
+  assert.equal(hasDraftChanges(store.getState()), false)
+})
+test('a labeled no-op cannot attribute the next event to an unrelated task', async () => {
+  const store = setup()
+  store.dispatch(labelDraftStep({ label: 'No-op', directTaskIds: ['a'] }))
+  await Promise.resolve()
+  store.dispatch(updateTasks([{ ...store.getState().tasks.tasks[1], name: 'B edited' }]))
+  await Promise.resolve()
+  assert.equal(store.getState().draft.past.length, 1)
+  assert.equal(store.getState().draft.past[0].directTaskIds, undefined)
+  assert.equal(store.getState().draft.past[0].label, '编辑任务')
 })

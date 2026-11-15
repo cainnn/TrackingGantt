@@ -22,16 +22,16 @@ export interface DraftSnapshot {
   lines: ProjectLine[]
   descriptions: Record<string, string>
 }
-interface Step { before: DraftSnapshot; after: DraftSnapshot; label: string }
+export interface DraftStep { before: DraftSnapshot; after: DraftSnapshot; label: string; directTaskIds?: string[] }
 interface DraftHistory {
   projectId: string | null
   baseline: DraftSnapshot | null
-  past: Step[]
-  future: Step[]
+  past: DraftStep[]
+  future: DraftStep[]
   saving: boolean
   uncertain: boolean
   submitted: DraftSnapshot | null
-  duringSave: Step[]
+  duringSave: DraftStep[]
 }
 const empty: DraftHistory = {
   projectId: null, baseline: null, past: [], future: [], saving: false,
@@ -44,8 +44,8 @@ export const beginDraftSave = createAction('draft/beginSave')
 export const failDraftSave = createAction('draft/failSave')
 export const finishDraftSave = createAction<DraftSnapshot>('draft/finishSave')
 export const resetDraft = createAction<DraftSnapshot>('draft/reset')
-export const labelDraftStep = createAction<string>('draft/label')
-const recordStep = createAction<{ before: DraftSnapshot; label: string }>('draft/record')
+export const labelDraftStep = createAction<string | { label: string; directTaskIds: string[] }>('draft/label')
+const recordStep = createAction<Pick<DraftStep, 'before' | 'label' | 'directTaskIds'>>('draft/record')
 const combined = combineReducers({ auth, project, tasks, projectLines, versions, draft: (s: DraftHistory = empty) => s })
 export type DraftRootState = ReturnType<typeof combined>
 
@@ -182,18 +182,27 @@ const mutations = new Set([
 export const createDraftMiddleware = (): Middleware<{}, DraftRootState> => api => {
   let before: DraftSnapshot | null = null
   let label = '编辑任务'
+  let directTaskIds: string[] | undefined
   const flush = () => {
-    if (!before) return
     const snapshot = before
     before = null
-    api.dispatch(recordStep({ before: snapshot, label }))
+    const description = { label, directTaskIds }
     label = '编辑任务'
+    directTaskIds = undefined
+    if (snapshot) api.dispatch(recordStep({ before: snapshot, ...description }))
   }
   return next => action => {
     const typed = action as UnknownAction
     const state = api.getState()
     if (mutations.has(typed.type) && state.draft.baseline && (state.auth.user?.role === 'view' || state.tasks.viewSnapshot)) return action
-    if (labelDraftStep.match(typed)) { flush(); label = typed.payload; return next(action) }
+    if (labelDraftStep.match(typed)) {
+      flush()
+      label = typeof typed.payload === 'string' ? typed.payload : typed.payload.label
+      directTaskIds = typeof typed.payload === 'string' ? undefined : [...new Set(typed.payload.directTaskIds)]
+      // A labelled no-op must not lend its attribution to the next user event.
+      queueMicrotask(flush)
+      return next(action)
+    }
     if (typed.type.startsWith('draft/') && typed.type !== recordStep.type || typed.type === 'tasks/clearTasks') flush()
     if (mutations.has(typed.type) && api.getState().draft.baseline && !before) {
       before = snapshotDraft(api.getState())
