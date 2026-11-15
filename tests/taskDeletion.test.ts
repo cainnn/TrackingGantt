@@ -7,6 +7,7 @@ import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, labelDraftStep, snapshotDraft, undoDraft, redoDraft } from '../store/draftHistory'
 import { deleteTasks, setTasks } from '../store/slices/tasksSlice'
 import { setCurrentProject } from '../store/slices/projectSlice'
+import { addMinutesStr } from '../lib/clientTime'
 
 const anchor = '2026-11-12T00:00:00'
 const options = { deletionDate: anchor, operationId: '12345678-1234-4321-8123-123456789012', isMinute: true }
@@ -17,6 +18,163 @@ const task = (id: string, extra: Partial<Task> = {}): Task => ({ id, parent_id: 
 const dep = (from: string, to: string, extra: Partial<Dependency> = {}): Dependency => ({ id: `${from}-${to}`,
   project_id: 'p', from_task_id: from, to_task_id: to, type: 2, lag: 0, active: true, ...extra })
 const edges = (deps: Dependency[]) => deps.map(d => [d.from_task_id, d.to_task_id, d.type, d.lag, d.active !== false])
+
+function parallelPredecessors(isMinute = false, autoSchedule = true) {
+  const start = isMinute ? '2030-01-01T09:15:00' : '2030-01-01T00:00:00'
+  const unit = isMinute ? 60 : 1440
+  const at = (offset: number) => addMinutesStr(start, offset * unit)!
+  const tasks = [task('a', { start_date: start, end_date: at(1), duration: unit }),
+    task('b', { start_date: start, end_date: at(2), duration: 2 * unit }),
+    task('c', { start_date: start, end_date: at(3), duration: 3 * unit }),
+    task('d', { start_date: at(3), end_date: at(4), duration: unit, auto_schedule: autoSchedule }),
+    task('e', { start_date: at(4), end_date: at(5), duration: unit, auto_schedule: autoSchedule })]
+  const dependencies = [dep('a', 'd'), dep('b', 'd'), dep('c', 'd'), dep('d', 'e')]
+  return { tasks, dependencies, at, unit }
+}
+
+for (const isMinute of [false, true]) {
+  test(`deleting the longest of three parallel predecessors collapses D to B's finish and cascades (${isMinute ? 'minute' : 'day'})`, () => {
+    const { tasks, dependencies, at, unit } = parallelPredecessors(isMinute)
+    const unrelated = task('unrelated', { constraint_type: 'muststarton', constraint_date: '2035-01-01T00:00:00' })
+    const result = planTaskDeletion([...tasks, unrelated], dependencies, ['c'], { ...options, isMinute })
+    const byId = new Map(result.tasks.map(t => [t.id, t]))
+    assert.equal(byId.get('d')?.start_date, at(2))
+    assert.equal(byId.get('d')?.end_date, at(3))
+    assert.equal(byId.get('e')?.start_date, at(3))
+    assert.equal(byId.get('e')?.end_date, at(4))
+    for (const id of ['d', 'e']) {
+      assert.equal(byId.get(id)?.duration, unit)
+      assert.equal(byId.get(id)?.auto_schedule, true)
+    }
+    for (const id of ['a', 'b']) assert.strictEqual(byId.get(id), tasks.find(t => t.id === id))
+    assert.strictEqual(byId.get('unrelated'), unrelated)
+    assert.deepEqual(result.dependencies, dependencies.filter(d => d.from_task_id !== 'c'))
+    assert.deepEqual(result.updatedTasks.map(t => t.id).sort(), ['d', 'e'])
+
+    const second = planTaskDeletion(result.tasks, result.dependencies, ['b'], { ...options, isMinute })
+    assert.equal(second.tasks.find(t => t.id === 'd')?.start_date, at(1))
+    assert.equal(second.tasks.find(t => t.id === 'e')?.start_date, at(2))
+  })
+
+  test(`collapse propagates through D, E, F and G regardless of dependency order (${isMinute ? 'minute' : 'day'})`, () => {
+    const { tasks, dependencies, at, unit } = parallelPredecessors(isMinute)
+    tasks.push(task('f', { start_date: at(5), end_date: at(6), duration: unit }),
+      task('g', { start_date: at(6), end_date: at(7), duration: unit }))
+    dependencies.push(dep('e', 'f'), dep('f', 'g'))
+    const result = planTaskDeletion(tasks, [...dependencies].reverse(), ['c'], { ...options, isMinute })
+    for (const [offset, id] of ['d', 'e', 'f', 'g'].entries()) {
+      const shifted = result.tasks.find(t => t.id === id)!
+      assert.equal(shifted.start_date, at(2 + offset), id)
+      assert.equal(shifted.end_date, at(3 + offset), id)
+      assert.equal(shifted.duration, unit, id)
+    }
+    assert.deepEqual(result.updatedTasks.map(t => t.id).sort(), ['d', 'e', 'f', 'g'])
+    assert.deepEqual(result.dependencies, [...dependencies].reverse().filter(d => d.from_task_id !== 'c'))
+  })
+}
+
+test('cascade stops at a downstream manual task and preserves its automatic successor dates', () => {
+  const { tasks, dependencies, at, unit } = parallelPredecessors()
+  tasks.push(task('f', { start_date: at(5), end_date: at(6), duration: unit, auto_schedule: false }),
+    task('g', { start_date: at(6), end_date: at(7), duration: unit }))
+  dependencies.push(dep('e', 'f'), dep('f', 'g'))
+  const result = planTaskDeletion(tasks, dependencies, ['c'], options)
+  assert.equal(result.tasks.find(t => t.id === 'd')?.start_date, at(2))
+  assert.equal(result.tasks.find(t => t.id === 'e')?.start_date, at(3))
+  assert.strictEqual(result.tasks.find(t => t.id === 'f'), tasks.find(t => t.id === 'f'))
+  assert.strictEqual(result.tasks.find(t => t.id === 'g'), tasks.find(t => t.id === 'g'))
+  assert.deepEqual(result.updatedTasks.map(t => t.id).sort(), ['d', 'e'])
+})
+
+test('a downstream join still waits for its other predecessor after D collapses', () => {
+  const { tasks, dependencies, at, unit } = parallelPredecessors()
+  const joined = tasks.map(t => t.id === 'e' ? { ...t, start_date: at(6), end_date: at(7) } : t)
+  joined.push(task('x', { start_date: at(0), end_date: at(6), duration: 6 * unit }),
+    task('f', { start_date: at(7), end_date: at(8), duration: unit }))
+  dependencies.push(dep('x', 'e'), dep('e', 'f'))
+  const result = planTaskDeletion(joined, dependencies, ['c'], options)
+  assert.equal(result.tasks.find(t => t.id === 'd')?.start_date, at(2))
+  assert.equal(result.tasks.find(t => t.id === 'e')?.start_date, at(6))
+  assert.equal(result.tasks.find(t => t.id === 'f')?.start_date, at(7))
+  assert.deepEqual(result.updatedTasks.map(t => t.id), ['d'])
+})
+
+test('a manual successor keeps its dates after a parallel predecessor is deleted', () => {
+  const { tasks, dependencies, at } = parallelPredecessors(false, false)
+  const result = planTaskDeletion(tasks, dependencies, ['c'], options)
+  assert.equal(result.tasks.find(t => t.id === 'd')?.start_date, at(3))
+  assert.equal(result.tasks.find(t => t.id === 'e')?.start_date, at(4))
+  assert.equal(result.tasks.find(t => t.id === 'd')?.auto_schedule, false)
+  assert.deepEqual(result.updatedTasks, [])
+})
+
+test('deleting a shorter parallel predecessor keeps dates, while remaining lag and hard constraints still control the collapse', () => {
+  const { tasks, dependencies, at, unit } = parallelPredecessors()
+  const unchanged = planTaskDeletion(tasks, dependencies, ['a'], options)
+  assert.equal(unchanged.tasks.find(t => t.id === 'd')?.start_date, at(3))
+  assert.deepEqual(unchanged.updatedTasks, [])
+
+  const lagged = dependencies.map(d => d.from_task_id === 'b' ? { ...d, lag: unit } : d)
+  const result = planTaskDeletion(tasks, lagged, ['c'], options)
+  assert.equal(result.tasks.find(t => t.id === 'd')?.start_date, at(3))
+
+  const constrained = tasks.map(t => t.id === 'd' ? { ...t, constraint_type: 'startnoearlierthan', constraint_date: at(3) } : t)
+  assert.equal(planTaskDeletion(constrained, dependencies, ['c'], options).tasks.find(t => t.id === 'd')?.start_date, at(3))
+})
+
+test('shortened summaries propagate through successive dependency and summary levels while manual tasks stay fixed', () => {
+  const { tasks, at } = parallelPredecessors()
+  const nested = tasks.map(t => ['a', 'b', 'c'].includes(t.id) ? { ...t, parent_id: 'summary' }
+    : t.id === 'd' ? { ...t, parent_id: 'next-summary' } : t)
+  nested.push(task('summary', { start_date: at(0), end_date: at(3), duration: 3 * 1440 }))
+  nested.push(task('next-summary', { start_date: at(3), end_date: at(4), duration: 1440 }))
+  const dependencies = [dep('summary', 'd'), dep('next-summary', 'e')]
+  const result = planTaskDeletion(nested, dependencies, ['c'], options)
+  assert.equal(result.tasks.find(t => t.id === 'summary')?.end_date, at(2))
+  assert.equal(result.tasks.find(t => t.id === 'd')?.start_date, at(2))
+  assert.equal(result.tasks.find(t => t.id === 'next-summary')?.end_date, at(3))
+  assert.equal(result.tasks.find(t => t.id === 'e')?.start_date, at(3))
+
+  const manual = nested.map(t => t.id === 'd' ? { ...t, auto_schedule: false } : t)
+  const manualResult = planTaskDeletion(manual, dependencies, ['c'], options)
+  assert.equal(manualResult.tasks.find(t => t.id === 'summary')?.end_date, at(2))
+  assert.equal(manualResult.tasks.find(t => t.id === 'd')?.start_date, at(3))
+  assert.equal(manualResult.tasks.find(t => t.id === 'next-summary')?.end_date, at(4))
+  assert.equal(manualResult.tasks.find(t => t.id === 'e')?.start_date, at(4))
+})
+
+test('parallel predecessor collapse is one undoable draft step and saves every shifted successor', async () => {
+  const { tasks, dependencies, at, unit } = parallelPredecessors()
+  tasks.push(task('f', { start_date: at(5), end_date: at(6), duration: unit }),
+    task('g', { start_date: at(6), end_date: at(7), duration: unit }))
+  dependencies.push(dep('e', 'f'), dep('f', 'g'))
+  const store = configureStore({ reducer: rootReducer, middleware: get => get().concat(createDraftMiddleware()) })
+  store.dispatch(setCurrentProject({ id: 'p', user_id: 'u', name: 'P', start_date: null, end_date: null,
+    status_date: '2025-01-01', planning_status: 'draft', created_at: '' }))
+  store.dispatch(setTasks({ tasks, dependencies }))
+  const baseline = snapshotDraft(store.getState())
+  store.dispatch(initializeDraft({ projectId: 'p', baseline }))
+  store.dispatch(labelDraftStep('删除任务及子任务'))
+  store.dispatch(deleteTasks(['c'], options))
+  await Promise.resolve()
+  const after = snapshotDraft(store.getState())
+  assert.equal(after.tasks.find(t => t.id === 'd')?.start_date, at(2))
+  assert.equal(after.tasks.find(t => t.id === 'e')?.start_date, at(3))
+  assert.equal(after.tasks.find(t => t.id === 'f')?.start_date, at(4))
+  assert.equal(after.tasks.find(t => t.id === 'g')?.start_date, at(5))
+  assert.equal(store.getState().draft.past.length, 1)
+  assert.deepEqual([...store.getState().tasks.dirtyIds].sort(), ['d', 'e', 'f', 'g'])
+  const diff = buildSaveDiff(tasks, dependencies, after.tasks, after.dependencies)
+  assert.deepEqual(diff.tasksToDelete, ['c'])
+  assert.deepEqual(diff.tasksToUpdate.map(t => t.id).sort(), ['d', 'e', 'f', 'g'])
+  assert.deepEqual(diff.depsToAdd, [])
+  assert.deepEqual(diff.depsToUpdate, [])
+  assert.deepEqual(diff.depsToDelete, [])
+  store.dispatch(undoDraft())
+  assert.deepEqual(snapshotDraft(store.getState()), baseline)
+  store.dispatch(redoDraft())
+  assert.deepEqual(snapshotDraft(store.getState()), after)
+})
 
 test('deleting an intermediate activity preserves predecessor/successor links and removes its work duration', () => {
   const tasks = [task('a'), task('deleted'), task('c')], deps = [dep('a', 'deleted', { lag: 60 }), dep('deleted', 'c', { lag: 30 })]

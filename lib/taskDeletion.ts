@@ -140,10 +140,16 @@ export function planTaskDeletion(tasks: Task[], dependencies: Dependency[], requ
       ? Math.max(0, diffMinutesStr(task.start_date, task.end_date)) : Math.max(0, task.duration ?? 0)
     return { ...task, start_date: anchor, end_date: addMinutesStr(anchor, duration), duration }
   })
-  // Freeze unrelated leaves while recomputing the affected successors and summaries.
-  const cascade = runFullCascade(anchored.map(t => affected.has(t.id) ? t : { ...t, auto_schedule: false }), finalDeps, options)
-  const updates = new Map(cascade.filter(t => affected.has(t.id)).map(t => [t.id, t]))
-  const finalTasks = anchored.map(t => updates.get(t.id) ?? t)
+  // A cascade rolls up summaries after scheduling dependencies. Feed shortened summaries
+  // back into the next pass so their successors also move, including nested summary chains.
+  // Each pass resolves at least one level of an acyclic affected graph; keep a finite bound.
+  let finalTasks = anchored
+  for (let pass = 0; pass < affected.size; pass++) {
+    const cascade = runFullCascade(finalTasks.map(t => affected.has(t.id) ? t : { ...t, auto_schedule: false }), finalDeps, options)
+    const updates = new Map(cascade.filter(t => affected.has(t.id)).map(t => [t.id, t]))
+    if (!updates.size) break
+    finalTasks = finalTasks.map(t => updates.get(t.id) ?? t)
+  }
   return { tasks: finalTasks, dependencies: finalDeps, deletedIds, newDependencies,
     updatedTasks: finalTasks.filter(t => t !== byId.get(t.id)) }
 }
