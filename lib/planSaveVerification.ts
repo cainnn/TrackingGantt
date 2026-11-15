@@ -57,6 +57,7 @@ export function comparablePlan(state: SaveBaseline) {
     lines: order((state.lines ?? []).map(l => ({ id: l.id, name: l.name, line_date: l.line_date.slice(0, 10), color: l.color, visible: l.visible }))),
     statusDate: toDateTimeStr(state.statusDate), planningStatus: normalizePlanningStatus(state.planningStatus),
     customFields: fieldsValue(state.customFields ?? []),
+    planBaseline: state.planBaseline ?? null,
   }
 }
 
@@ -89,7 +90,7 @@ export function findPlanSaveConflicts(baseline: SaveBaseline, persisted: SaveBas
       }
     }
   }
-  for (const [key, label] of [['statusDate', '状态日期'], ['planningStatus', '计划状态'], ['customFields', '任务属性配置']] as const) {
+  for (const [key, label] of [['statusDate', '状态日期'], ['planningStatus', '计划状态'], ['customFields', '任务属性配置'], ['planBaseline', '固定基线']] as const) {
     if (![base[key], local[key], ...previous.map(state => state[key])].some(value => equal(value, remote[key]))) issues.push(`${label}已在后台修改`)
   }
   return issues
@@ -111,7 +112,7 @@ export function findPlanSaveMismatches(expected: SaveBaseline, persisted: SaveBa
       issues.push(`${label}「${name?.name ?? id}」${!after ? '未保存到后台' : !before ? '仍存在于后台或被其他操作新增' : `的${fields.join('、')}与提交不一致`}`)
     }
   }
-  for (const [key, label] of [['statusDate', '状态日期'], ['planningStatus', '计划状态'], ['customFields', '任务属性配置']] as const) {
+  for (const [key, label] of [['statusDate', '状态日期'], ['planningStatus', '计划状态'], ['customFields', '任务属性配置'], ['planBaseline', '固定基线']] as const) {
     if (!equal(wanted[key], actual[key])) issues.push(`${label}与后台保存结果不一致`)
   }
   return issues

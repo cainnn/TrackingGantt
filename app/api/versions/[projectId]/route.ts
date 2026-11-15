@@ -71,7 +71,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     const statusDate: string | null = isAutosave ? null : (body.status_date ?? null)
     const description: string | null = body.description ?? null
     const projectRes = await client.query(
-      'SELECT time_granularity, planning_status, custom_fields FROM projects WHERE id = $1',
+      'SELECT time_granularity, planning_status, custom_fields, plan_baseline FROM projects WHERE id = $1',
       [projectId],
     )
     const isMinuteProject = projectRes.rows[0]?.time_granularity === 'minute'
@@ -113,7 +113,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     const linesResult = await client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId])
     const snapshot = { tasks: snapshotTasks, dependencies: snapshotDeps, lines: linesResult.rows,
-      planning_status: normalizePlanningStatus(projectRes.rows[0]?.planning_status), custom_fields: projectRes.rows[0]?.custom_fields ?? [] }
+      planning_status: normalizePlanningStatus(projectRes.rows[0]?.planning_status), custom_fields: projectRes.rows[0]?.custom_fields ?? [], plan_baseline: projectRes.rows[0]?.plan_baseline ?? null }
 
     // 计算与上一版本的差异
     let changes = null

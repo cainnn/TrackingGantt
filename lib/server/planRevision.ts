@@ -16,11 +16,11 @@ export async function readPlanState(client: PoolClient, projectId: string): Prom
   const tasks = await client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index', [projectId])
   const dependencies = await client.query(`SELECT d.* FROM dependencies d JOIN tasks f ON f.id = d.from_task_id AND f.is_deleted = false
     JOIN tasks t ON t.id = d.to_task_id AND t.is_deleted = false WHERE d.project_id = $1`, [projectId])
-  const project = await client.query('SELECT status_date, planning_status, custom_fields FROM projects WHERE id = $1', [projectId])
+  const project = await client.query('SELECT status_date, planning_status, custom_fields, plan_baseline FROM projects WHERE id = $1', [projectId])
   const lines = await client.query('SELECT id, project_id, name, line_date, color, visible FROM project_lines WHERE project_id = $1 ORDER BY line_date', [projectId])
   const state: SaveBaseline = { tasks: tasks.rows, dependencies: dependencies.rows, lines: lines.rows,
     statusDate: toDateTimeStr(project.rows[0]?.status_date), planningStatus: project.rows[0]?.planning_status,
-    customFields: project.rows[0]?.custom_fields ?? [] }
+    customFields: project.rows[0]?.custom_fields ?? [], planBaseline: project.rows[0]?.plan_baseline ?? null }
   const canonical = comparablePlan(state)
   // PostgreSQL JSON objects may have a different key order from submitted JSON.
   const stable = (value: unknown): unknown => Array.isArray(value) ? value.map(stable)

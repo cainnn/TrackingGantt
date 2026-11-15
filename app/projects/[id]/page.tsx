@@ -166,7 +166,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
       const baseline = {
         tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
         statusDate: toDateTimeStr(projectData.value.status_date), planningStatus: normalizePlanningStatus(projectData.value.planning_status), lines: linesData.value,
-        customFields: projectData.value.custom_fields ?? [],
+        customFields: projectData.value.custom_fields ?? [], planBaseline: projectData.value.plan_baseline ?? null,
       }
       dispatch(setCurrentProject(projectData.value))
       dispatch(resetDraft({ ...baseline, descriptions: {} }))
@@ -217,7 +217,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
             tasks: tr.value.tasks,
             dependencies: loadedDeps,
             planningStatus: normalizePlanningStatus(pr.value.planning_status),
-            customFields: pr.value.custom_fields ?? [],
+            customFields: pr.value.custom_fields ?? [], planBaseline: pr.value.plan_baseline ?? null,
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value,
           })
         }
@@ -226,7 +226,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
           dispatch(initializeDraft({ projectId, baseline: {
             tasks: tr.value.tasks, dependencies: tr.value.dependencies,
             planningStatus: normalizePlanningStatus(pr.value.planning_status),
-            customFields: pr.value.custom_fields ?? [],
+            customFields: pr.value.custom_fields ?? [], planBaseline: pr.value.plan_baseline ?? null,
             statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value, descriptions: {},
           } }))
         }

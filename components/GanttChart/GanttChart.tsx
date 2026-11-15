@@ -4,7 +4,7 @@ import React, { useRef, useState, useMemo, useCallback, useEffect } from 'react'
 import ReactDOM from 'react-dom'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
-  setSelectedIds, setTasks, updateTasks, addTasks, deleteTasks,
+  setSelectedIds, setTasks, updateTasks, addTasks, deleteTasks, clearDiffFilter,
   addDependency, removeDependency, updateDependency,
 } from '@/store/slices/tasksSlice'
 import { setStatusDate } from '@/store/slices/projectSlice'
@@ -34,6 +34,8 @@ import { labelDraftStep } from '@/store/draftHistory'
 import { buildBulkEdit } from '@/lib/clientBulkEdit'
 import { cascadeDragSuccessors } from '@/lib/clientDragScheduling'
 import { applyGridFillDown, applyGridPaste, gridCellEditable, gridSelectionRect, serializeClipboardGrid } from '@/lib/clientGridEdit'
+import { analyzeSchedule } from '@/lib/scheduleAnalysis'
+import { baselineVariance } from '@/lib/planBaseline'
 import type { ChartViewState } from '@/lib/clientViewState'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
@@ -244,7 +246,7 @@ export function computeTaskStatus(
   return { status: 'notstarted', reason: '' }
 }
 // Optional column keys (编号 and 任务名称 are always shown)
-export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'taskType' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive'
+export type OptionalCol = 'assignee' | 'pct' | 'duration' | 'start' | 'end' | 'pred' | 'succ' | 'lag' | 'taskType' | 'ctype' | 'cdate' | 'ddate' | 'status' | 'inactive' | 'slack' | 'baselineStart' | 'baselineFinish' | 'baselineDuration'
 export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number }[] = [
   { key: 'assignee',   label: '责任人',   width: COL_ASSIGN },
   { key: 'status',     label: '状态',     width: COL_STATUS },
@@ -260,6 +262,10 @@ export const OPTIONAL_COL_META: { key: OptionalCol; label: string; width: number
   { key: 'cdate',      label: '限制日期', width: COL_CDATE },
   { key: 'ddate',      label: '截止日期', width: COL_DDATE },
   { key: 'inactive',   label: '无效',     width: 60 },
+  { key: 'slack', label: '总时差', width: 100 },
+  { key: 'baselineStart', label: '基线开始偏差', width: 120 },
+  { key: 'baselineFinish', label: '基线完成偏差', width: 120 },
+  { key: 'baselineDuration', label: '基线工期偏差', width: 120 },
 ]
 export const DEFAULT_VISIBLE_COLS: OptionalCol[] = ['assignee', 'status', 'pct', 'start', 'duration', 'pred', 'succ', 'lag', 'taskType', 'ctype', 'cdate', 'ddate']
 
@@ -592,9 +598,26 @@ export default function GanttChart({
 
   // ── 版本对比映射（按 ID 查找对比版本中的任务） ─────────────────────────
   const comparisonMap = useMemo(() => {
-    if (!comparison?.tasks?.length) return new Map<string, Task>()
-    return new Map(comparison.tasks.map(t => [t.id, t]))
-  }, [comparison])
+    const source = comparison?.tasks ?? (!viewSnapshot ? currentProject?.plan_baseline?.tasks : undefined) ?? []
+    return new Map(source.map(t => [t.id, t]))
+  }, [comparison, viewSnapshot, currentProject?.plan_baseline])
+
+  const analysisTasks = useMemo(() => tasks.map(t => previewMap[t.id] ?? t), [tasks, previewMap])
+  const scheduleAnalysis = useMemo(() => analyzeSchedule(analysisTasks, deps, viewSnapshot ? null : currentProject?.end_date), [analysisTasks, deps, viewSnapshot, currentProject?.end_date])
+  const varianceMap = useMemo(() => {
+    const baseline = viewSnapshot ? null : currentProject?.plan_baseline
+    const originals = new Map(baseline?.tasks.map(t => [t.id, t]) ?? [])
+    return new Map(analysisTasks.map(t => [t.id, baseline && originals.has(t.id) ? baselineVariance(t, { ...baseline, tasks: [originals.get(t.id)!] }) : null]))
+  }, [analysisTasks, viewSnapshot, currentProject?.plan_baseline])
+  const metricValue = useCallback((task: Task, key: string): number | null => {
+    if (key === 'slack') return scheduleAnalysis.tasks.get(task.id)?.totalSlack ?? null
+    const value = varianceMap.get(task.id)
+    return key === 'baselineStart' ? value?.start ?? null : key === 'baselineFinish' ? value?.finish ?? null : value?.duration ?? null
+  }, [scheduleAnalysis, varianceMap])
+  const metricText = useCallback((task: Task, key: string) => {
+    const value = metricValue(task, key)
+    return value == null ? '—' : fmtMinDur(value, { signed: true, dayOnly: !isMinute })
+  }, [metricValue, isMinute])
 
   // 摘要任务集合（有子任务的任务不可直接拖动，日期由子任务决定）
   const summarySet = useMemo(() => {
@@ -1058,6 +1081,7 @@ export default function GanttChart({
           case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '').split('T')[0]
           case 'ddate':      return (t.deadline ?? '').split('T')[0]
           case 'status':     return statusValue(t)
+          case 'slack': case 'baselineStart': case 'baselineFinish': case 'baselineDuration': return metricText(t, k)
           case 'inactive':   return t.inactive ? '是' : '否'
         }
       }
@@ -1087,6 +1111,7 @@ export default function GanttChart({
           case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '')
           case 'ddate':      return t.deadline ?? ''
           case 'status':     return statusValue(t)
+          case 'slack': case 'baselineStart': case 'baselineFinish': case 'baselineDuration': return metricValue(t, sortCol) ?? -Infinity
           default:           return 0
         }
       }
@@ -1117,7 +1142,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue])
 
   const rowDropTarget = useCallback((index: number | null) => {
     if (index === null || !displayRows.length) return null
@@ -1189,117 +1214,7 @@ export default function GanttChart({
     return s
   }, [tasks])
 
-  const criticalSet = useMemo((): Set<string> => {
-    if (!showCriticalPath) return new Set()
-
-    // 只考虑叶子任务（非摘要）且有完整日期
-    const leafTasks = tasks.filter(t =>
-      t.start_date && t.end_date && t.duration != null && !summarySet.has(t.id)
-    )
-    if (leafTasks.length === 0) return new Set()
-
-    // 构建任务信息映射
-    const info = new Map<string, { dur: number; es: number; ef: number; ls: number; lf: number }>()
-    for (const t of leafTasks) {
-      info.set(t.id, { dur: t.duration ?? 0, es: 0, ef: 0, ls: 0, lf: 0 })
-    }
-
-    // 前置依赖和后继依赖索引
-    const preds = new Map<string, Array<{ fromId: string; type: number; lag: number }>>()
-    const succs = new Map<string, Array<{ toId: string; type: number; lag: number }>>()
-    for (const d of deps) {
-      if (!info.has(d.from_task_id) || !info.has(d.to_task_id)) continue
-      if (!preds.has(d.to_task_id)) preds.set(d.to_task_id, [])
-      preds.get(d.to_task_id)!.push({ fromId: d.from_task_id, type: d.type ?? 2, lag: d.lag ?? 0 })
-      if (!succs.has(d.from_task_id)) succs.set(d.from_task_id, [])
-      succs.get(d.from_task_id)!.push({ toId: d.to_task_id, type: d.type ?? 2, lag: d.lag ?? 0 })
-    }
-
-    // 拓扑排序（基于依赖关系）
-    const inDegree = new Map<string, number>()
-    for (const id of info.keys()) inDegree.set(id, 0)
-    for (const [toId, predList] of preds) {
-      inDegree.set(toId, predList.length)
-    }
-    const queue: string[] = []
-    for (const [id, deg] of inDegree) {
-      if (deg === 0) queue.push(id)
-    }
-    const topoOrder: string[] = []
-    while (queue.length > 0) {
-      const cur = queue.shift()!
-      topoOrder.push(cur)
-      for (const s of (succs.get(cur) ?? [])) {
-        const nd = (inDegree.get(s.toId) ?? 1) - 1
-        inDegree.set(s.toId, nd)
-        if (nd === 0) queue.push(s.toId)
-      }
-    }
-
-    // 正推（Forward Pass）：计算 ES, EF
-    for (const id of topoOrder) {
-      const t = info.get(id)!
-      let es = 0
-      for (const p of (preds.get(id) ?? [])) {
-        const pi = info.get(p.fromId)!
-        let required = 0
-        if (p.type === 2)      required = pi.ef + p.lag        // FS
-        else if (p.type === 0) required = pi.es + p.lag        // SS
-        else if (p.type === 3) required = pi.ef + p.lag - t.dur // FF
-        else if (p.type === 1) required = pi.es + p.lag - t.dur // SF
-        if (required > es) es = required
-      }
-      t.es = es
-      t.ef = es + t.dur
-    }
-
-    // 项目最晚结束时间
-    let projectEnd = 0
-    for (const t of info.values()) {
-      if (t.ef > projectEnd) projectEnd = t.ef
-    }
-
-    // 反推（Backward Pass）：计算 LS, LF
-    // 无后继任务：LF = projectEnd（项目最晚结束时间）
-    // 有后继任务：LF 由后继约束决定，初始化为 Infinity 以便后续取最小值
-    const tasksWithSuccessors = new Set<string>()
-    for (const [id] of succs) {
-      if ((succs.get(id) ?? []).length > 0) tasksWithSuccessors.add(id)
-    }
-    for (const [id, t] of info) {
-      if (tasksWithSuccessors.has(id)) {
-        t.lf = Infinity
-        t.ls = Infinity
-      } else {
-        t.lf = projectEnd
-        t.ls = projectEnd - t.dur
-      }
-    }
-    for (let i = topoOrder.length - 1; i >= 0; i--) {
-      const id = topoOrder[i]
-      const t = info.get(id)!
-      for (const s of (succs.get(id) ?? [])) {
-        const si = info.get(s.toId)!
-        let constraint = projectEnd
-        if (s.type === 2)      constraint = si.ls - s.lag        // FS: LF_pred <= LS_succ - lag
-        else if (s.type === 0) constraint = si.ls - s.lag + t.dur // SS: LS_pred <= LS_succ - lag
-        else if (s.type === 3) constraint = si.lf - s.lag        // FF: LF_pred <= LF_succ - lag
-        else if (s.type === 1) constraint = si.lf - s.lag + t.dur // SF: LS_pred <= LF_succ - lag
-        if (constraint < t.lf) {
-          t.lf = constraint
-          t.ls = t.lf - t.dur
-        }
-      }
-    }
-
-    // 浮动 = LS - ES，浮动为 0 的任务在关键路径上
-    const result = new Set<string>()
-    for (const [id, t] of info) {
-      const totalFloat = t.ls - t.es
-      if (Math.abs(totalFloat) < 0.001) result.add(id)
-    }
-    return result
-  }, [showCriticalPath, tasks, deps, summarySet])
+  const criticalSet = useMemo(() => new Set(showCriticalPath ? [...scheduleAnalysis.tasks].filter(([, t]) => t.critical).map(([id]) => id) : []), [showCriticalPath, scheduleAnalysis])
 
   // ── 摘要任务进度（所有后代叶子任务按工期加权的完成度） ──────────────
   const statusDateObj = useMemo(() => effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null, [effectiveChartStatusDate])
@@ -1315,21 +1230,37 @@ export default function GanttChart({
     return rect ? clientX - rect.left : 0
   }, [])
 
-  // ── Focus on selected task ──────────────────────────────────────────────
+  // Reveal a hidden issue target before scrolling; consume the request once.
+  const pendingFocusTask = useRef<string | null>(null)
   useEffect(() => {
-    if (!focusSignal || selectedIds.length === 0) return
-    const taskId = selectedIds[0]
-    const rowI = rowIdx[taskId]
-    if (rowI !== undefined && leftRef.current)
-      leftRef.current.scrollTop = Math.max(0, rowI * ROW_H - 80)
+    if (!focusSignal || !selectedIds.length) return
+    const id = selectedIds[0]
+    pendingFocusTask.current = id
+    if (rowIdx[id] === undefined) {
+      setColFilters({})
+      dispatch(clearDiffFilter())
+      const ancestors: Record<string, boolean> = {}
+      const byId = new Map(tasks.map(task => [task.id, task]))
+      const seen = new Set<string>()
+      let task = byId.get(id)
+      while (task?.parent_id && !seen.has(task.parent_id)) {
+        seen.add(task.parent_id); ancestors[task.parent_id] = true; task = byId.get(task.parent_id)
+      }
+      setExpanded(previous => ({ ...previous, ...ancestors }))
+    }
+  }, [focusSignal]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const taskId = pendingFocusTask.current
+    if (!taskId || rowIdx[taskId] === undefined) return
+    if (leftRef.current) leftRef.current.scrollTop = Math.max(0, rowIdx[taskId] * ROW_H - 80)
     const task = tasks.find(t => t.id === taskId)
     if (task?.start_date && rightRef.current) {
       const startX = dateToX(new Date(task.start_date))
       const endX = task.end_date ? dateToX(new Date(task.end_date)) : startX
-      const x = (startX + endX) / 2
-      syncTimelineScrollLeft(Math.max(0, x - rightRef.current.clientWidth / 2))
+      syncTimelineScrollLeft(Math.max(0, (startX + endX) / 2 - rightRef.current.clientWidth / 2))
     }
-  }, [focusSignal]) // eslint-disable-line react-hooks/exhaustive-deps
+    pendingFocusTask.current = null
+  }, [focusSignal, rowIdx, tasks, dateToX, syncTimelineScrollLeft])
 
   const selectionAnchor = useRef<string | null>(null)
   const selectTask = useCallback((taskId: string, e: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean }, checkbox = false) => {
@@ -2555,6 +2486,7 @@ export default function GanttChart({
       return m + CELL_PAD
     }
     return {
+      slack: 110, baselineStart: 140, baselineFinish: 140, baselineDuration: 140,
       name:       Math.max(MIN_NAME_W, headerW('任务名称'), contentW(t => t.name ?? '') + 32),
       assignee:   Math.max(headerW('责任人'),   contentW(t => t.assignee ?? '')),
       pct:        Math.max(headerW('完成'),     contentW(t => `${Math.round(t.percent_done ?? 0)}%`)),
@@ -2596,7 +2528,7 @@ export default function GanttChart({
   const leftInnerW = Math.max(leftNaturalW, effectivePanelW)
   // Map visible column keys to their computed widths
   const visibleColWidths = useMemo(() => {
-    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, taskType: 0, ctype: 0, cdate: 0, ddate: 0, status: 0, inactive: 0 }
+    const map: Record<OptionalCol, number> = { assignee: 0, pct: 0, duration: 0, start: 0, end: 0, pred: 0, succ: 0, lag: 0, taskType: 0, ctype: 0, cdate: 0, ddate: 0, status: 0, inactive: 0, slack: 0, baselineStart: 0, baselineFinish: 0, baselineDuration: 0 }
     const visibleKeys = OPTIONAL_COL_META.filter(c => visibleCols.includes(c.key)).map(c => c.key)
     visibleKeys.forEach((k, i) => { map[k] = rightColWidths[i] ?? 0 })
     return map
@@ -2649,6 +2581,8 @@ export default function GanttChart({
       ddate:      t => fmt(t.deadline),
       status:     statusValue,
       inactive:   t => t.inactive ? '是' : '否',
+      slack: t => metricText(t, 'slack'), baselineStart: t => metricText(t, 'baselineStart'),
+      baselineFinish: t => metricText(t, 'baselineFinish'), baselineDuration: t => metricText(t, 'baselineDuration'),
     }
     const out = {} as Record<OptionalCol, string[]>
     ;(Object.keys(builder) as OptionalCol[]).forEach(k => {
@@ -2657,7 +2591,7 @@ export default function GanttChart({
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute])
+  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
@@ -3118,6 +3052,7 @@ export default function GanttChart({
           {renderColHeader('ddate', '截止日期', colDDateW)}
           {renderColHeader('pct', '完成', colPctW)}
           {renderColHeader('inactive', '无效', colInactiveW)}
+          {(['slack', 'baselineStart', 'baselineFinish', 'baselineDuration'] as const).map(key => <React.Fragment key={key}>{renderColHeader(key, OPTIONAL_COL_META.find(c => c.key === key)!.label, visibleColWidths[key])}</React.Fragment>)}
         </div>
 
         {/* Rows */}
@@ -3249,6 +3184,15 @@ export default function GanttChart({
                         </span>
                     }
                   </div>
+
+                  {(['slack', 'baselineStart', 'baselineFinish', 'baselineDuration'] as const).filter(key => visibleColWidths[key] > 0).map(key => {
+                    const value = metricValue(t, key)
+                    const reason = key === 'slack' ? scheduleAnalysis.tasks.get(t.id)?.reason ?? (row.hasChildren ? '摘要任务不单独计算' : '停用任务不参与计算') : !currentProject?.plan_baseline ? '尚未设置固定项目基线' : '此任务不在固定基线中'
+                    return <div key={key} data-task-cell={t.id} data-col={key} style={{ width: visibleColWidths[key], order: colOrderOf(key) }}
+                      title={value == null ? reason : key === 'slack' ? '按当前计划计算的可延迟时间；负值表示需提前' : `相对固定基线「${currentProject?.plan_baseline?.sourceVersionName}」，正值为延后或增加`}
+                      className={`flex h-full flex-none items-center justify-end border-r border-gray-100 px-2 text-[11px] ${cellRing(key)} ${value != null && (key === 'slack' ? value < 0 : value > 0) ? 'text-red-700' : 'text-gray-600'}`}
+                      onClick={pickCell(key)}>{metricText(t, key)}</div>
+                  })}
 
                   {/* ── Assignee cell ─────────────────────────────── */}
                   {colAssignW > 0 && (
@@ -4130,12 +4074,12 @@ export default function GanttChart({
             const endDeltaMins = diffMins(new Date(ct.end_date), new Date(t.end_date))
             const startDeltaMins = diffMins(new Date(ct.start_date), new Date(t.start_date))
             // 颜色：延后=红，提前=绿，准时=灰
-            const barColor = endDelta > 0 ? '#ef4444' : endDelta < 0 ? '#22c55e' : '#9ca3af'
-            const barOpacity = endDelta === 0 ? 0.4 : 0.6
+            const barColor = endDeltaMins > 0 ? '#ef4444' : endDeltaMins < 0 ? '#22c55e' : '#9ca3af'
+            const barOpacity = endDeltaMins === 0 ? 0.4 : 0.6
             const startDeltaLabel = formatCompareDelta(startDeltaMins, isMinute)
             const endDeltaLabel = formatCompareDelta(endDeltaMins, isMinute)
 
-            if (t.is_milestone) {
+            if (ct.is_milestone) {
               const r = 5, mx = cx, my = cy + ch / 2
               return (
                 <g key={`cmp-${t.id}`}>
@@ -4260,10 +4204,10 @@ export default function GanttChart({
                       }}
                       onMouseDown={e=>onDepLineMouseDown(e, dep, midPtX, midPtY)} />
                 <path d={d}
-                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '#ef4444' : '#9ca3af'}
-                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? 2 : 1.5}
+                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '#ef4444' : '#9ca3af'}
+                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? 2 : 1.5}
                       strokeDasharray={isDragTarget ? '5 3' : undefined}
-                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (criticalSet.has(dep.from_task_id) && criticalSet.has(dep.to_task_id)) ? '-sel' : ''})`}
+                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '-sel' : ''})`}
                       style={{ pointerEvents:'none' }} />
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2

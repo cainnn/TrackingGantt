@@ -1,5 +1,6 @@
 'use client'
 
+import PlanBaselinePanel from './PlanBaselinePanel'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import { setVersions, addVersion, updateVersion, removeVersion } from '@/store/slices/versionsSlice'
@@ -481,6 +482,7 @@ export default function VersionPanel({ projectId, open, onClose, readOnly }: Pro
       {/* ═══ Tab: 快照 ═══ */}
       {activeTab === 'versions' && (
         <>
+          <PlanBaselinePanel projectId={projectId} versions={versions} readOnly={readOnly} />
           {/* Create form */}
           {showCreate && canCreateVersions && (
             <div className="px-4 py-3 border-b border-gray-100 bg-blue-50/50">

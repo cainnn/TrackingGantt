@@ -9,6 +9,15 @@ export interface User {
 export type TimeGranularity = 'day' | 'minute'
 export type PlanningStatus = 'draft' | 'stable'
 
+export interface PlanBaseline {
+  id: string
+  sourceVersionId: string
+  sourceVersionName: string
+  sourceCreatedAt: string
+  reason: string
+  tasks: Pick<Task, 'id' | 'name' | 'start_date' | 'end_date' | 'duration' | 'is_milestone'>[]
+}
+
 export type TaskCustomFieldType = 'text' | 'number' | 'money' | 'date' | 'select'
 export interface TaskCustomField {
   id: string
@@ -31,6 +40,7 @@ export interface Project {
   time_granularity?: TimeGranularity  // 'day' 或 'minute'，创建时固定
   planning_status?: PlanningStatus
   custom_fields?: TaskCustomField[]
+  plan_baseline?: PlanBaseline | null
   created_at: string
   progress?: number
   estimated_end_date?: string | null

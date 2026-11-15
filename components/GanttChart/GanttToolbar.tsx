@@ -21,6 +21,8 @@ import EditTaskModal from './EditTaskModal'
 import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
 import BulkEditPanel from './BulkEditPanel'
 import TaskRepairPanel from './TaskRepairPanel'
+import ScheduleIssuesPanel from './ScheduleIssuesPanel'
+import { baselinesEqual } from '@/lib/planBaseline'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { scheduleDurationMinutes } from '@/lib/clientTaskEdit'
@@ -259,6 +261,7 @@ export default function GanttToolbar({
 
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [taskRepairOpen, setTaskRepairOpen] = useState(false)
+  const [scheduleIssuesOpen, setScheduleIssuesOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
   const [versionPanelOpen, setVersionPanelOpen] = useState(false)
   const [retroLogOpen, setRetroLogOpen] = useState(false)
@@ -307,6 +310,8 @@ export default function GanttToolbar({
   const [baselineStatusDate, setBaselineStatusDate] = useState<string | null>(initialBaseline.statusDate)
   const [baselinePlanningStatus, setBaselinePlanningStatus] = useState(() => normalizePlanningStatus(initialBaseline.planningStatus))
   const [baselineCustomFields, setBaselineCustomFields] = useState(initialBaseline.customFields ?? [])
+  const [savedPlanBaseline, setSavedPlanBaseline] = useState(initialBaseline.planBaseline ?? null)
+  const planBaselineChanged = !baselinesEqual(savedPlanBaseline, currentProject?.plan_baseline)
   const [customFieldsReason, setCustomFieldsReason] = useState('')
   const customFields = currentProject?.custom_fields ?? []
   const customFieldsChanged = !customFieldsEqual(baselineCustomFields, customFields)
@@ -1235,6 +1240,9 @@ export default function GanttToolbar({
     const createVersion = normalizePlanningStatus(currentProject?.planning_status) === 'stable'
     if (readOnly || (createVersion && !sd) || statusDateSaving || !allReasonsFilled) return
 
+    if (findPlanScheduleConflicts(reduxStore.getState().tasks.tasks, reduxStore.getState().tasks.dependencies).length) {
+      setReviewOpen(false); setScheduleIssuesOpen(true); return
+    }
     setStatusDateSaving(true)
     dispatch(beginDraftSave())
     const submittedLines = reduxStore.getState().projectLines.lines
@@ -1244,6 +1252,7 @@ export default function GanttToolbar({
     const submittedDeps = submitted.dependencies
     const submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
     const submittedCustomFields = reduxStore.getState().project.currentProject?.custom_fields ?? []
+    const submittedPlanBaseline = reduxStore.getState().project.currentProject?.plan_baseline ?? null
     // Direct draft saves must not reuse reasons from an earlier stable review.
     const submittedDependencyReasons = createVersion ? dependencyReasons : {}
     const saveHeaders = authFetchHeaders(true)
@@ -1310,13 +1319,20 @@ export default function GanttToolbar({
         }) : []
       const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
       const expectedPlan: SaveBaseline = { tasks: finalTasks, dependencies: submittedDeps, lines: submittedLines,
-        statusDate: sd, planningStatus: submittedPlanningStatus, customFields: submittedCustomFields }
+        statusDate: sd, planningStatus: submittedPlanningStatus, customFields: submittedCustomFields, planBaseline: submittedPlanBaseline }
       const conflicts = findPlanSaveConflicts({ tasks: baselineTasks, dependencies: baselineDeps, lines: baselineLines,
-        statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields }, persisted, expectedPlan, saveAttempts.current)
+        statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields, planBaseline: savedPlanBaseline }, persisted, expectedPlan, saveAttempts.current)
       if (conflicts.length) throw new Error(`后台计划存在冲突，尚未写入本次修改：\n${conflicts.slice(0, 8).join('\n')}`)
       const scheduleConflicts = findPlanScheduleConflicts(finalTasks, submittedDeps)
       if (scheduleConflicts.length) throw new Error(`排期校验未通过，尚未写入本次修改：\n${scheduleConflicts.slice(0, 8).join('\n')}`)
       saveAttempts.current.push(expectedPlan)
+
+      // Freeze the selected historical baseline before this save can replace a same-date version.
+      if (!baselinesEqual(persisted.planBaseline, submittedPlanBaseline)) {
+        const r = await saveFetch(`/api/projects/${projectId}`, { method: 'PUT', body: JSON.stringify({ plan_baseline: submittedPlanBaseline }) })
+        const result = await r.json()
+        if (!r.ok || !result.ok) throw new Error(result.error ?? '固定基线保存失败')
+      }
 
       // Definitions must exist before tasks reference them, after validation.
       if (!customFieldsEqual(saveBaseCustomFields, submittedCustomFields)) {
@@ -1506,6 +1522,7 @@ export default function GanttToolbar({
       dispatch(finishDraftSave({ ...confirmed, planningStatus: savedPlanningStatus, lines: confirmedLines, descriptions: {} }))
       setBaselinePlanningStatus(savedPlanningStatus)
       setBaselineCustomFields(confirmed.customFields ?? [])
+      setSavedPlanBaseline(confirmed.planBaseline ?? null)
       setBaselineLines(confirmedLines)
       attemptedLineIds.current.clear()
       setReviewOpen(false)
@@ -1542,7 +1559,7 @@ export default function GanttToolbar({
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, saveIncomplete, readPersistedState, reduxStore,
-      snapshotEndForBaseline, baselineLines, baselineCustomFields, customFieldsChanged, customFieldsReason, readOnly])
+      snapshotEndForBaseline, baselineLines, baselineCustomFields, savedPlanBaseline, customFieldsChanged, customFieldsReason, readOnly])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -1557,6 +1574,8 @@ export default function GanttToolbar({
       setBaselinePlanningStatus(restoredPlanningStatus)
       const restoredCustomFields = persisted?.customFields ?? baselineCustomFields
       setBaselineCustomFields(restoredCustomFields)
+      const restoredPlanBaseline = persisted ? persisted.planBaseline ?? null : savedPlanBaseline
+      setSavedPlanBaseline(restoredPlanBaseline)
       if (persisted) {
         setBaseline(restoredTasks.map(t => ({ ...t })))
         setBaselineTasks(restoredTasks)
@@ -1565,7 +1584,7 @@ export default function GanttToolbar({
       }
       const restoredLines = persisted?.lines ?? baselineLines
       setBaselineLines(restoredLines)
-      dispatch(resetDraft({ tasks: restoredTasks, dependencies: restoredDeps, statusDate: restoredStatusDate, planningStatus: restoredPlanningStatus, customFields: restoredCustomFields, lines: restoredLines, descriptions: {} }))
+      dispatch(resetDraft({ tasks: restoredTasks, dependencies: restoredDeps, statusDate: restoredStatusDate, planningStatus: restoredPlanningStatus, customFields: restoredCustomFields, planBaseline: restoredPlanBaseline, lines: restoredLines, descriptions: {} }))
       attemptedLineIds.current.clear()
       dispatch(clearComparison())
       dispatch(clearDiffFilter())
@@ -1581,7 +1600,7 @@ export default function GanttToolbar({
       setStatusDateSaving(false)
     }
   }, [baseline, baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, dispatch, projectId, onDiscardChanges,
-      statusDateSaving, saveIncomplete, readPersistedState, baselineLines, baselineCustomFields, history.uncertain, hasChanges, readOnly])
+      statusDateSaving, saveIncomplete, readPersistedState, baselineLines, baselineCustomFields, savedPlanBaseline, history.uncertain, hasChanges, readOnly])
 
   // ── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
@@ -1665,6 +1684,12 @@ export default function GanttToolbar({
           <span className="whitespace-nowrap text-blue-700">已选 {selectedIds.length} 个任务</span>
           <button className="text-blue-600 hover:underline" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>
         </div>}
+        <button type="button" onClick={() => setScheduleIssuesOpen(true)} className="h-8 whitespace-nowrap rounded border border-gray-300 bg-white px-2.5 text-[13px] text-gray-700 hover:bg-gray-50">排程检查</button>
+        {!viewSnapshot && currentProject?.plan_baseline && <button type="button" aria-label="显示固定基线" title={`固定基线：${currentProject.plan_baseline.sourceVersionName}；偏差列始终以此为准`}
+          className="h-8 max-w-56 truncate rounded border border-blue-200 bg-blue-50 px-2 text-xs text-blue-800"
+          onClick={() => { dispatch(clearComparison()); if (!showComparison || comparison) onShowComparison?.(); else onToggleComparison?.() }}>
+          {showComparison && !comparison ? '隐藏' : '显示'}固定基线：{currentProject.plan_baseline.sourceVersionName}
+        </button>}
         {history.uncertain && <span className="text-xs text-amber-700">上次保存结果待核对，请重试保存或放弃全部更改</span>}
         {/* Search */}
         <div className="flex items-center gap-1 border border-gray-300 rounded px-2 h-8 bg-white">
@@ -2069,6 +2094,11 @@ export default function GanttToolbar({
       {attributeViewTask && <TaskCustomFieldsPanel task={attributeViewTask} fields={taskCustomFields(attributeViewTask, viewSnapshot?.customFields ?? currentProject?.custom_fields)} onClose={() => setAttributeViewTask(null)} />}
       {bulkEditOpen && !readOnly && <BulkEditPanel onClose={() => setBulkEditOpen(false)} />}
       {taskRepairOpen && !readOnly && <TaskRepairPanel tasks={getFlatOrder(tasks.filter(task => !task.is_deleted))} onClose={() => setTaskRepairOpen(false)} />}
+      {scheduleIssuesOpen && <ScheduleIssuesPanel tasks={viewSnapshot?.tasks ?? tasks} dependencies={viewSnapshot?.dependencies ?? dependencies} projectFinish={viewSnapshot ? null : currentProject?.end_date}
+        onClose={() => setScheduleIssuesOpen(false)}
+        onLocate={id => { dispatch(setSelectedIds([id])); onSearchChange(''); onExpandAll?.(); onFocusTask?.(); setScheduleIssuesOpen(false) }}
+        onEdit={!readOnly && !history.saving ? id => { dispatch(setSelectedIds([id])); setScheduleIssuesOpen(false); setEditModalOpen(true) } : undefined}
+        onUndo={!readOnly && history.past.length > 0 && !history.saving && !history.uncertain ? () => dispatch(undoDraft()) : undefined} />}
       {/* Edit Task Modal */}
       {editModalOpen && selectedIds.length === 1 && (
         <EditTaskModal
@@ -2112,7 +2142,7 @@ export default function GanttToolbar({
                     {linesChanged && <span className="text-blue-600">项目线 {lineDiffs.length}</span>}
                     {planningStatusChanged && <span className="text-blue-600">计划状态</span>}
                     {statusDateChanged && <span className="text-orange-600">{isMinute ? '状态时间' : '状态日期'}</span>}
-                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total + lineDiffs.length + Number(statusDateChanged) + Number(planningStatusChanged) + Number(customFieldsChanged)} 项变更</span>
+                    <span className="text-gray-400 ml-auto">共 {changeDiffs.length + depDiff.total + lineDiffs.length + Number(statusDateChanged) + Number(planningStatusChanged) + Number(customFieldsChanged) + Number(planBaselineChanged)} 项变更</span>
                   </>
                 )
               })()}
@@ -2123,6 +2153,7 @@ export default function GanttToolbar({
               <div className="text-xs text-gray-500">
                 {reasonsRequired ? '稳定态：主动变更、手动任务和依赖变更需填写原因。' : '草稿态：原因可选填，只保存当前计划，不生成历史版本。'}
               </div>
+              {planBaselineChanged && <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm">固定基线：{savedPlanBaseline?.sourceVersionName ?? '未设置'} → {currentProject?.plan_baseline?.sourceVersionName}<br />原因：{currentProject?.plan_baseline?.reason}</div>}
               {planningStatusChanged && <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm">
                 计划状态：{planningStatusLabel(baselinePlanningStatus)} → {planningStatusLabel(planningStatus)}
               </div>}
@@ -2149,7 +2180,7 @@ export default function GanttToolbar({
                 {before && <div className="text-gray-500">原值：{before.name} · {before.line_date.slice(0, 10)} · {before.color} · {before.visible ? '显示' : '隐藏'}</div>}
                 {after && <div>新值：{after.name} · {after.line_date.slice(0, 10)} · {after.color} · {after.visible ? '显示' : '隐藏'}</div>}
               </div>)}
-              {changeDiffs.length === 0 && depDiff.total === 0 && !linesChanged && !statusDateChanged && !planningStatusChanged && !customFieldsChanged && (
+              {changeDiffs.length === 0 && depDiff.total === 0 && !linesChanged && !statusDateChanged && !planningStatusChanged && !customFieldsChanged && !planBaselineChanged && (
                   <div className="text-center text-gray-400 py-8 text-sm">{saveIncomplete ? '上次保存未完成，请再次确认以完成保存' : '没有检测到变更'}</div>
               )}
               {changeDiffs.map((d, i) => (

@@ -3,7 +3,7 @@
  *
  * 用于草稿直接保存与稳定态确认保存：自动识别字段及层级差异。
  */
-import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField, TaskCustomValues } from '@/types'
+import type { Task, Dependency, ProjectLine, PlanningStatus, TaskCustomField, TaskCustomValues, PlanBaseline } from '@/types'
 import { customValuesEqual, customFieldsEqual } from './taskCustomFields'
 import { toDateTimeStr } from './clientTime'
 import { normalizeDurationMinutes } from './taskNumbers'
@@ -57,6 +57,7 @@ export interface SaveDiff {
 }
 
 export interface SaveBaseline {
+  planBaseline?: PlanBaseline | null
   tasks: Task[]
   dependencies: Dependency[]
   statusDate: string | null
