@@ -7,6 +7,7 @@ const rootPassword = process.env.SAVE_TEST_PASSWORD || 'root123';
 const prefix = `保存回归-${randomUUID().slice(0, 8)}-`;
 const projects = [];
 let token, browser;
+const saveDialogs = [];
 const domEvents = process.env.SAVE_TEST_DOM_EVENTS === '1';
 
 async function api(path, method = 'GET', body, expected = 200) {
@@ -190,7 +191,7 @@ async function main() {
     // Optional for macOS environments that drop native CDP input events.
     page.click = selector => page.$eval(selector, e => e.click());
   }
-  const dialogs = [], errors = [], interceptionErrors = [];
+  const dialogs = saveDialogs, errors = [], interceptionErrors = [];
   page.on('dialog', async d => { dialogs.push(d.message()); await d.accept(); });
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`${base}/login`, { waitUntil: 'domcontentloaded' });
@@ -216,9 +217,9 @@ async function main() {
         });
         assert.equal(response.status, 201, await response.text());
         await request.abort('failed');
-      } else if (mode === 'stale-recovery-read' && request.method() === 'GET' && url.pathname === `/api/tasks/${retry.id}`) {
+      } else if (mode === 'incomplete-recovery-read' && request.method() === 'GET' && url.pathname === `/api/tasks/${retry.id}`) {
         mode = null;
-        // Model a recovery read arriving before the previous create commits.
+        // A response without the complete snapshot/revision cannot authorize writes.
         const state = await taskState(retry);
         state.tasks = state.tasks.filter(t => t.id !== createdId);
         await request.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, value: state }) });
@@ -256,12 +257,18 @@ async function main() {
   await eventually(() => dialogs.length > dialogCount, 'lost response alert');
   assert.equal((await taskState(retry)).tasks.filter(t => t.id === createdId).length, 1);
   await renameTask(page, 'New Task', 'Edited after failure');
-  mode = 'stale-recovery-read';
+  mode = 'incomplete-recovery-read';
+  dialogCount = dialogs.length;
+  await reviewAndSave(page);
+  await eventually(() => dialogs.length > dialogCount, 'incomplete recovery response alert');
+  assert.match(dialogs.at(-1), /无法读取后台最新计划/);
+  assert.equal(await saveButtonEnabled(page), true);
+  assert.equal((await taskState(retry)).tasks.find(t => t.id === createdId).name, 'New Task');
   await finishSave(page, retry);
   assert.equal((await taskState(retry)).tasks.find(t => t.id === createdId).name, 'Edited after failure');
   assert.equal((await api(`/tasks/${retry.id}/${createdId}`)).lifecycle.filter(e => e.event_type === 'created').length, 1);
   assert.equal(await saveButtonEnabled(page), false);
-  console.log('PASS browser: a committed create with a lost response can be edited and retried without duplicate data/history');
+  console.log('PASS browser: incomplete recovery reads stop writes; a lost create reply can be edited and retried without duplicate data/history');
 
   await page.click('a[href="/dashboard"]');
   await navigateProject(page, retryDelete);
@@ -332,7 +339,7 @@ async function main() {
   console.log('PASS browser: edits during save preparation stay visible and pending; next save persists them in the database and snapshot');
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
+main().catch(error => { console.error(error); console.error('Save dialog diagnostics:', saveDialogs); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   for (const id of projects.reverse()) {
     try {

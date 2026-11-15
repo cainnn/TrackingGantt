@@ -63,6 +63,7 @@ export interface SaveBaseline {
   planningStatus?: PlanningStatus
   customFields?: TaskCustomField[]
   lines?: ProjectLine[]
+  revision?: string
 }
 
 /** Limit the latest database state to known/submitted/previously attempted IDs.

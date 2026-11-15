@@ -35,6 +35,8 @@ import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 import { runFullCascade } from '@/lib/clientScheduling'
 import { buildSaveDiff, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
+import { findPlanSaveConflicts, findPlanSaveMismatches } from '@/lib/planSaveVerification'
+import { findPlanScheduleConflicts } from '@/lib/planScheduleValidation'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
 import type { Dependency } from '@/types'
@@ -316,6 +318,7 @@ export default function GanttToolbar({
   const attemptedLineIds = useRef(new Set<string>())
   const [saveIncomplete, setSaveIncomplete] = useState(false)
   const attemptedSaveIds = useRef({ taskIds: new Set<string>(), dependencyIds: new Set<string>() })
+  const saveAttempts = useRef<SaveBaseline[]>([])
 
   // changeDiffs: 当前任务 vs 基线
   const changeDiffs = React.useMemo(() => {
@@ -1207,20 +1210,13 @@ export default function GanttToolbar({
   // ── Status date: free movement + separate confirm button ────────
   const [statusDateSaving, setStatusDateSaving] = useState(false)
   const readPersistedState = useCallback(async (): Promise<SaveBaseline> => {
-    const [taskRes, projectRes, lineRes] = await Promise.all([
-      authFetch(`/api/tasks/${projectId}`), authFetch(`/api/projects/${projectId}`), authFetch(`/api/project-lines/${projectId}`),
-    ])
-    const [taskData, projectData, lineData] = await Promise.all([taskRes.json(), projectRes.json(), lineRes.json()])
-    if (!taskRes.ok || !taskData.ok || !projectRes.ok || !projectData.ok || !lineRes.ok || !lineData.ok || !Array.isArray(lineData.value)
-        || !Array.isArray(taskData.value?.tasks) || !Array.isArray(taskData.value?.dependencies)) {
+    const response = await authFetch(`/api/tasks/${projectId}?save_state=1`, { cache: 'no-store' })
+    const data = await response.json()
+    if (!response.ok || !data.ok || !Array.isArray(data.value?.tasks) || !Array.isArray(data.value?.dependencies)
+        || !Array.isArray(data.value?.lines) || !/^[a-f0-9]{64}$/.test(data.value?.revision ?? '')) {
       throw new Error('无法读取后台最新计划，请稍后重试；当前修改仍保留')
     }
-    return {
-      tasks: taskData.value.tasks, dependencies: taskData.value.dependencies,
-      statusDate: toDateTimeStr(projectData.value.status_date ?? null), lines: lineData.value,
-      planningStatus: normalizePlanningStatus(projectData.value.planning_status),
-      customFields: projectData.value.custom_fields ?? [],
-    }
+    return data.value
   }, [projectId])
 
   // 状态日期仅改 Redux，用户通过顶部工具栏保存时才入库。
@@ -1251,12 +1247,30 @@ export default function GanttToolbar({
     const submittedDependencyReasons = createVersion ? dependencyReasons : {}
     const saveHeaders = authFetchHeaders(true)
     saveHeaders.set('x-gantt-confirmed-save', '1')
+    let revision: string | undefined
+    const saveFetch = async (input: string, init: RequestInit = {}) => {
+      const headers = new Headers(saveHeaders)
+      if (!revision) throw new Error('保存缺少后台版本校验信息，请重试')
+      headers.set('x-gantt-plan-revision', revision)
+      const response = await authFetch(input, { ...init, headers })
+      if (response.status === 409) {
+        const data = await response.clone().json().catch(() => null)
+        throw new Error(data?.error ?? '后台计划已更新，当前修改仍保留，请核对后再提交')
+      }
+      if (response.ok) {
+        const nextRevision = response.headers.get('x-gantt-plan-revision')
+        if (!nextRevision) throw new Error('后台未返回保存校验信息，请重试核对保存结果')
+        revision = nextRevision
+      }
+      return response
+    }
     const saveWarnings: Array<{ taskName: string; message: string }> = []
     try {
-      // Compare every save with the latest database records, not the page-load
-      // baseline. The submitted plan wins for known records; unseen additions
-      // from other sessions must never become accidental deletions.
+      // Read a complete, consistent database snapshot before checking the draft.
+      // An older page must not overwrite another session's changes or turn its
+      // unseen additions into deletions.
       const persisted = await readPersistedState()
+      revision = persisted.revision
       const saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks,
         [...attemptedSaveIds.current.taskIds, ...submittedTasks.map(t => t.id)])
       const saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies,
@@ -1266,15 +1280,6 @@ export default function GanttToolbar({
       const saveBaseCustomFields = persisted.customFields ?? []
       const saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [],
         [...attemptedLineIds.current, ...submittedLines.map(l => l.id)])
-
-      // Definitions must exist before tasks reference them. This is inside the
-      // explicit confirm flow; recovery reads this state after any partial save.
-      if (!customFieldsEqual(saveBaseCustomFields, submittedCustomFields)) {
-        const r = await authFetch(`/api/projects/${projectId}`, { method: 'PUT', headers: saveHeaders,
-          body: JSON.stringify({ custom_fields: submittedCustomFields }) })
-        const result = await r.json()
-        if (!r.ok || !result.ok) throw new Error(result.error ?? '保存任务属性配置失败')
-      }
 
       // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
       const sdDate = sd ? new Date(sd) : null
@@ -1303,6 +1308,22 @@ export default function GanttToolbar({
           }
         }) : []
       const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
+      const expectedPlan: SaveBaseline = { tasks: finalTasks, dependencies: submittedDeps, lines: submittedLines,
+        statusDate: sd, planningStatus: submittedPlanningStatus, customFields: submittedCustomFields }
+      const conflicts = findPlanSaveConflicts({ tasks: baselineTasks, dependencies: baselineDeps, lines: baselineLines,
+        statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields }, persisted, expectedPlan, saveAttempts.current)
+      if (conflicts.length) throw new Error(`后台计划存在冲突，尚未写入本次修改：\n${conflicts.slice(0, 8).join('\n')}`)
+      const scheduleConflicts = findPlanScheduleConflicts(finalTasks, submittedDeps)
+      if (scheduleConflicts.length) throw new Error(`排期校验未通过，尚未写入本次修改：\n${scheduleConflicts.slice(0, 8).join('\n')}`)
+      saveAttempts.current.push(expectedPlan)
+
+      // Definitions must exist before tasks reference them, after validation.
+      if (!customFieldsEqual(saveBaseCustomFields, submittedCustomFields)) {
+        const r = await saveFetch(`/api/projects/${projectId}`, { method: 'PUT',
+          body: JSON.stringify({ custom_fields: submittedCustomFields }) })
+        const result = await r.json()
+        if (!r.ok || !result.ok) throw new Error(result.error ?? '保存任务属性配置失败')
+      }
 
       const reasonMap: Record<string, string> = {}
       for (const d of createVersion ? changeDiffs : []) {
@@ -1319,6 +1340,8 @@ export default function GanttToolbar({
 
       // 2. 与基线 diff，生成批量操作
       const diff = buildSaveDiff(saveBaseTasks, saveBaseDeps, finalTasks, submittedDeps)
+      const normalizedTasks = new Map([...diff.tasksToAdd, ...diff.tasksToUpdate].map(t => [t.id, t]))
+      expectedPlan.tasks = expectedPlan.tasks.map(t => normalizedTasks.get(t.id) ?? t)
       for (const id of [...diff.tasksToAdd.map(t => t.id), ...diff.tasksToUpdate.map(t => t.id), ...diff.tasksToDelete]) {
         attemptedSaveIds.current.taskIds.add(id)
       }
@@ -1327,7 +1350,7 @@ export default function GanttToolbar({
       }
       // 删除依赖必须先于删除任务，避免外键级联删除丢失审计
       for (const depId of diff.depsToDelete) {
-        const r = await authFetch(`/api/dependencies/${projectId}`, {
+        const r = await saveFetch(`/api/dependencies/${projectId}`, {
           method: 'DELETE', headers: saveHeaders,
           body: JSON.stringify({ id: depId, _reason: submittedDependencyReasons[depId]?.trim() }),
         })
@@ -1335,7 +1358,11 @@ export default function GanttToolbar({
       }
       // 新增任务（连同 client id / task_code）
       if (diff.tasksToAdd.length > 0) {
-        const r = await authFetch(`/api/tasks/${projectId}`, {
+        // A lost create reply can leave the temporary root shells committed.
+        // Record that known intermediate shape so a retry remains conflict-safe.
+        const shells = new Set(diff.tasksToAdd.map(t => t.id))
+        saveAttempts.current.push({ ...expectedPlan, tasks: expectedPlan.tasks.map(t => shells.has(t.id) ? { ...t, parent_id: null } : t) })
+        const r = await saveFetch(`/api/tasks/${projectId}`, {
           method: 'POST', headers: saveHeaders,
           // Create IDs first, then apply all new/existing parent changes in one
           // PUT graph. An intermediate old hierarchy can otherwise look cyclic
@@ -1345,6 +1372,8 @@ export default function GanttToolbar({
         const result = await r.json()
         if (!r.ok || !result.ok || !Array.isArray(result.value)) throw new Error(result.error ?? `新增任务失败 (${r.status})`)
         if (Array.isArray(result.warnings)) saveWarnings.push(...result.warnings)
+        const assignedCodes = new Map<string, string>(result.value.map((t: Task) => [t.id, t.task_code]))
+        expectedPlan.tasks = expectedPlan.tasks.map(t => assignedCodes.has(t.id) ? { ...t, task_code: assignedCodes.get(t.id)! } : t)
         // The recovery read may precede an earlier request's commit. An
         // idempotent POST can then return that request's older values.
         diff.tasksToUpdate.push(...buildSaveDiff(result.value, [], diff.tasksToAdd, []).tasksToUpdate)
@@ -1362,17 +1391,21 @@ export default function GanttToolbar({
           baseline_end_date: t.baseline_end_date, task_code: t.task_code,
           _reason: reasonByTaskId[t.id],
         }))
-        const r = await authFetch(`/api/tasks/${projectId}`, {
+        const r = await saveFetch(`/api/tasks/${projectId}`, {
           method: 'PUT', headers: saveHeaders,
           body: JSON.stringify(payload),
         })
         const result = await r.json()
         if (!r.ok || !result.ok) throw new Error(result.error ?? `更新任务失败 (${r.status})`)
         if (Array.isArray(result.warnings)) saveWarnings.push(...result.warnings)
+        if (Array.isArray(result.warnings)) {
+          const repaired = new Map<string, string | null>(result.warnings.map((w: { taskId: string; parentId: string | null }) => [w.taskId, w.parentId]))
+          expectedPlan.tasks = expectedPlan.tasks.map(t => repaired.has(t.id) ? { ...t, parent_id: repaired.get(t.id)! } : t)
+        }
       }
       // 删除任务
       if (diff.tasksToDelete.length > 0) {
-        const r = await authFetch(`/api/tasks/${projectId}`, {
+        const r = await saveFetch(`/api/tasks/${projectId}`, {
           method: 'DELETE', headers: saveHeaders,
           body: JSON.stringify({ ids: diff.tasksToDelete, reasons: reasonByTaskId }),
         })
@@ -1380,7 +1413,7 @@ export default function GanttToolbar({
       }
       // 新增依赖
       for (const dep of diff.depsToAdd) {
-        const r = await authFetch(`/api/dependencies/${projectId}`, {
+        const r = await saveFetch(`/api/dependencies/${projectId}`, {
           method: 'POST', headers: saveHeaders,
           body: JSON.stringify({
             id: dep.id, from_task_id: dep.from_task_id, to_task_id: dep.to_task_id,
@@ -1394,7 +1427,7 @@ export default function GanttToolbar({
       }
       // 更新依赖
       for (const dep of diff.depsToUpdate) {
-        const r = await authFetch(`/api/dependencies/${projectId}`, {
+        const r = await saveFetch(`/api/dependencies/${projectId}`, {
           method: 'PUT', headers: saveHeaders,
           body: JSON.stringify({ id: dep.id, type: dep.type, lag: dep.lag, active: dep.active ?? true, _reason: submittedDependencyReasons[dep.id]?.trim() }),
         })
@@ -1404,7 +1437,7 @@ export default function GanttToolbar({
       // 2.5 状态日期若有变更，先把它持久化到 projects 表
       //     （版本快照只写 project_versions.status_date，不会同步 projects.status_date）
       if (sd !== saveBaseStatusDate || submittedPlanningStatus !== saveBasePlanningStatus) {
-        const r = await authFetch(`/api/projects/${projectId}`, {
+        const r = await saveFetch(`/api/projects/${projectId}`, {
           method: 'PUT',
           headers: saveHeaders,
           body: JSON.stringify({ status_date: sd, planning_status: submittedPlanningStatus }),
@@ -1416,7 +1449,7 @@ export default function GanttToolbar({
       for (const line of saveBaseLines) {
         if (submittedLines.some(l => l.id === line.id)) continue
         attemptedLineIds.current.add(line.id)
-        const r = await authFetch(`/api/project-lines/${projectId}`, {
+        const r = await saveFetch(`/api/project-lines/${projectId}`, {
           method: 'DELETE', headers: saveHeaders, body: JSON.stringify({ id: line.id }),
         })
         if (!r.ok) throw new Error(`删除项目线失败 (${r.status})`)
@@ -1426,7 +1459,7 @@ export default function GanttToolbar({
         const old = saveBaseLines.find(l => l.id === line.id)
         if (old && linesEqual([old], [line])) continue
         attemptedLineIds.current.add(line.id)
-        const r = await authFetch(`/api/project-lines/${projectId}`, {
+        const r = await saveFetch(`/api/project-lines/${projectId}`, {
           method: old ? 'PUT' : 'POST', headers: saveHeaders, body: JSON.stringify(line),
         })
         const d = await r.json()
@@ -1438,7 +1471,7 @@ export default function GanttToolbar({
       // 草稿态只读取已保存的当前计划；稳定态才创建历史版本。
       let confirmed: SaveBaseline
       if (createVersion) {
-        const snapshotRes = await authFetch(`/api/versions/${projectId}`, {
+        const snapshotRes = await saveFetch(`/api/versions/${projectId}`, {
           method: 'POST', headers: saveHeaders,
           body: JSON.stringify({ use_database_snapshot: true, include_snapshot: true, status_date: sd, reasons: reasonMap,
             ...(customFieldsChanged ? { description: `任务属性配置变更：${submittedCustomFields.map(f => `${f.name}（${CUSTOM_FIELD_TYPES[f.type]}${f.archived ? '，停用' : ''}）`).join('、')}。原因：${customFieldsReason.trim()}` } : {}),
@@ -1456,6 +1489,13 @@ export default function GanttToolbar({
         }
       } else {
         confirmed = await readPersistedState()
+      }
+      // Read the current database even for stable plans: a version response alone
+      // does not prove that all submitted dates and relations are still stored.
+      if (createVersion) confirmed = await readPersistedState()
+      const mismatches = findPlanSaveMismatches(expectedPlan, confirmed)
+      if (confirmed.revision !== revision || mismatches.length) {
+        throw new Error(`后台保存结果核对未通过，当前修改仍保留：\n${mismatches.slice(0, 8).join('\n') || '保存期间后台计划再次发生变化'}`)
       }
       const savedTasks = confirmed.tasks
       const savedDeps = confirmed.dependencies
@@ -1484,6 +1524,7 @@ export default function GanttToolbar({
       if (saveWarnings.length) alert(`所有任务修改已保存。以下无效父级关联已修正，并记入任务历史：\n${saveWarnings.map(w => `${w.taskName}：${w.message}`).join('\n')}`)
       setSaveIncomplete(false)
       attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
+      saveAttempts.current = []
 
       authFetch(`/api/versions/${projectId}?list=1`)
         .then(r => r.json())
@@ -1532,6 +1573,7 @@ export default function GanttToolbar({
       setReasons({})
       setSaveIncomplete(false)
       attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
+      saveAttempts.current = []
     } catch (err) {
       alert(`放弃更改失败：${err instanceof Error ? err.message : String(err)}`)
     } finally {

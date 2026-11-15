@@ -5,6 +5,7 @@ import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { diffSnapshots, type SnapshotTask } from '@/lib/versionDiff'
 import { normalizePlanningStatus } from '@/lib/planningStatus'
+import { lockAndCheckPlan, planRevisionHeaders, PlanSaveConflict } from '@/lib/server/planRevision'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -63,6 +64,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await lockAndCheckPlan(client, projectId, req.headers)
 
     const body = await req.json().catch(() => ({}))
     const isAutosave: boolean = body.is_autosave === true
@@ -186,6 +188,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       row = insRes.rows[0]
     }
 
+    const headers = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
 
     return NextResponse.json(success({
@@ -193,9 +196,10 @@ export async function POST(req: NextRequest, { params }: Params) {
       task_count: snapshotTasks.length,
       changes,
       ...(includeSnapshot ? { snapshot } : {}),
-    }), { status: 201 })
+    }), { status: 201, headers })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     console.error('POST /api/versions:', err)
     return NextResponse.json(failure('Save failed', 500), { status: 500 })
   } finally {

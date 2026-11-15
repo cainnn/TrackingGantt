@@ -6,6 +6,7 @@ import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { isPlanningStatus } from '@/lib/planningStatus'
 import { normalizeCustomFields, CustomFieldError } from '@/lib/taskCustomFields'
+import { lockAndCheckPlan, planRevisionHeaders, PlanSaveConflict } from '@/lib/server/planRevision'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -43,8 +44,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query("SET LOCAL lock_timeout = '10s'")
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [id])
+    await lockAndCheckPlan(client, id, req.headers)
     const access = projectAccessSql(auth.value, 2)
     const existing = await client.query(`SELECT * FROM projects p WHERE p.id = $1 AND (${access.sql}) FOR UPDATE`, [id, ...access.values])
     if (!existing.rows.length) {
@@ -65,10 +65,12 @@ export async function PUT(req: NextRequest, { params }: Params) {
       [name ?? null, start_date ?? null, end_date ?? null,
        Object.hasOwn(body, 'status_date'), status_date ?? null, id, planning_status ?? null, fields ? JSON.stringify(fields) : null]
     )
+    const headers = await planRevisionHeaders(client, id, req.headers)
     await client.query('COMMIT')
-    return NextResponse.json(success(result.rows[0]))
+    return NextResponse.json(success(result.rows[0]), { headers })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     if (err instanceof CustomFieldError) return NextResponse.json(failure(err.message, 400), { status: 400 })
     console.error('Update project failed:', err)
     return NextResponse.json(failure('保存项目失败，请重试', 500), { status: 500 })

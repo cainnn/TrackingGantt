@@ -7,6 +7,7 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { wouldCreateCycle, cascadeDependencies, updateSummaryTasksDates, snapTasksToDayLevel } from '@/lib/scheduling'
+import { lockAndCheckPlan, planRevisionHeaders, PlanSaveConflict } from '@/lib/server/planRevision'
 
 type Params = { params: Promise<{ projectId: string }> }
 
@@ -51,6 +52,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       return NextResponse.json(failure('Invalid JSON body', 400), { status: 400 })
     }
     const { id, from_task_id, to_task_id, type = 2, lag = 0, active = true } = body
+    const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
     if (!from_task_id || !to_task_id)
       return NextResponse.json(failure('from_task_id and to_task_id required', 400), { status: 400 })
     if (from_task_id === to_task_id)
@@ -62,8 +64,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
-      await client.query('SET LOCAL lock_timeout = \'10s\'')
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [projectId])
+      await lockAndCheckPlan(client, projectId, req.headers)
       if (clientId) {
         const existing = await client.query('SELECT * FROM dependencies WHERE id = $1', [clientId])
         const saved = existing.rows[0]
@@ -72,8 +73,9 @@ export async function POST(req: NextRequest, { params }: Params) {
             await client.query('ROLLBACK')
             return NextResponse.json(failure('依赖 ID 已被使用，请重新加载项目', 409), { status: 409 })
           }
+          const headers = await planRevisionHeaders(client, projectId, req.headers)
           await client.query('COMMIT')
-          return NextResponse.json(success({ dependency: saved, updatedTask: null, updatedTasks: [] }), { status: 201 })
+          return NextResponse.json(success({ dependency: saved, updatedTask: null, updatedTasks: [] }), { status: 201, headers })
         }
       }
       const endpoints = await client.query(
@@ -113,11 +115,15 @@ export async function POST(req: NextRequest, { params }: Params) {
          VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7) RETURNING *`,
         [clientId, projectId, from_task_id, to_task_id, type, Number(lag) || 0, active],
       )
-      await client.query(
-        `UPDATE tasks SET auto_schedule = true, updated_at = NOW()
-         WHERE id = $1 AND project_id = $2 AND auto_schedule = false`,
-        [to_task_id, projectId]
-      )
+      // Confirmed saves include the intended manual/automatic task modes.
+      // Reconnecting a deleted path must not switch a manual successor to auto.
+      if (!submittedPlan) {
+        await client.query(
+          `UPDATE tasks SET auto_schedule = true, updated_at = NOW()
+           WHERE id = $1 AND project_id = $2 AND auto_schedule = false`,
+          [to_task_id, projectId]
+        )
+      }
 
       // 写依赖 lifecycle
       const taskInfo = await fetchTaskInfo(client, [from_task_id, to_task_id])
@@ -133,7 +139,6 @@ export async function POST(req: NextRequest, { params }: Params) {
         })
       }
 
-      const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
       const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
       const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
       const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
@@ -148,12 +153,13 @@ export async function POST(req: NextRequest, { params }: Params) {
         )
         updatedTasks = rows.rows as Record<string, unknown>[]
       }
+      const headers = await planRevisionHeaders(client, projectId, req.headers)
       await client.query('COMMIT')
       return NextResponse.json(success({
         dependency: r.rows[0],
         updatedTask: updatedTasks[0] ?? null,
         updatedTasks,
-      }), { status: 201 })
+      }), { status: 201, headers })
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
       throw err
@@ -161,6 +167,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       client.release()
     }
   } catch (err) {
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     console.error('POST /api/dependencies:', err)
     const msg = err instanceof Error ? err.message : 'Internal server error'
     return NextResponse.json(failure(msg, 500), { status: 500 })
@@ -182,6 +189,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await lockAndCheckPlan(client, projectId, req.headers)
 
     // 查询旧值用于 lifecycle
     const oldRes = await client.query(
@@ -244,13 +252,15 @@ export async function PUT(req: NextRequest, { params }: Params) {
       updatedTasks = rows.rows as Record<string, unknown>[]
     }
 
+    const headers = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
     return NextResponse.json(success({
       dependency: cur,
       updatedTasks,
-    }))
+    }), { headers })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     console.error('PUT /api/dependencies:', err)
     const msg = err instanceof Error ? err.message : 'Internal server error'
     return NextResponse.json(failure(msg, 500), { status: 500 })
@@ -274,6 +284,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await lockAndCheckPlan(client, projectId, req.headers)
     // 取出旧依赖用于 lifecycle，并在级联前删除
     const oldRes = await client.query(
       `SELECT * FROM dependencies WHERE id = $1 AND project_id = $2`,
@@ -281,8 +292,9 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     )
     const old = oldRes.rows[0]
     if (!old) {
-      await client.query('ROLLBACK')
-      return NextResponse.json(success({ deleted: id }))
+      const headers = await planRevisionHeaders(client, projectId, req.headers)
+      await client.query('COMMIT')
+      return NextResponse.json(success({ deleted: id }), { headers })
     }
     await client.query(
       'DELETE FROM dependencies WHERE id = $1 AND project_id = $2',
@@ -318,10 +330,12 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       updatedTasks = rows.rows as Record<string, unknown>[]
     }
 
+    const headers = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
-    return NextResponse.json(success({ deleted: id, updatedTasks }))
+    return NextResponse.json(success({ deleted: id, updatedTasks }), { headers })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     console.error('DELETE /api/dependencies:', err)
     const msg = err instanceof Error ? err.message : 'Internal server error'
     return NextResponse.json(failure(msg, 500), { status: 500 })

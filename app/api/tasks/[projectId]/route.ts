@@ -11,6 +11,7 @@ import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { normalizeDurationMinutes } from '@/lib/taskNumbers'
 import { planTaskDeletion } from '@/lib/taskDeletion'
+import { readPlanState, lockAndCheckPlan, planRevisionHeaders, PlanSaveConflict } from '@/lib/server/planRevision'
 import { CustomFieldError, normalizeCustomValues, formatCustomValue, submittedTaskCustomFields, taskCustomFields, customFieldsEqual } from '@/lib/taskCustomFields'
 import type { TaskCustomField, Task, Dependency } from '@/types'
 import {
@@ -21,11 +22,6 @@ import {
 } from '@/lib/scheduling'
 
 type Params = { params: Promise<{ projectId: string }> }
-
-async function lockProjectTx(client: PoolClient, projectId: string): Promise<void> {
-  await client.query('SET LOCAL lock_timeout = \'10s\'')
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [projectId])
-}
 
 // Generate next task_code for a project: 1, 2, 3, ...
 async function nextTaskCode(client: PoolClient, projectId: string): Promise<string> {
@@ -108,6 +104,20 @@ export async function GET(req: NextRequest, { params }: Params) {
     if (!owned) return NextResponse.json(failure('Project not found', 404), { status: 404 })
   }
 
+  if (req.nextUrl.searchParams.get('save_state') === '1') {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const state = await readPlanState(client, projectId)
+      await client.query('COMMIT')
+      return NextResponse.json(success(state), { headers: { 'Cache-Control': 'no-store' } })
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      console.error('Read save verification state failed:', error)
+      return NextResponse.json(failure('无法读取后台完整计划，请重试', 500), { status: 500 })
+    } finally { client.release() }
+  }
+
   const [tasksRes, depsRes] = await Promise.all([
     pool.query(
       'SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false ORDER BY order_index ASC',
@@ -155,9 +165,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json(failure('数据库连接池繁忙，请稍后重试', 503), { status: 503 })
   }
   const inserted = []
+  let revisionHeaders = {}
   try {
     await client.query('BEGIN')
-    await lockProjectTx(client, projectId)
+    await lockAndCheckPlan(client, projectId, req.headers)
     const existingRows = await client.query('SELECT * FROM tasks WHERE project_id = $1', [projectId])
     const fieldResult = await client.query('SELECT custom_fields FROM projects WHERE id = $1', [projectId])
     const customFields: TaskCustomField[] = fieldResult.rows[0]?.custom_fields ?? []
@@ -280,9 +291,11 @@ export async function POST(req: NextRequest, { params }: Params) {
     const savedById = new Map(saved.rows.map(t => [t.id, t]))
     for (let i = 0; i < inserted.length; i++) inserted[i] = savedById.get(inserted[i].id) ?? inserted[i]
 
+    revisionHeaders = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('POST /api/tasks error:', msg)
     if (err instanceof CustomFieldError) return NextResponse.json(failure(msg, 400), { status: 400 })
@@ -291,7 +304,7 @@ export async function POST(req: NextRequest, { params }: Params) {
     client.release()
   }
 
-  return NextResponse.json({ ...success(inserted), warnings: hierarchyRepairs }, { status: 201 })
+  return NextResponse.json({ ...success(inserted), warnings: hierarchyRepairs }, { status: 201, headers: revisionHeaders })
 }
 
 // ── PUT ───────────────────────────────────────────────────────────────────
@@ -346,9 +359,10 @@ export async function PUT(req: NextRequest, { params }: Params) {
     return NextResponse.json(failure('数据库连接池繁忙，请稍后重试', 503), { status: 503 })
   }
   const updated: TaskLike[] = []
+  let revisionHeaders = {}
   try {
     await client.query('BEGIN')
-    await lockProjectTx(client, projectId)
+    await lockAndCheckPlan(client, projectId, req.headers)
 
     // 查询项目的 status_date 用于判定"历史修改"，并取粒度用于日志单位
     const projRes = await client.query(
@@ -797,9 +811,11 @@ export async function PUT(req: NextRequest, { params }: Params) {
       )
     }
 
+    revisionHeaders = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('PUT /api/tasks error:', msg)
     if (err instanceof CustomFieldError) return NextResponse.json(failure(msg, 400), { status: 400 })
@@ -808,7 +824,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     client.release()
   }
 
-  return NextResponse.json({ ...success(updated), warnings: hierarchyRepairs })
+  return NextResponse.json({ ...success(updated), warnings: hierarchyRepairs }, { headers: revisionHeaders })
 }
 
 // ── DELETE (soft) ─────────────────────────────────────────────────────────
@@ -839,7 +855,7 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   }
   try {
     await client.query('BEGIN')
-    await lockProjectTx(client, projectId)
+    await lockAndCheckPlan(client, projectId, req.headers)
 
     const [taskRows, depRows, projectRows] = await Promise.all([
       client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false', [projectId]),
@@ -860,8 +876,9 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     })
     const allIdArr = [...deletion.deletedIds]
     if (!allIdArr.length) {
+      const headers = await planRevisionHeaders(client, projectId, req.headers)
       await client.query('COMMIT')
-      return NextResponse.json(success({ deleted: [], dependencies: [], updatedTasks: [] }))
+      return NextResponse.json(success({ deleted: [], dependencies: [], updatedTasks: [] }), { headers })
     }
     const ph = allIdArr.map((_, i) => `$${i + 2}`).join(',')
 
@@ -920,10 +937,12 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       })
     }
 
+    const headers = await planRevisionHeaders(client, projectId, req.headers)
     await client.query('COMMIT')
-    return NextResponse.json(success({ deleted: allIdArr, dependencies: deletion.newDependencies, updatedTasks: changedTasks }))
+    return NextResponse.json(success({ deleted: allIdArr, dependencies: deletion.newDependencies, updatedTasks: changedTasks }), { headers })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    if (err instanceof PlanSaveConflict) return NextResponse.json(failure(err.message, 409), { status: 409 })
     const msg = err instanceof Error ? err.message : 'Unknown error'
     console.error('DELETE /api/tasks error:', msg)
     return NextResponse.json(failure('删除任务失败: ' + msg, 500), { status: 500 })
