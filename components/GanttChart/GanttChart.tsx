@@ -37,6 +37,8 @@ import { applyGridFillDown, applyGridPaste, gridCellEditable, gridSelectionRect,
 import { analyzeSchedule } from '@/lib/scheduleAnalysis'
 import { baselineVariance } from '@/lib/planBaseline'
 import type { ChartViewState } from '@/lib/clientViewState'
+import { dependencyRoute, downstreamLookup, rangeIndices, routeIntersects, viewportRange } from '@/lib/ganttViewport'
+import { useGanttViewport } from './useGanttViewport'
 
 // ─── Layout constants ──────────────────────────────────────────────────────
 const ROW_H    = 40
@@ -346,23 +348,6 @@ function timeBasedPercent(task: Task, statusDate: Date | null): number {
 // ─── Flat tree row ─────────────────────────────────────────────────────────
 interface FlatRow { task: Task; level: number; hasChildren: boolean; expanded: boolean; contextOnly?: boolean }
 
-// ─── Dependency cascade helper ─────────────────────────────────────────────
-function getDownstreamIds(taskId: string, deps: Dependency[]): string[] {
-  const result: string[] = []
-  const visited = new Set<string>()
-  function walk(id: string) {
-    deps.filter(d => d.active !== false && d.from_task_id === id).forEach(d => {
-      if (!visited.has(d.to_task_id)) {
-        visited.add(d.to_task_id)
-        result.push(d.to_task_id)
-        walk(d.to_task_id)
-      }
-    })
-  }
-  walk(taskId)
-  return result
-}
-
 /** 递归收集某任务的所有后代 ID（子、孙…） */
 function getDescendantIds(taskId: string, tasks: Task[]): string[] {
   const result: string[] = []
@@ -626,14 +611,17 @@ export default function GanttChart({
     return s
   }, [tasks])
 
-  // 缓存下游任务ID列表，避免重复计算
-  const downstreamCache = useMemo(() => {
-    const cache = new Map<string, string[]>()
-    tasks.forEach(t => {
-      cache.set(t.id, getDownstreamIds(t.id, deps))
-    })
-    return cache
-  }, [tasks, deps])
+  const downstreamIds = useMemo(() => downstreamLookup(deps), [deps])
+  const taskById = useMemo(() => new Map(tasks.map(task => [task.id, task])), [tasks])
+  const dependencyIndex = useMemo(() => {
+    const incoming = new Map<string, Dependency[]>(), outgoing = new Map<string, Dependency[]>()
+    for (const dep of deps) {
+      const ins = incoming.get(dep.to_task_id) ?? [], outs = outgoing.get(dep.from_task_id) ?? []
+      ins.push(dep); outs.push(dep)
+      incoming.set(dep.to_task_id, ins); outgoing.set(dep.from_task_id, outs)
+    }
+    return { incoming, outgoing }
+  }, [deps])
 
   // ── Dependency connect ─────────────────────────────────────────────────
   const [connect, setConnect]     = useState<ConnectState|null>(null)
@@ -806,6 +794,7 @@ export default function GanttChart({
   const rightRef       = useRef<HTMLDivElement>(null)
   const rightHeaderRef = useRef<HTMLDivElement>(null)
   const scrollHLock    = useRef(false)
+  const { viewport, measureViewport } = useGanttViewport(leftRef, rightRef)
 
   // 测量右侧面板水平滚动条高度，用于左侧面板底部补偿
   const [hScrollbarH, setHScrollbarH] = useState(0)
@@ -823,8 +812,9 @@ export default function GanttChart({
     scrollHLock.current = true
     if (rightRef.current) rightRef.current.scrollLeft = sl
     if (rightHeaderRef.current) rightHeaderRef.current.scrollLeft = sl
+    measureViewport()
     requestAnimationFrame(() => { scrollHLock.current = false })
-  }, [])
+  }, [measureViewport])
 
   // ── Zoom: keep viewport center stable ─────────────────────────────────
   // 用 ref 缓存任务日期范围（天数偏移），避免声明顺序问题
@@ -834,14 +824,16 @@ export default function GanttChart({
   const scrollVLock = useRef(false)
 
   const onLeftBodyScroll = useCallback(() => {
+    measureViewport()
     if (scrollVLock.current) return
     if (!leftRef.current || !rightRef.current) return
     scrollVLock.current = true
     rightRef.current.scrollTop = leftRef.current.scrollTop
     requestAnimationFrame(() => { scrollVLock.current = false })
-  }, [])
+  }, [measureViewport])
 
   const onRightBodyScroll = useCallback(() => {
+    measureViewport()
     if (!rightRef.current || !leftRef.current) return
     if (!scrollVLock.current) {
       scrollVLock.current = true
@@ -853,15 +845,16 @@ export default function GanttChart({
     if (rightHeaderRef.current)
       rightHeaderRef.current.scrollLeft = rightRef.current.scrollLeft
     requestAnimationFrame(() => { scrollHLock.current = false })
-  }, [])
+  }, [measureViewport])
 
   const onRightHeaderScroll = useCallback(() => {
     if (!rightHeaderRef.current || !rightRef.current) return
     if (scrollHLock.current) return
     scrollHLock.current = true
     rightRef.current.scrollLeft = rightHeaderRef.current.scrollLeft
+    measureViewport()
     requestAnimationFrame(() => { scrollHLock.current = false })
-  }, [])
+  }, [measureViewport])
 
   // ── Flat row list ───────────────────────────────────────────────────────
   const flatRows = useMemo((): FlatRow[] => {
@@ -1036,7 +1029,7 @@ export default function GanttChart({
         if (matched.has(cur.parent_id) || seen.has(cur.parent_id)) break
         seen.add(cur.parent_id)
         matched.add(cur.parent_id)
-        cur = tasks.find(x => x.id === cur!.parent_id)
+        cur = taskById.get(cur.parent_id)
       }
     }
     const filterRows = (matches: (task: Task) => boolean) => {
@@ -1073,9 +1066,9 @@ export default function GanttChart({
           case 'duration':   return String(t.duration ?? '')
           case 'start':      return (t.start_date ?? '').split('T')[0]
           case 'end':        return (t.end_date ?? '').split('T')[0]
-          case 'pred':       return deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
-          case 'succ':       return deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
-          case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d ? String(d.lag ?? 0) : '' }
+          case 'pred':       return (dependencyIndex.incoming.get(t.id)?.length ?? 0) > 0 ? '有' : '无'
+          case 'succ':       return (dependencyIndex.outgoing.get(t.id)?.length ?? 0) > 0 ? '有' : '无'
+          case 'lag':        { const d = dependencyIndex.incoming.get(t.id)?.[0]; return d ? String(d.lag ?? 0) : '' }
           case 'taskType':   return t.auto_schedule === false ? '手动' : '自动'
           case 'ctype':      return t.auto_schedule === false ? '' : (t.constraint_type ?? 'asap')
           case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '').split('T')[0]
@@ -1103,9 +1096,9 @@ export default function GanttChart({
           case 'duration':   return t.duration ?? 0
           case 'start':      return t.start_date ?? ''
           case 'end':        return t.end_date ?? ''
-          case 'pred':       return deps.filter(d => d.to_task_id === t.id).length
-          case 'succ':       return deps.filter(d => d.from_task_id === t.id).length
-          case 'lag':        { const d = deps.find(x => x.to_task_id === t.id); return d?.lag ?? 0 }
+          case 'pred':       return (dependencyIndex.incoming.get(t.id)?.length ?? 0)
+          case 'succ':       return (dependencyIndex.outgoing.get(t.id)?.length ?? 0)
+          case 'lag':        { const d = dependencyIndex.incoming.get(t.id)?.[0]; return d?.lag ?? 0 }
           case 'taskType':   return t.auto_schedule === false ? '手动' : '自动'
           case 'ctype':      return t.auto_schedule === false ? '' : (t.constraint_type ?? '')
           case 'cdate':      return t.auto_schedule === false ? '' : (t.constraint_date ?? '')
@@ -1142,7 +1135,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue])
+  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex])
 
   const rowDropTarget = useCallback((index: number | null) => {
     if (index === null || !displayRows.length) return null
@@ -1175,6 +1168,80 @@ export default function GanttChart({
     displayRows.forEach((r,i)=>{ m[r.task.id]=i })
     return m
   }, [displayRows])
+
+  const rowWindow = viewportRange(displayRows.length, ROW_H, viewport.top, viewport.height, 6)
+  const viewportRows = useMemo(() => rangeIndices(rowWindow).map(i => ({ row: displayRows[i], index: i })), [displayRows, rowWindow.start, rowWindow.end])
+  // Keep an active input mounted while it scrolls out of view, so scrolling
+  // cannot lose its value or accidentally commit an edit through unmount/blur.
+  const renderedRows = useMemo(() => rangeIndices(rowWindow, [editId, cellEdit?.taskId, activeEditor?.taskId]
+    .flatMap(id => id && rowIdx[id] !== undefined ? [rowIdx[id]] : []))
+    .map(i => ({ row: displayRows[i], index: i })), [displayRows, rowWindow.start, rowWindow.end, editId, cellEdit?.taskId, activeEditor?.taskId, rowIdx])
+  useEffect(() => { measureViewport() }, [displayRows.length, measureViewport])
+
+  const dependencyGeometry = useMemo(() => {
+    const resolveRow = (id: string) => {
+      const seen = new Set<string>()
+      let current: string | null = id
+      while (current && !seen.has(current)) {
+        if (rowIdx[current] !== undefined) return rowIdx[current]
+        seen.add(current); current = taskById.get(current)?.parent_id ?? null
+      }
+      return undefined
+    }
+    return deps.flatMap(dep => {
+      const fi = resolveRow(dep.from_task_id), ti = resolveRow(dep.to_task_id)
+      if (fi === undefined || ti === undefined) return []
+      const from = displayRows[fi].task, to = displayRows[ti].task
+      if (!from.start_date || !from.end_date || !to.start_date || !to.end_date) return []
+      const fromStart = dateToX(new Date(from.start_date)), toStart = dateToX(new Date(to.start_date))
+      const fromEnd = Math.max(fromStart, dateToX(new Date(from.end_date))), toEnd = Math.max(toStart, dateToX(new Date(to.end_date)))
+      const type = Number(dep.type ?? 2)
+      const x1 = type === 0 || type === 1 ? fromStart : fromEnd, x2 = type === 1 || type === 3 ? toEnd : toStart
+      const y1 = fi * ROW_H + ROW_H / 2, y2 = ti * ROW_H + ROW_H / 2
+      return [{ dep, x1, x2, y1, y2, ...dependencyRoute(x1, y1, x2, y2, type) }]
+    })
+  }, [deps, displayRows, rowIdx, taskById, dateToX])
+  const visibleDependencies = useMemo(() => dependencyGeometry.filter(item => item.dep.id === selectedDep || item.dep.id === depDrag?.depId || routeIntersects(item.points, {
+    left: viewport.left - 160, right: viewport.left + viewport.width + 160,
+    top: rowWindow.start * ROW_H, bottom: rowWindow.end * ROW_H,
+  })), [dependencyGeometry, selectedDep, depDrag?.depId, viewport.left, viewport.width, rowWindow.start, rowWindow.end])
+
+  // The time axis keeps its full width; only ticks near the horizontal viewport
+  // are created. This also bounds the 15-minute grid on long minute-level plans.
+  const tickIndices = (size: number, count: number) => rangeIndices(viewportRange(count, size, viewport.left, viewport.width, 2))
+  const dayTicks = tickIndices(colW, totalDays)
+  const visibleMonths = (() => {
+    const months: { label: string; startD: number; endD: number }[] = []
+    const first = addDays(origin, dayTicks[0] ?? 0), last = dayTicks.at(-1) ?? 0
+    let date = new Date(first.getFullYear(), first.getMonth(), 1)
+    while (diffDays(origin, date) <= last) {
+      const next = new Date(date.getFullYear(), date.getMonth() + 1, 1)
+      months.push({ label: `${date.getFullYear()}年${date.getMonth() + 1}月`, startD: Math.max(0, diffDays(origin, date)), endD: Math.min(totalDays, diffDays(origin, next)) })
+      date = next
+    }
+    return months
+  })()
+
+  const pendingCellReveal = useRef<{ taskId: string; col: string } | null>(null)
+  const revealCell = (cell: { taskId: string; col: string }) => {
+    const index = rowIdx[cell.taskId], el = leftRef.current
+    if (index === undefined || !el) return
+    pendingCellReveal.current = cell
+    if (index * ROW_H < el.scrollTop) el.scrollTop = index * ROW_H
+    else if ((index + 1) * ROW_H > el.scrollTop + el.clientHeight) el.scrollTop = (index + 1) * ROW_H - el.clientHeight
+    onLeftBodyScroll()
+    measureViewport()
+    const element = el.querySelector<HTMLElement>(`[data-task-cell="${cell.taskId}"][data-col="${cell.col}"]`)
+    if (element) { element.scrollIntoView({ block: 'nearest', inline: 'nearest' }); pendingCellReveal.current = null }
+  }
+  useEffect(() => {
+    const cell = pendingCellReveal.current
+    if (!cell) return
+    const element = leftRef.current?.querySelector<HTMLElement>(`[data-task-cell="${cell.taskId}"][data-col="${cell.col}"]`)
+    if (!element) return
+    element.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    pendingCellReveal.current = null
+  })
 
   // ── 序号 map for predecessor display（覆盖所有任务） ────
   const flatRowIdx = useMemo(() => {
@@ -1582,7 +1649,7 @@ export default function GanttChart({
             // 收集子树中所有任务的下游（排除子树内部的）
             const externalDownstream = new Set<string>()
             for (const did of descendantIds) {
-              const ds = downstreamCache.get(did) || []
+              const ds = downstreamIds(did)
               for (const d of ds) {
                 if (!descendantSet.has(d)) externalDownstream.add(d)
               }
@@ -1648,7 +1715,7 @@ export default function GanttChart({
           }
 
           // 自动后继跟随依赖；手动后继保持当前已确认或草稿中的日期。
-          map = cascadeDragSuccessors(tasks, deps, map, downstreamCache.get(drag.taskId) ?? [])
+          map = cascadeDragSuccessors(tasks, deps, map, downstreamIds(drag.taskId))
 
           // ── 更新摘要任务（父任务）日期范围 ──
           const affectedParents = new Set<string>()
@@ -1725,7 +1792,7 @@ export default function GanttChart({
     }
     window.addEventListener('mousemove', onMove)
     return () => window.removeEventListener('mousemove', onMove)
-  }, [drag, connect, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamCache, nameDrag, depDrag, withSummaryRollupPreview, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
+  }, [drag, connect, tasks, deps, getSvgX, colW, splitterDrag, panelCollapsed, throttledSetPreview, downstreamIds, nameDrag, depDrag, withSummaryRollupPreview, isMinute, statusDateDrag, throttledSetStatusPreview, xToStatusDate, selectedIds, statusDate])
 
   // ── Global mouseup ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -2550,9 +2617,10 @@ export default function GanttChart({
 
   // ── Distinct values per filterable column (for filter dropdowns) ─────────
   const distinctValues = useMemo(() => {
+    if (!colDropdown) return {} as Record<OptionalCol, string[]>
     const fmt = (s: string | null | undefined) => (s ?? '').split('T')[0]
-    const pred = (t: Task) => deps.filter(d => d.to_task_id === t.id).length > 0 ? '有' : '无'
-    const succ = (t: Task) => deps.filter(d => d.from_task_id === t.id).length > 0 ? '有' : '无'
+    const pred = (t: Task) => (dependencyIndex.incoming.get(t.id)?.length ?? 0) > 0 ? '有' : '无'
+    const succ = (t: Task) => (dependencyIndex.outgoing.get(t.id)?.length ?? 0) > 0 ? '有' : '无'
     const sdForStatus = effectiveChartStatusDate ? new Date(effectiveChartStatusDate) : null
     const byIdForStatus = new Map(tasksWithSnapshotBaseline.map(x => [x.id, x] as const))
     const hasPreviousStatusVersion = latestSnapshotEnds.size > 0
@@ -2572,7 +2640,7 @@ export default function GanttChart({
       pred,
       succ,
       lag:        t => {
-        const d = deps.find(x => x.to_task_id === t.id)
+        const d = dependencyIndex.incoming.get(t.id)?.[0]
         return d ? String(d.lag ?? 0) : ''
       },
       taskType:   t => t.auto_schedule === false ? '手动' : '自动',
@@ -2585,13 +2653,13 @@ export default function GanttChart({
       baselineFinish: t => metricText(t, 'baselineFinish'), baselineDuration: t => metricText(t, 'baselineDuration'),
     }
     const out = {} as Record<OptionalCol, string[]>
-    ;(Object.keys(builder) as OptionalCol[]).forEach(k => {
+    ;[colDropdown].forEach(k => {
       const s = new Set<string>()
       tasks.forEach(t => s.add(builder[k](t)))
       out[k] = [...s].sort()
     })
     return out
-  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue])
+  }, [tasks, deps, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex, colDropdown])
 
   const colDisplayLabel = useCallback((k: OptionalCol, v: string): string => {
     if (v === '') return '（空）'
@@ -2805,7 +2873,7 @@ export default function GanttChart({
       const next = { taskId: e.key === 'ArrowUp' ? gridRowIds[0] : e.key === 'ArrowDown' ? gridRowIds.at(-1)! : cursor.taskId,
         col: e.key === 'ArrowLeft' ? gridColumns[0] : e.key === 'ArrowRight' ? gridColumns.at(-1)! : cursor.col }
       setCellRangeEnd(next)
-      leftRef.current?.querySelector(`[data-task-cell="${next.taskId}"][data-col="${next.col}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      revealCell(next)
       return
     }
     if ((!tab && !enter && !arrow) || (editing && arrow) || e.ctrlKey || e.metaKey || e.altKey) return
@@ -2837,7 +2905,7 @@ export default function GanttChart({
       dispatch(setSelectedIds([task.id])); selectionAnchor.current = task.id
       requestAnimationFrame(() => {
         leftRef.current?.focus({ preventScroll: true })
-        leftRef.current?.querySelector(`[data-task-cell="${next.taskId}"][data-col="${next.col}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+        revealCell(next)
       })
       return
     }
@@ -2850,8 +2918,33 @@ export default function GanttChart({
         const task = byId.get(id)!
         if (col === 'name') return task.name
         if (col === 'start' || col === 'end') return formatDateDisplay(col === 'start' ? task.start_date : task.end_date, isMinute)
-        if (col === 'cdate' || col === 'ddate') return formatDateDisplay(col === 'cdate' ? task.constraint_date : task.deadline)
-        return leftRef.current?.querySelector(`[data-task-cell="${id}"][data-col="${col}"]`)?.textContent?.trim() ?? ''
+        const summary = summarySet.has(id), incoming = dependencyIndex.incoming.get(id) ?? []
+        // Copy uses the complete plan, including rows not mounted in the DOM.
+        switch (col) {
+          case 'assignee': return task.assignee ?? ''
+          case 'duration': return task.duration == null ? '' : isMinute
+            ? task.duration >= 60 && task.duration % 60 === 0 ? `${task.duration / 60}小时` : `${task.duration}分钟`
+            : `${Math.round(task.duration / 1440)}天`
+          case 'pct': return `${task.is_milestone ? 100 : summary ? summaryProgressMap.get(id) ?? 0 : timeBasedPercent(task, statusDateObj)}%`
+          case 'pred': case 'succ': return summary ? '—' : (col === 'pred' ? incoming : dependencyIndex.outgoing.get(id) ?? [])
+            .map(dep => flatRowIdx[col === 'pred' ? dep.from_task_id : dep.to_task_id]).filter(Boolean).join(',')
+          case 'lag': return summary || !incoming.length ? '—' : String(depLagToInput(incoming[0].lag))
+          case 'taskType': return summary ? '—' : task.auto_schedule === false ? '手动' : '自动'
+          case 'ctype': return summary || task.auto_schedule === false ? '—' : CONSTRAINT_TYPES.find(c => c.value === (task.constraint_type || DEFAULT_CONSTRAINT_TYPE))?.label ?? ''
+          case 'cdate': return summary || task.auto_schedule === false || !CONSTRAINT_TYPES.find(c => c.value === (task.constraint_type || DEFAULT_CONSTRAINT_TYPE))?.needsDate ? '—' : formatDateDisplay(task.constraint_date)
+          case 'ddate': return summary || !task.deadline ? '—' : formatDateDisplay(task.deadline)
+          case 'inactive': return task.inactive ? '是' : '否'
+          case 'slack': case 'baselineStart': case 'baselineFinish': case 'baselineDuration': return metricText(task, col)
+          case 'status': {
+            const baselineEnd = latestSnapshotEnds.get(id) ?? task.baseline_end_date
+            const hasPreviousStatusVersion = latestSnapshotEnds.size > 0
+            const { status } = computeTaskStatus({ ...task, baseline_end_date: baselineEnd }, statusDateObj,
+              { allTasks: tasksWithSnapshotBaseline, deps, prevTaskIds: prevSnapshotTaskIds, seqMap, isMinute, hasPreviousStatusVersion })
+            const prefix = hasPreviousStatusVersion && !prevSnapshotTaskIds.has(id) && ['notstarted', 'started', 'completed'].includes(status) ? '新任务，' : ''
+            const days = baselineEnd && task.end_date ? diffDays(new Date(baselineEnd), new Date(task.end_date)) : 0
+            return `${prefix}${STATUS_META[status].label}${days ? ` ${days > 0 ? '+' : ''}${days}天` : ''}`
+          }
+        }
       }))
     e.preventDefault(); e.stopPropagation()
     e.clipboardData.setData('text/plain', serializeClipboardGrid(rows))
@@ -3012,7 +3105,7 @@ export default function GanttChart({
         {/* Column headers */}
         <div className="flex-none flex items-end border-b border-gray-300 bg-gray-50
                         font-semibold text-gray-500 text-[11px]"
-             style={{ height: HDR_H, minWidth: leftInnerW }}>
+             style={{ height: HDR_H + 4, minWidth: leftInnerW }}>
           {/* 任务编号 header */}
           <div style={{ width: COL_NUM }}
                className="h-full flex items-end pb-1 justify-center border-r border-gray-200 flex-none text-gray-400">
@@ -3056,24 +3149,25 @@ export default function GanttChart({
         </div>
 
         {/* Rows */}
-        <div ref={leftRef} data-gantt-grid data-project-id={projectId} data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onCopy={handleGridCopy} onPaste={handleGridPaste}
+        <div ref={leftRef} data-gantt-grid data-row-count={displayRows.length} data-rendered-row-count={renderedRows.length} data-project-id={projectId} data-grid-range={selectedRect ? `${selectedRect.top},${selectedRect.bottom},${selectedRect.left},${selectedRect.right}` : undefined} tabIndex={0} onKeyDownCapture={handleGridKey} onCopy={handleGridCopy} onPaste={handleGridPaste}
              onMouseDownCapture={handleCellRangeStart} onMouseMoveCapture={handleCellRangeMove}
              onClickCapture={event => { if (cellRangeClickHandled.current) { cellRangeClickHandled.current = false; event.preventDefault(); event.stopPropagation(); leftRef.current?.focus({ preventScroll: true }) } }}
              onDoubleClickCapture={() => { cancelEditorRef.current = false; cellCommittedRef.current = false }}
              className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
              style={{ cursor: rowDrag?.dragging ? 'grabbing' : undefined }}>
-          {displayRows.map((row, i) => {
+          <div style={{ position: 'relative', height: totalH + 8 }}>
+          {renderedRows.map(({ row, index: i }) => {
             const t = row.task
             const sel = selectedIds.includes(t.id)
             const isEditing = editId === t.id
             const isDraggingThis = rowDrag?.dragging && movingRowIds.has(t.id)
-            const incomingDeps = deps.filter(d => d.to_task_id === t.id)
+            const incomingDeps = dependencyIndex.incoming.get(t.id) ?? []
             const predNums = incomingDeps
               .map(d => flatRowIdx[d.from_task_id])
               .filter(Boolean)
               .join(',')
-            const outgoingDeps = deps.filter(d => d.from_task_id === t.id)
+            const outgoingDeps = dependencyIndex.outgoing.get(t.id) ?? []
             const succNums = outgoingDeps
               .map(d => flatRowIdx[d.to_task_id])
               .filter(Boolean)
@@ -3093,7 +3187,7 @@ export default function GanttChart({
                 <div
                   className={`flex border-b border-gray-100 cursor-pointer
                     ${sel ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
-                  style={{ height: ROW_H, opacity: isDraggingThis ? 0.35 : 1 }}
+                  style={{ position: 'absolute', top: i * ROW_H, left: 0, right: 0, height: ROW_H, opacity: isDraggingThis ? 0.35 : 1 }}
                   data-task-row={t.id}
                   onMouseDownCapture={() => { rowDragJustEnded.current = false }}
                   onClickCapture={e => {
@@ -3605,6 +3699,7 @@ export default function GanttChart({
             <div data-task-drop-indicator aria-hidden="true" className="absolute inset-x-0 z-10 pointer-events-none"
                  style={{ top: Math.max(0, dropIdx * ROW_H - 1), height: 2, background: rowDrop?.plan.invalidReason ? '#ef4444' : '#2563eb' }} />
           )}
+          </div>
           {/* 补偿右侧水平滚动条高度，使左右面板底部对齐 */}
           {hScrollbarH > 0 && <div style={{ height: hScrollbarH, flexShrink: 0 }} />}
         </div>
@@ -3703,18 +3798,7 @@ export default function GanttChart({
               <>
                 {/* ── 天级项目：月头 + 周/日（保持稳定版样式） ─── */}
                 {(() => {
-                  const months: { label: string; startD: number; endD: number }[] = []
-                  let mStart = 0
-                  let mLabel = ''
-                  for (let d = 0; d <= totalDays; d++) {
-                    const date  = addDays(origin, d)
-                    const label = `${date.getFullYear()}年${date.getMonth()+1}月`
-                    if (d === 0) { mStart = 0; mLabel = label }
-                    else if (label !== mLabel || d === totalDays) {
-                      months.push({ label: mLabel, startD: mStart, endD: d })
-                      mStart = d; mLabel = label
-                    }
-                  }
+                  const months = visibleMonths
                   return months.map((m, i) => {
                     const x = m.startD * colW
                     const w = (m.endD - m.startD) * colW
@@ -3734,7 +3818,8 @@ export default function GanttChart({
                   : colW < 14
                   ? (() => {
                       const nodes: React.ReactNode[] = []
-                      for (let d = 0; d < totalDays; d += 7) {
+                      for (const week of tickIndices(colW * 7, Math.ceil(totalDays / 7))) {
+                      const d = week * 7
                         const date = addDays(origin, d)
                         const x = d * colW
                         const w7 = Math.min(7, totalDays - d) * colW
@@ -3750,7 +3835,7 @@ export default function GanttChart({
                       }
                       return nodes
                     })()
-                  : Array.from({ length: totalDays }, (_,d) => {
+                  : dayTicks.map(d => {
                       const date = addDays(origin,d)
                       const dow  = date.getDay()
                       const wknd = dow===0||dow===6
@@ -3780,7 +3865,7 @@ export default function GanttChart({
                   const totalHours = totalDays * 24
                   const pad = (n: number) => String(n).padStart(2, '0')
                   const nodes: React.ReactNode[] = []
-                  for (let h = 0; h < totalHours; h++) {
+                  for (const h of tickIndices(hourW, totalHours)) {
                     const d = Math.floor(h / 24)
                     const hh = h % 24
                     const date = addDays(origin, d)
@@ -3816,7 +3901,7 @@ export default function GanttChart({
                   const totalSlots = totalDays * 96
                   const showLabel = slotW >= 12
                   const nodes: React.ReactNode[] = []
-                  for (let s = 0; s < totalSlots; s++) {
+                  for (const s of tickIndices(slotW, totalSlots)) {
                     const slotInHour = s % 4
                     const mm = String(slotInHour * 15).padStart(2, '0')
                     const x = s * slotW
@@ -3841,7 +3926,7 @@ export default function GanttChart({
             ) : (
               <>
                 {/* ── 分钟级 + 默认：顶 = 日期(周X)，二 = 小时（每天 24 格）── */}
-                {Array.from({ length: totalDays }, (_, d) => {
+                {dayTicks.map(d => {
                   const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六']
                   const date = addDays(origin, d)
                   const dow = date.getDay()
@@ -3888,7 +3973,7 @@ export default function GanttChart({
                   // 网格线密度：颜色按重要性区分
                   const showAllLines = slotW >= 8
                   const nodes: React.ReactNode[] = []
-                  for (let d = 0; d < totalDays; d++) {
+                  for (const d of dayTicks) {
                     for (let hh = 0; hh < 24; hh++) {
                       const x = d * colW + hh * slotW
                       const isMidnight = hh === 0
@@ -3972,7 +4057,7 @@ export default function GanttChart({
         </div>
         <div
           ref={rightRef}
-          data-timeline-scroll data-col-width={colW} data-origin={fmtDt(origin)}
+          data-timeline-scroll data-rendered-dependency-count={visibleDependencies.length} data-col-width={colW} data-origin={fmtDt(origin)}
           onScroll={onRightBodyScroll}
           className="flex-1 overflow-auto min-h-0"
           style={{ cursor: statusDateDrag ? 'col-resize' : drag ? 'ew-resize' : connect ? 'crosshair' : 'default' }}
@@ -4000,17 +4085,9 @@ export default function GanttChart({
             ? /* 月视图：只画月分隔线 */
               (() => {
                 const nodes: React.ReactNode[] = []
-                let d = 0
-                while (d < totalDays) {
-                  const date = addDays(origin, d)
-                  const x = d * colW
-                  // 跳到下月1号
-                  const nextMonth = new Date(date.getFullYear(), date.getMonth() + 1, 1)
-                  const daysToNext = diffDays(date, nextMonth)
-                  nodes.push(
-                    <line key={`bm${d}`} x1={x} y1={0} x2={x} y2={totalH} stroke="#d1d5db" />
-                  )
-                  d += daysToNext || 1
+                for (const month of visibleMonths) {
+                  const x = month.startD * colW
+                  nodes.push(<line key={`bm${month.startD}`} x1={x} y1={0} x2={x} y2={totalH} stroke="#d1d5db" />)
                 }
                 return nodes
               })()
@@ -4018,7 +4095,8 @@ export default function GanttChart({
             ? /* 周视图：每7天画分隔线 */
               (() => {
                 const nodes: React.ReactNode[] = []
-                for (let d = 0; d < totalDays; d += 7) {
+                for (const week of tickIndices(colW * 7, Math.ceil(totalDays / 7))) {
+                      const d = week * 7
                   const x = d * colW
                   nodes.push(
                     <line key={`bw${d}`} x1={x} y1={0} x2={x} y2={totalH} stroke="#e5e7eb" />
@@ -4027,7 +4105,7 @@ export default function GanttChart({
                 return nodes
               })()
             : /* 日视图：每天画线 + 周末底色 */
-              Array.from({ length: totalDays }, (_,d) => {
+              dayTicks.map(d => {
                 const date = addDays(origin,d)
                 const dow  = date.getDay()
                 const wknd = dow===0||dow===6
@@ -4042,13 +4120,13 @@ export default function GanttChart({
           }
 
           {/* Row lines */}
-          {displayRows.map((_,i)=>(
+          {viewportRows.map(({ index: i })=>(
             <line key={`rl${i}`} x1={0} y1={(i+1)*ROW_H}
                   x2={totalW} y2={(i+1)*ROW_H} stroke="#e5e7eb" />
           ))}
 
           {/* Row highlights */}
-          {displayRows.map((row,i)=>
+          {viewportRows.map(({ row, index: i })=>
             selectedIds.includes(row.task.id)
               ? <rect key={`sh${i}`} x={0} y={i*ROW_H} width={totalW} height={ROW_H}
                       fill="#dbeafe" opacity={0.35} />
@@ -4056,7 +4134,7 @@ export default function GanttChart({
           )}
 
           {/* Comparison baseline bars (版本对比 / 差异基线) */}
-          {(showComparison || diffFilter) && comparisonMap.size > 0 && displayRows.map((row, i) => {
+          {(showComparison || diffFilter) && comparisonMap.size > 0 && viewportRows.map(({ row, index: i }) => {
             const t = row.task
             const ct = comparisonMap.get(t.id)
             if (!ct?.start_date || !ct?.end_date) return null
@@ -4122,75 +4200,13 @@ export default function GanttChart({
           })}
 
           {/* Dependency arrows — 渲染在 bar 之前，避免 10px 命中带覆盖任务条阻挡拖拽 */}
-          {deps.map(dep => {
-            let fi = rowIdx[dep.from_task_id]
-            let ti = rowIdx[dep.to_task_id]
-            // 如果任务不在可见行中（被折叠），找其最近可见祖先（防止循环引用）
-            if (fi === undefined) {
-              const seen = new Set<string>()
-              let pid = tasks.find(t => t.id === dep.from_task_id)?.parent_id ?? null
-              while (pid && !seen.has(pid)) {
-                seen.add(pid)
-                if (rowIdx[pid] !== undefined) { fi = rowIdx[pid]; break }
-                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
-              }
-            }
-            if (ti === undefined) {
-              const seen = new Set<string>()
-              let pid = tasks.find(t => t.id === dep.to_task_id)?.parent_id ?? null
-              while (pid && !seen.has(pid)) {
-                seen.add(pid)
-                if (rowIdx[pid] !== undefined) { ti = rowIdx[pid]; break }
-                pid = tasks.find(t => t.id === pid)?.parent_id ?? null
-              }
-            }
-            if (fi===undefined||ti===undefined) return null
-            const ft = displayRows[fi].task
-            const tt = displayRows[ti].task
-            if (!ft.start_date||!ft.end_date||!tt.start_date||!tt.end_date) return null
-
-            // 根据依赖类型选择起终点 X 坐标
-            // 里程碑或日期异常时，确保 end >= start
-            const fromStart = dateToX(new Date(ft.start_date))
-            const fromEndRaw = dateToX(new Date(ft.end_date))
-            const fromEnd   = Math.max(fromStart, fromEndRaw)
-            const toStart   = dateToX(new Date(tt.start_date))
-            const toEndRaw  = dateToX(new Date(tt.end_date))
-            const toEnd     = Math.max(toStart, toEndRaw)
-
-            let x1: number, x2: number
-            const depType = Number(dep.type ?? 2)  // 确保数值类型，默认 FS
-            if (depType === 0)      { x1 = fromStart; x2 = toStart }  // SS
-            else if (depType === 1) { x1 = fromStart; x2 = toEnd   }  // SF
-            else if (depType === 3) { x1 = fromEnd;   x2 = toEnd   }  // FF
-            else                    { x1 = fromEnd;   x2 = toStart }  // FS (default)
-
-            const y1   = fi*ROW_H + ROW_H/2
-            const y2   = ti*ROW_H + ROW_H/2
-            const bend = 10
+          {visibleDependencies.map(({ dep, x1, x2, y1, y2, path: d }) => {
             const isSel = selectedDep === dep.id
-
-            // 起点从左侧出发时向左弯，从右侧出发时向右弯
-            const exitRight = depType === 2 || depType === 3  // FS/FF 从 end 出发 → 向右
-            const enterLeft = depType === 0 || depType === 2  // SS/FS 到 start → 从左进入
-            const dx1 = exitRight ? bend : -bend
-            const dx2 = enterLeft ? -bend : bend
-
-            let d: string
-            if ((exitRight && x2 > x1+bend*2) || (!exitRight && x2 > x1)) {
-              // 目标在右侧 — 简单路径
-              d = `M${x1},${y1} H${x1+dx1} V${y2} H${x2}`
-            } else {
-              // 目标在左侧 — 绕行路径
-              const midY = Math.min(y1,y2)-8
-              d = `M${x1},${y1} H${x1+dx1} V${midY} H${x2+dx2} V${y2} H${x2}`
-            }
-
             const midPtX = (x1+x2)/2
             const midPtY = (y1+y2)/2
             const isDragTarget = depDrag?.depId === dep.id && depDrag.dragging
             return (
-              <g key={dep.id}>
+              <g key={dep.id} data-dependency-id={dep.id}>
                 <path d={d} stroke="transparent" strokeWidth={10} fill="none"
                       style={{ cursor: readOnly ? 'pointer' : 'ew-resize' }}
                       onClick={e=>{
@@ -4251,7 +4267,7 @@ export default function GanttChart({
           })}
 
           {/* Task bars */}
-          {displayRows.map((row,i) => {
+          {viewportRows.map(({ row, index: i }) => {
             const t = row.task
             if (!t.start_date || !t.end_date) return null
             const x  = dateToX(new Date(t.start_date))

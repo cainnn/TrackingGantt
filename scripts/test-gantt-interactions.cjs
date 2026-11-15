@@ -86,11 +86,17 @@ async function fixture(role = 'admin', minute = false, history = false) {
   await page.setRequestInterception(true);
   const p = { ...project, status_date: minute ? '2026-11-02T09:00:00' : project.status_date, time_granularity: minute ? 'minute' : 'day' };
   const tasks = [task('1'), task('2'), task('3'), task('4', '3')].map(t => minute ? { ...t, start_date: '2026-11-02T09:00:00', end_date: '2026-11-02T10:15:00', duration: 75 } : t);
+  let preferences = { revision: 0, currentView: null, views: [] };
+  page.testPreferences = () => preferences;
   page.on('request', async req => {
     const url = new URL(req.url()), path = url.pathname;
     if (!path.startsWith('/api/')) return req.continue();
     let value = [];
     if (path === '/api/auth/login') value = { user: { id: 'fixture', username: 'fixture', role }, token: 'fixture-token' };
+    else if (path === `/api/projects/${p.id}/view-preferences`) {
+      if (req.method() === 'PUT') preferences = { ...JSON.parse(req.postData()), revision: preferences.revision + 1 };
+      value = preferences;
+    }
     else if (req.method() !== 'GET') { writes.push({ method: req.method(), path }); value = null; }
     else if (path === '/api/projects') value = [p];
     else if (path === `/api/projects/${p.id}`) value = p;
@@ -104,7 +110,8 @@ async function fixture(role = 'admin', minute = false, history = false) {
   });
   await page.goto(`${base}/login`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('button[type=submit]'); await waitFrame(page);
-  await page.type('input[type=text]', 'fixture'); await page.type('input[type=password]', 'fixture');
+  await page.waitForFunction(() => { const form = document.querySelector('form'); return form && Object.keys(form).some(k => k.startsWith('__reactProps$')); });
+  await fill(page, 'input[type=text]', 'fixture'); await fill(page, 'input[type=password]', 'fixture');
   await page.click('button[type=submit]');
   await page.waitForSelector(`a[href="/projects/${project.id}"]`);
   await page.click(`a[href="/projects/${project.id}"]`);
@@ -218,9 +225,13 @@ async function main() {
   // Saving and applying views persists only UI preferences.
   await fill(page, 'input[placeholder="搜索任务..."]', '任务1');
   await button(page, '显示设置'); await button(page, '常用布局'); await button(page, '保存当前布局');
+  await page.waitForFunction(() => document.querySelector('[role=dialog]')?.textContent.includes('布局已保存'));
+  assert.equal(page.testPreferences().currentView.search, '任务1');
+  await button(page, '另存为常用布局');
   await fill(page, 'input[aria-label="布局名称"]', '我的视图');
   await button(page, '保存布局');
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('gantt-saved-views-v1-interaction-fixture')));
+  await page.waitForSelector('select[aria-label="已保存布局"]');
+  const stored = page.testPreferences().views;
   assert.equal(stored[0].search, '任务1'); assert.equal('tasks' in stored[0], false);
   await page.keyboard.press('Escape');
   await fill(page, 'input[placeholder="搜索任务..."]', '');
