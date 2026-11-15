@@ -194,6 +194,8 @@ async function main() {
   await click('确认并保存');
   await until(async () => !!(await state(stable.project.id)).planBaseline, 'stable baseline saved');
   await page.waitForSelector('[aria-label="变更审核"]', { hidden: true });
+  // The review closes when submission starts; wait for authoritative readback, not merely the first committed request.
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === '确认变更' && b.disabled));
   const stableSaved = await state(stable.project.id);
   assert.equal(stableSaved.planBaseline.sourceVersionId, stable.version.id);
   assert.equal((await api(`/projects/${stable.project.id}/baseline-history`)).length, 1);
