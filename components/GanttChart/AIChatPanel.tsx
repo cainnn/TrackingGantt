@@ -9,9 +9,10 @@ import {
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
 import { runFullCascade } from '@/lib/clientScheduling'
+import { planDependencyRemoval } from '@/lib/dependencyRemoval'
 import { uuid } from '@/lib/uuid'
 import { markDirty } from '@/store/slices/tasksSlice'
-import { hasDraftChanges } from '@/store/draftHistory'
+import { hasDraftChanges, labelDraftStep } from '@/store/draftHistory'
 import { attributeQueryMessage, buildTaskAttributeCatalog, deduplicateAttributeReports, isTaskAttributeQueryIntent, queryTaskAttributeReports, type AttributeQueryContext, type AttributeQueryResult } from '@/lib/ai/taskAttributeQuery'
 import AIAttributeReport from './AIAttributeReport'
 import {
@@ -311,9 +312,9 @@ export default function AIChatPanel({ projectId, onClose, autoMessage, onAutoMes
             if (!fromId || !toId) { result = `Task code not found`; break }
             const dep = dependencies.find(d => d.from_task_id === fromId && d.to_task_id === toId)
             if (!dep) { result = `Dependency not found`; break }
+            const { updatedTasks: cascaded } = planDependencyRemoval(tasks, dependencies, [dep.id], { isMinute })
+            dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [toId] }))
             dispatch(removeDependency(dep.id))
-            const remainDeps = dependencies.filter(d => d.id !== dep.id)
-            const cascaded = runFullCascade(tasks, remainDeps, { isMinute })
             if (cascaded.length > 0) {
               dispatch(updateTasks(cascaded))
               dispatch(markDirty(cascaded.map(t => t.id)))

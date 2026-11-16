@@ -7,6 +7,9 @@ import pool from '@/lib/db'
 import { getAuthUser, requireWrite } from '@/lib/middleware'
 import { success, failure } from '@/lib/result'
 import { wouldCreateCycle, cascadeDependencies, updateSummaryTasksDates, snapTasksToDayLevel } from '@/lib/scheduling'
+import { planDependencyRemoval } from '@/lib/dependencyRemoval'
+import type { Task, Dependency } from '@/types'
+import { toDateStr } from '@/lib/scheduling'
 import { lockAndCheckPlan, planRevisionHeaders, PlanSaveConflict } from '@/lib/server/planRevision'
 
 type Params = { params: Promise<{ projectId: string }> }
@@ -313,13 +316,29 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       })
     }
 
-    // 删除依赖后重新级联，让后继任务回到独立排程
+    // Confirmed saves contain the exact client preview. Direct API deletions use
+    // the same planner, inside this transaction and revision lock.
     const submittedPlan = req.headers.get('x-gantt-confirmed-save') === '1'
-    const cascadedIds = submittedPlan ? [] : await cascadeDependencies(client, projectId)
-    const summaryUpdated = submittedPlan ? [] : await updateSummaryTasksDates(client, projectId)
-    const snappedIds = submittedPlan ? [] : await snapTasksToDayLevel(client, projectId)
-
-    const allUpdatedIds = [...new Set([...cascadedIds, ...summaryUpdated.map(s => s.id), ...snappedIds])]
+    const allUpdatedIds: string[] = []
+    if (!submittedPlan) {
+      const taskRows = await client.query('SELECT * FROM tasks WHERE project_id = $1 AND is_deleted = false', [projectId])
+      const depRows = await client.query('SELECT * FROM dependencies WHERE project_id = $1', [projectId])
+      const projectRows = await client.query('SELECT time_granularity FROM projects WHERE id = $1', [projectId])
+      const tasks: Task[] = taskRows.rows.map(t => ({ ...t,
+        start_date: toDateStr(t.start_date), end_date: toDateStr(t.end_date), constraint_date: toDateStr(t.constraint_date),
+        original_start_date: toDateStr(t.original_start_date), original_end_date: toDateStr(t.original_end_date),
+      }))
+      const plan = planDependencyRemoval(tasks, [...depRows.rows, old] as Dependency[], [id], {
+        isMinute: projectRows.rows[0]?.time_granularity === 'minute',
+      })
+      for (const task of plan.updatedTasks) {
+        await client.query(`UPDATE tasks SET start_date = $1, end_date = $2, duration = $3,
+          original_start_date = $4, original_end_date = $5, updated_at = NOW()
+          WHERE id = $6 AND project_id = $7`, [task.start_date, task.end_date, task.duration,
+          task.original_start_date, task.original_end_date, task.id, projectId])
+        allUpdatedIds.push(task.id)
+      }
+    }
     let updatedTasks: Record<string, unknown>[] = []
     if (allUpdatedIds.length > 0) {
       const ph = allUpdatedIds.map((_, i) => `$${i + 2}`).join(',')

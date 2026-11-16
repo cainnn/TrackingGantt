@@ -10,6 +10,7 @@ import {
 import { setStatusDate } from '@/store/slices/projectSlice'
 import type { Task, Dependency } from '@/types'
 import { taskBranchIds } from '@/lib/taskTree'
+import { planDependencyRemoval } from '@/lib/dependencyRemoval'
 import { buildSaveDiff } from '@/lib/clientSave'
 import EditTaskModal from './EditTaskModal'
 import DateCellEditor from './DateCellEditor'
@@ -2225,15 +2226,24 @@ export default function GanttChart({
     }
   }, [tasks, deps, dispatch, projectStartDate, recascade])
 
+  const removeDependenciesAndCollapse = useCallback((ids: string[]) => {
+    if (readOnly || viewSnapshot) return
+    const plan = planDependencyRemoval(tasks, deps, ids, { isMinute })
+    if (!plan.removedDependencies.length) return
+    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: plan.removedDependencies.map(d => d.to_task_id) }))
+    for (const dep of plan.removedDependencies) dispatch(removeDependency(dep.id))
+    if (plan.updatedTasks.length) {
+      dispatch(updateTasks(plan.updatedTasks))
+      dispatch(markDirty(plan.updatedTasks.map(t => t.id)))
+    }
+  }, [dispatch, tasks, deps, isMinute, readOnly, viewSnapshot])
+
   // ── Toggle predecessor via popup（本地操作）────────────────
   const togglePredecessor = useCallback((fromTaskId: string, toTaskId: string) => {
     if (readOnly) return
     const existing = deps.find(d => d.from_task_id === fromTaskId && d.to_task_id === toTaskId)
     if (existing) {
-      dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [toTaskId] }))
-      dispatch(removeDependency(existing.id))
-      const remainDeps = deps.filter(d => d.id !== existing.id)
-      recascade(remainDeps)
+      removeDependenciesAndCollapse([existing.id])
       return
     }
 
@@ -2254,22 +2264,19 @@ export default function GanttChart({
       nextTasks = tasks.map(t => t.id === toTaskId ? updatedTo : t)
     }
     recascade([...deps, newDep], nextTasks)
-  }, [deps, tasks, dispatch, projectId, recascade, readOnly])
+  }, [deps, tasks, dispatch, projectId, recascade, readOnly, removeDependenciesAndCollapse])
 
   // ── Delete selected dependency ──────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDep && document.activeElement?.tagName !== 'INPUT') {
-        dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
-        dispatch(removeDependency(selectedDep))
-        const remainDeps = deps.filter(d => d.id !== selectedDep)
-        recascade(remainDeps)
+        removeDependenciesAndCollapse([selectedDep])
         setSelectedDep(null)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [selectedDep, deps, dispatch, recascade])
+  }, [selectedDep, removeDependenciesAndCollapse])
 
   // ── Context menu: add task helper（本地新建，保存版本时入库）────────────
   const addTask = useCallback((
@@ -2409,11 +2416,8 @@ export default function GanttChart({
 
   const handleCtxDeleteDep = useCallback((depId: string) => {
     setCtxMenu(null)
-    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
-    dispatch(removeDependency(depId))
-    const remainDeps = deps.filter(d => d.id !== depId)
-    recascade(remainDeps)
-  }, [dispatch, deps, recascade])
+    removeDependenciesAndCollapse([depId])
+  }, [removeDependenciesAndCollapse])
 
   const handleCtxEdit = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2503,10 +2507,8 @@ export default function GanttChart({
   const handleCtxRemoveAllDeps = useCallback((taskId: string) => {
     setCtxMenu(null)
     const taskDeps = deps.filter(d => d.from_task_id === taskId || d.to_task_id === taskId)
-    for (const d of taskDeps) dispatch(removeDependency(d.id))
-    const remainDeps = deps.filter(d => !taskDeps.some(x => x.id === d.id))
-    recascade(remainDeps)
-  }, [dispatch, deps, recascade])
+    removeDependenciesAndCollapse(taskDeps.map(d => d.id))
+  }, [deps, removeDependenciesAndCollapse])
 
   const handleCtxToggleAutoSchedule = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -4278,10 +4280,7 @@ export default function GanttChart({
                       <g style={{ cursor:'pointer' }}
                          onClick={e=>{
                            e.stopPropagation()
-                           dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
-                           dispatch(removeDependency(dep.id))
-                           const remainDeps = deps.filter(d => d.id !== dep.id)
-                           recascade(remainDeps)
+                           removeDependenciesAndCollapse([dep.id])
                            setSelectedDep(null)
                          }}>
                         <circle cx={mx} cy={my} r={9} fill="#ef4444" />

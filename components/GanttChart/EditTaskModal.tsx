@@ -15,6 +15,7 @@ import { markDirty, setEditDescription } from '@/store/slices/tasksSlice'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from './constants'
 import { runFullCascade, snapTaskUpdatesToDayLevel, wouldCreateCycle } from '@/lib/clientScheduling'
 import { uuid } from '@/lib/uuid'
+import { planDependencyRemoval } from '@/lib/dependencyRemoval'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
 import { canEditTaskStart, defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
@@ -283,14 +284,24 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
     }
   }, [addingPred, dispatch, projectId, taskId, deps, task, allTasks, recascadeAndUpdate])
 
-  // ── Remove predecessor ───────────────────────────────────────────────
-  const handleRemovePredecessor = useCallback((depId: string) => {
-    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
+  const removeDependencyAndCollapse = useCallback((depId: string) => {
+    const plan = planDependencyRemoval(allTasks, deps, [depId], { isMinute })
+    if (!plan.removedDependencies.length) return
+    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: plan.removedDependencies.map(d => d.to_task_id) }))
     dispatch(removeDependency(depId))
-    setLagEdits(prev => { const n = { ...prev }; delete n[depId]; return n })
-    const remainDeps = deps.filter(d => d.id !== depId)
-    recascadeAndUpdate(remainDeps)
-  }, [dispatch, deps, recascadeAndUpdate])
+    setLagEdits(prev => { const next = { ...prev }; delete next[depId]; return next })
+    setActiveEdits(prev => { const next = { ...prev }; delete next[depId]; return next })
+    if (plan.updatedTasks.length) {
+      dispatch(updateTasks(plan.updatedTasks))
+      dispatch(markDirty(plan.updatedTasks.map(t => t.id)))
+      const me = plan.updatedTasks.find(t => t.id === taskId)
+      if (me) {
+        setStartDate((me.start_date ?? '').slice(0, dtSlice))
+        setEndDate((me.end_date ?? '').slice(0, dtSlice))
+        setDurationIn(me.duration != null ? String(Math.round((me.duration / durMul) * 100) / 100) : '')
+      }
+    }
+  }, [dispatch, allTasks, deps, isMinute, taskId, dtSlice, durMul])
 
   // ── Add successor ─────────────────────────────────────────────────
   const handleAddSuccessor = useCallback((toTaskId: string) => {
@@ -319,14 +330,6 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
       setAddingSucc(false)
     }
   }, [addingSucc, dispatch, projectId, taskId, deps, allTasks, recascadeAndUpdate])
-
-  // ── Remove successor ────────────────────────────────────────────────
-  const handleRemoveSuccessor = useCallback((depId: string) => {
-    dispatch(labelDraftStep({ label: '移除任务依赖', directTaskIds: [] }))
-    dispatch(removeDependency(depId))
-    const remainDeps = deps.filter(d => d.id !== depId)
-    recascadeAndUpdate(remainDeps)
-  }, [dispatch, deps, recascadeAndUpdate])
 
   // ── Change dep type ──────────────────────────────────────────────────
   const handleDepTypeChange = useCallback((depId: string, newType: number) => {
@@ -628,7 +631,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
               </div>}
               <div className="mt-3 flex items-center justify-between">
                 <span className="text-xs text-gray-400">修改先进入草稿，可在关闭窗口后撤销。</span>
-                <button type="button" onClick={() => { if (selectedPredId) { handleRemovePredecessor(selectedPredId); setSelectedPredId(null) } }}
+                <button type="button" onClick={() => { if (selectedPredId) { removeDependencyAndCollapse(selectedPredId); setSelectedPredId(null) } }}
                   disabled={!selectedPredId} className="text-xs text-red-500 disabled:opacity-40">删除选中的前置关系</button>
               </div>
             </div>
@@ -697,7 +700,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
               </div>}
               <div className="mt-3 flex items-center justify-between">
                 <span className="text-xs text-gray-400">修改先进入草稿，可在关闭窗口后撤销。</span>
-                <button type="button" onClick={() => { if (selectedSuccId) { handleRemoveSuccessor(selectedSuccId); setSelectedSuccId(null) } }}
+                <button type="button" onClick={() => { if (selectedSuccId) { removeDependencyAndCollapse(selectedSuccId); setSelectedSuccId(null) } }}
                   disabled={!selectedSuccId} className="text-xs text-red-500 disabled:opacity-40">删除选中的后续关系</button>
               </div>
               </>
