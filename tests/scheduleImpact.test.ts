@@ -124,3 +124,13 @@ test('last predecessor deletion explains the existing manual reanchor rule and i
   assert.equal(result.tasks.find(t => t.id === 'e')?.category, 'cascade')
   assert.match(result.tasks.find(t => t.id === 'e')!.reason, /随前置「D」/)
 })
+
+test('parent-only deletion explains promotion while showing the child as retained', () => {
+  const before = snapshot([task('parent'), task('child', { parent_id: 'parent', auto_schedule: false })])
+  const result = planTaskDeletion(before.tasks, [], ['parent'], { includeDescendants: false })
+  const impact = buildScheduleImpact(before, { ...before, tasks: result.tasks }, { label: '仅删除父任务', directTaskIds: ['parent'] })
+  const child = impact.tasks.find(t => t.id === 'child')!
+  assert.equal(child.kind, 'changed'); assert.ok(child.after)
+  assert.match(child.reason, /删除父任务后保留.*提升至顶层/)
+  assert.ok(child.fields.includes('层级'))
+})

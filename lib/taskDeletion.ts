@@ -22,7 +22,7 @@ export function planTaskDeletion(tasks: Task[], dependencies: Dependency[], requ
   const requested = [...requestedIds].filter(id => byId.has(id))
   const deletedIds = options.includeDescendants === false ? new Set(requested) : taskBranchIds(tasks, requested)
   const originalTasks = tasks.filter(t => !t.is_deleted && !deletedIds.has(t.id))
-  const remainingTasks = originalTasks.map(task => {
+  let remainingTasks = originalTasks.map(task => {
     let parent = task.parent_id
     const seen = new Set<string>([task.id])
     while (parent && deletedIds.has(parent) && !seen.has(parent)) {
@@ -32,6 +32,33 @@ export function planTaskDeletion(tasks: Task[], dependencies: Dependency[], requ
     if (parent && seen.has(parent)) parent = null
     return parent === task.parent_id ? task : { ...task, parent_id: parent }
   })
+  // Promoted children replace the removed parent in the original tree order,
+  // even when each level uses its own zero-based order_index values.
+  const promotedParents = new Set(remainingTasks.filter(t => t.parent_id !== byId.get(t.id)?.parent_id).map(t => t.parent_id))
+  if (promotedParents.size) {
+    const children = new Map<string | null, Task[]>()
+    for (const task of byId.values()) {
+      const list = children.get(task.parent_id) ?? []; list.push(task); children.set(task.parent_id, list)
+    }
+    children.forEach(list => list.sort((a, b) => a.order_index - b.order_index))
+    const rank = new Map<string, number>()
+    const visit = (roots: Task[]) => {
+      const stack = [...roots].reverse()
+      while (stack.length) {
+        const task = stack.pop()!
+        if (rank.has(task.id)) continue
+        rank.set(task.id, rank.size)
+        const nested = children.get(task.id) ?? []
+        for (let i = nested.length - 1; i >= 0; i--) stack.push(nested[i])
+      }
+    }
+    visit(children.get(null) ?? [])
+    for (const task of byId.values()) if (!rank.has(task.id)) visit([task])
+    const order = new Map<string, number>()
+    for (const parent of promotedParents) remainingTasks.filter(t => t.parent_id === parent)
+      .sort((a, b) => rank.get(a.id)! - rank.get(b.id)!).forEach((task, index) => order.set(task.id, index))
+    remainingTasks = remainingTasks.map(task => order.has(task.id) && order.get(task.id) !== task.order_index ? { ...task, order_index: order.get(task.id)! } : task)
+  }
   const remainingById = new Map(remainingTasks.map(t => [t.id, t]))
   const summaries = new Set(remainingTasks.map(t => t.parent_id).filter(Boolean))
   const inactive = (id: string, map = byId) => {

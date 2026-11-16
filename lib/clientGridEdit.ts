@@ -1,5 +1,5 @@
 import type { Task, Dependency } from '../types'
-import { buildTaskScheduleEdit, normalizeScheduleDate, scheduleDurationMinutes } from './clientTaskEdit'
+import { canEditTaskStart, buildTaskScheduleEdit, normalizeScheduleDate, scheduleDurationMinutes } from './clientTaskEdit'
 import { runFullCascade } from './clientScheduling'
 import { CONSTRAINT_TYPES, CONSTRAINT_NEEDS_DATE } from '../components/GanttChart/constants'
 import { parseDateInput } from './clientDateInput'
@@ -52,7 +52,7 @@ export function gridCellEditable(task: Task, col: string, tasks: Task[], deps: D
   if (['name', 'assignee'].includes(col)) return true
   if (tasks.some(t => !t.is_deleted && t.parent_id === task.id)) return false
   const type = deps.find(d => d.active !== false && d.to_task_id === task.id)?.type ?? -1
-  if (col === 'start') return task.auto_schedule === false || type === 1 || type === 3
+  if (col === 'start') return canEditTaskStart(task, deps)
   if (col === 'end') return task.auto_schedule === false || [-1, 1, 3].includes(type)
   if (col === 'duration') return !task.is_milestone
   if (col === 'ctype') return task.auto_schedule !== false

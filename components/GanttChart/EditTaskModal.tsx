@@ -17,7 +17,7 @@ import { runFullCascade, snapTaskUpdatesToDayLevel, wouldCreateCycle } from '@/l
 import { uuid } from '@/lib/uuid'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
-import { defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
+import { canEditTaskStart, defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
 import { describeLifecycleChange } from '@/lib/taskLifecycleDisplay'
 
 interface Props {
@@ -48,7 +48,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const deps = useAppSelector(s => s.tasks.dependencies)
   const incomingDeps = deps.filter(d => d.to_task_id === taskId)
   const outgoingDeps = deps.filter(d => d.from_task_id === taskId)
-  const isSummary = allTasks.some(t => t.parent_id === taskId)
+  const isSummary = allTasks.some(t => !t.is_deleted && t.parent_id === taskId)
   const currentProject = useAppSelector(s => s.project.currentProject)
   // 项目精度：天级 vs 分钟级（创建时固定）
   const isMinute = currentProject?.time_granularity === 'minute'
@@ -386,10 +386,9 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
   const duration = durNum != null && !isNaN(durNum) ? Math.round(durNum * durMul) : task.duration
 
   // Determine date editability based on dep types
-  const activeIncoming = incomingDeps.filter(d => activeEdits[d.id] ?? d.active ?? true)
-  const hasFS_SS = activeIncoming.some(d => d.type === 2 || d.type === 0)
+  const activeIncoming = incomingDeps.map(d => ({ ...d, active: activeEdits[d.id] ?? d.active ?? true })).filter(d => d.active)
   const hasFF_SF = activeIncoming.some(d => d.type === 3 || d.type === 1)
-  const startReadonly = !manualSchedule && (activeIncoming.length === 0 || hasFS_SS)
+  const startReadonly = isSummary || !canEditTaskStart({ ...task, auto_schedule: !manualSchedule }, activeIncoming)
   const endReadonly = !manualSchedule && hasFF_SF
 
   const handleDateChange = (field: 'start' | 'end', value: string) => {
@@ -724,6 +723,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   {startReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
                       {startDate ? (isMinute ? startDate.replace('T', ' ') : startDate) : '—'}
+                      <p className="mt-1 text-[11px]">{isSummary ? '日期由子任务汇总' : '开始日期由前置依赖决定，可在“前置”页调整'}</p>
                     </div>
                   ) : (
                     <YmdDateInput

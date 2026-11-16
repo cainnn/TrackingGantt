@@ -317,3 +317,40 @@ test('one undo restores deleted tasks, replacement links and dates; redo and sav
   store.dispatch(undoDraft()); assert.deepEqual(snapshotDraft(store.getState()), baseline)
   store.dispatch(redoDraft()); assert.deepEqual(snapshotDraft(store.getState()), after)
 })
+
+test('parent-only deletion keeps promoted children at their original tree position and preserves nested descendants', () => {
+  const make = (id: string, parent: string | null, order: number) => task(id, { parent_id: parent, order_index: order, auto_schedule: false })
+  const tasks = [make('after', 'root', 2), make('c', 'p', 1), make('q', 'p', 0), make('before', 'root', 0),
+    make('y', 'q', 1), make('x', 'q', 0), make('nested', 'x', 0), make('p', 'root', 1), make('root', null, 0)]
+  const deps = [dep('c', 'y')], before = JSON.stringify({ tasks, deps })
+  const result = planTaskDeletion(tasks, deps, ['p', 'q'], { ...options, includeDescendants: false })
+  assert.deepEqual([...result.deletedIds].sort(), ['p', 'q'])
+  assert.deepEqual(result.tasks.filter(t => t.parent_id === 'root').sort((a, b) => a.order_index - b.order_index).map(t => t.id), ['before', 'x', 'y', 'c', 'after'])
+  assert.equal(result.tasks.find(t => t.id === 'nested')?.parent_id, 'x')
+  assert.deepEqual(result.dependencies, deps)
+  for (const id of ['x', 'y', 'c', 'nested']) {
+    assert.equal(result.tasks.find(t => t.id === id)?.start_date, tasks.find(t => t.id === id)?.start_date)
+    assert.equal(result.tasks.find(t => t.id === id)?.end_date, tasks.find(t => t.id === id)?.end_date)
+  }
+  assert.equal(JSON.stringify({ tasks, deps }), before)
+})
+test('parent-only draft deletion, undo and redo retain the complete child graph and root order', async () => {
+  const store = configureStore({ reducer: rootReducer, middleware: get => get().concat(createDraftMiddleware()) })
+  store.dispatch(setCurrentProject({ id: 'p', user_id: 'u', name: 'P', start_date: null, end_date: null, status_date: null, created_at: '' }))
+  const tasks = [task('before', { order_index: 0 }), task('parent', { order_index: 1 }), task('after', { order_index: 2 }),
+    task('child', { parent_id: 'parent', order_index: 0, auto_schedule: false }), task('nested', { parent_id: 'child', auto_schedule: false })]
+  const dependencies = [dep('nested', 'after')]
+  store.dispatch(setTasks({ tasks, dependencies }))
+  store.dispatch(initializeDraft({ projectId: 'p', baseline: snapshotDraft(store.getState()) }))
+  const before = snapshotDraft(store.getState())
+  store.dispatch(labelDraftStep({ label: '仅删除父任务', directTaskIds: ['parent'] }))
+  store.dispatch(deleteTasks(['parent'], { ...options, includeDescendants: false }))
+  await Promise.resolve()
+  const after = snapshotDraft(store.getState())
+  assert.deepEqual(buildSaveDiff(before.tasks, before.dependencies, after.tasks, after.dependencies).tasksToDelete, ['parent'])
+  assert.equal(after.tasks.find(t => t.id === 'child')?.parent_id, null)
+  assert.deepEqual(after.tasks.filter(t => !t.parent_id).sort((a, b) => a.order_index - b.order_index).map(t => t.id), ['before', 'child', 'after'])
+  assert.equal(store.getState().draft.past.length, 1)
+  store.dispatch(undoDraft()); assert.deepEqual(snapshotDraft(store.getState()), before)
+  store.dispatch(redoDraft()); assert.deepEqual(snapshotDraft(store.getState()), after)
+})

@@ -1035,6 +1035,16 @@ export default function GanttToolbar({
     dispatch(deleteTasks([...ids], { isMinute }))
   }, [dispatch, selectedIds, hasSelection, tasks, isMinute, readOnly])
 
+  const selectedParent = selectedIds.length === 1 && tasks.some(t => !t.is_deleted && t.parent_id === selectedIds[0])
+  const handleDeleteParentOnly = useCallback(() => {
+    if (readOnly || selectedIds.length !== 1) return
+    const parent = tasks.find(t => t.id === selectedIds[0] && !t.is_deleted)
+    if (!parent || !tasks.some(t => !t.is_deleted && t.parent_id === parent.id)) return
+    if (!confirm(`仅删除父任务「${parent.name}」？全部子任务将保留并提升一层，可整步撤销。`)) return
+    dispatch(labelDraftStep({ label: '仅删除父任务，保留子任务', directTaskIds: [parent.id] }))
+    dispatch(deleteTasks([parent.id], { isMinute, includeDescendants: false }))
+  }, [dispatch, selectedIds, tasks, isMinute, readOnly])
+
   // ── Promote (升级) ────────────────────────────────────────────────────
   const handlePromote = useCallback(async () => {
     if (!hasSelection) return
@@ -1659,7 +1669,7 @@ export default function GanttToolbar({
           ] : []),
           ...(readOnly ? [{ label: '查看任务属性', disabled: selectedIds.length !== 1, onSelect: () => setAttributeViewTask((viewSnapshot?.tasks ?? tasks).find(t => t.id === selectedIds[0]) ?? null) }] : []),
           { label: '定位到选中任务', disabled: !hasSelection, onSelect: onFocusTask },
-          ...(!readOnly ? [{ label: '删除选中任务', disabled: !hasSelection, danger: true, divider: true, onSelect: handleDeleteTasks }] : []),
+          ...(!readOnly ? [{ label: '仅删除父任务（保留子任务）', disabled: !selectedParent, danger: true, divider: true, onSelect: handleDeleteParentOnly }, { label: '删除选中任务', disabled: !hasSelection, danger: true, divider: true, onSelect: handleDeleteTasks }] : []),
         ]} />
 
         {sep}

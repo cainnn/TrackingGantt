@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
+import { canEditTaskStart, buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
+import { gridCellEditable } from '../lib/clientGridEdit'
 import { buildSaveDiff } from '../lib/clientSave'
 import { runFullCascade } from '../lib/clientScheduling'
 import type { Dependency, Task } from '../types'
@@ -181,4 +182,37 @@ test('date spans used by form and hierarchy edits always return stored minute un
   assert.equal(scheduleDurationMinutes('2026-06-01T09:15:00', '2026-06-01T10:45:00', true), 90)
   assert.equal(scheduleDurationMinutes(null, '2026-06-06', false), null)
   assert.equal(scheduleDurationMinutes('2026-06-06', '2026-06-01', false), -7200)
+})
+
+test('unlinked automatic starts are editable by mouse, keyboard and schedule builder without changing mode', () => {
+  const original = task({ auto_schedule: true })
+  assert.equal(canEditTaskStart(original, []), true)
+  assert.equal(gridCellEditable(original, 'start', [original], []), true)
+  assert.deepEqual(buildTaskScheduleEdit(original, [], 'start_date', '2026-05-30', false), {
+    start_date: '2026-05-30T00:00:00', duration: 7200,
+  })
+  const minute = task({ auto_schedule: true, start_date: '2026-06-01T09:15:00', end_date: '2026-06-01T10:45:00', duration: 90 })
+  assert.deepEqual(buildTaskScheduleEdit(minute, [], 'start_date', '2026-06-01T09:00', true), {
+    start_date: '2026-06-01T09:00:00', duration: 105,
+  })
+})
+test('start editability respects all active predecessors, independent of order, and excludes summary dates', () => {
+  const original = task({ auto_schedule: true })
+  const inactive = [{ ...dependency(2), active: false }]
+  assert.equal(canEditTaskStart(original, inactive), true)
+  assert.ok(Object.keys(buildTaskScheduleEdit(original, inactive, 'start_date', '2026-05-30', false)).length)
+  for (const dependencies of [[dependency(0)], [dependency(2)], [dependency(3), dependency(2)], [dependency(2), dependency(3)]]) {
+    assert.equal(canEditTaskStart(original, dependencies), false)
+    assert.equal(gridCellEditable(original, 'start', [original], dependencies), false)
+    assert.deepEqual(buildTaskScheduleEdit(original, dependencies, 'start_date', '2026-05-30', false), {})
+  }
+  assert.equal(canEditTaskStart({ ...original, auto_schedule: false }, [dependency(2)]), true)
+  assert.equal(canEditTaskStart(original, [dependency(1), dependency(3)]), true)
+  assert.equal(gridCellEditable(original, 'start', [original, task({ id: 'child', parent_id: original.id })], []), false)
+})
+test('editing an unlinked milestone start moves its finish and preserves zero duration', () => {
+  const original = task({ is_milestone: true, start_date: '2026-06-01', end_date: '2026-06-01', duration: 0 })
+  assert.deepEqual(buildTaskScheduleEdit(original, [], 'start_date', '2026-06-02', false), {
+    start_date: '2026-06-02T00:00:00', end_date: '2026-06-02T00:00:00', duration: 0,
+  })
 })

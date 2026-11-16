@@ -85,11 +85,11 @@ const tasksSlice = createSlice({
       }
     },
     deleteTasks: {
-      prepare(ids: string[], options: { isMinute?: boolean; deletionDate?: string } = {}) {
-        return { payload: { ids, isMinute: options.isMinute, deletionDate: options.deletionDate ?? deletionAnchor(options.isMinute),
+      prepare(ids: string[], options: { isMinute?: boolean; deletionDate?: string; includeDescendants?: boolean } = {}) {
+        return { payload: { ids, includeDescendants: options.includeDescendants, isMinute: options.isMinute, deletionDate: options.deletionDate ?? deletionAnchor(options.isMinute),
           operationId: uuid() } }
       },
-      reducer(state, action: PayloadAction<{ ids: string[]; isMinute?: boolean; deletionDate: string; operationId: string }>) {
+      reducer(state, action: PayloadAction<{ ids: string[]; includeDescendants?: boolean; isMinute?: boolean; deletionDate: string; operationId: string }>) {
         const plan = planTaskDeletion(state.tasks, state.dependencies, action.payload.ids, action.payload)
         state.tasks = plan.tasks
         state.dependencies = plan.dependencies

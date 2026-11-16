@@ -117,6 +117,7 @@ export function buildScheduleImpact(before: DraftSnapshot, after: DraftSnapshot,
     let reason: string
     if (kind === 'deleted') reason = '本次操作删除了此任务；保存前可整步撤销。'
     else if (kind === 'added') reason = '本次操作新增或复制了此任务。'
+    else if (a?.parent_id && deleted.has(a.parent_id) && a.parent_id !== b?.parent_id) reason = `删除父任务后保留此任务，提升至${b?.parent_id ? `「${now.get(b.parent_id)?.name ?? '上一级任务'}」下` : '顶层'}，其子任务结构继续保留。`
     else if (category === 'manual') reason = '前置关系发生变化；此任务为手动排程，起止日期保持不变。'
     else if (category === 'summary') reason = '子任务发生变化，摘要任务的起止日期随之汇总更新。'
     else if (category === 'direct') reason = options.cumulative ? '累计期间直接操作过此任务；此处显示相对上次保存的净变化。' : `直接操作：${options.label}。`

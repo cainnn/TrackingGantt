@@ -25,7 +25,7 @@ import {
   wouldCreateCycle,
 } from '@/lib/clientScheduling'
 import { computeSummaryProgressMap } from '@/lib/projectProgress'
-import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, normalizeScheduleDate, resizeTaskSchedule } from '@/lib/clientTaskEdit'
+import { buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes, resizeTaskSchedule } from '@/lib/clientTaskEdit'
 import { addMinutesStr, toDateTimeStr } from '@/lib/clientTime'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
@@ -2020,6 +2020,15 @@ export default function GanttChart({
 
     if (Object.keys(patch).length === 0) { setCellEdit(null); return }
     const updated = { ...orig, ...patch } as typeof orig
+    if (cellEdit.field === 'start_date' || cellEdit.field === 'end_date') {
+      const span = scheduleDurationMinutes(updated.start_date, updated.end_date, isMinute)
+      if (span != null && span < (updated.is_milestone ? 0 : 1)) {
+        setGridError('结束时间必须晚于开始时间；本次日期修改未应用。')
+        setCellEdit(null)
+        return
+      }
+    }
+    setGridError('')
     if (buildSaveDiff([orig], [], [updated], []).tasksToUpdate.length === 0) { setCellEdit(null); return }
 
 
@@ -2324,6 +2333,16 @@ export default function GanttChart({
     dispatch(labelDraftStep({ label: '删除任务及子任务', directTaskIds: [...ids] }))
     dispatch(deleteTasks([...ids], { isMinute }))
   }, [dispatch, tasks, isMinute, readOnly])
+
+  const handleCtxDeleteParentOnly = useCallback((taskId: string) => {
+    setCtxMenu(null)
+    if (readOnly || viewSnapshot) return
+    const parent = tasks.find(t => t.id === taskId && !t.is_deleted)
+    if (!parent || !tasks.some(t => !t.is_deleted && t.parent_id === taskId)) return
+    if (!confirm(`仅删除父任务「${parent.name}」？全部子任务将保留并提升一层，可整步撤销。`)) return
+    dispatch(labelDraftStep({ label: '仅删除父任务，保留子任务', directTaskIds: [taskId] }))
+    dispatch(deleteTasks([taskId], { isMinute, includeDescendants: false }))
+  }, [dispatch, tasks, isMinute, readOnly, viewSnapshot])
 
   const handleCtxAddAbove = useCallback((taskId: string) => {
     setCtxMenu(null)
@@ -2818,7 +2837,14 @@ export default function GanttChart({
   const beginCellEditing = useCallback((cell: { taskId: string; col: OptionalCol | 'name' }) => {
     if (readOnly) return
     const task = tasks.find(t => t.id === cell.taskId)
-    if (!task || !gridCellEditable(task, cell.col, tasks, deps)) return
+    if (!task) return
+    if (!gridCellEditable(task, cell.col, tasks, deps)) {
+      if (cell.col === 'start') setGridNotice(tasks.some(t => !t.is_deleted && t.parent_id === task.id)
+        ? '摘要任务的日期由子任务汇总，请修改子任务日期。'
+        : '开始日期由前置依赖决定，可调整前置关系或切换为手动排程后修改。')
+      return
+    }
+    setGridNotice('')
     cancelEditorRef.current = false
     cellCommittedRef.current = false
     if (cell.col === 'name') { nameCommittedRef.current = false; setEditId(task.id); setEditName(task.name) }
@@ -3435,13 +3461,7 @@ export default function GanttChart({
                        data-col="start" onClick={pickCell('start')}
                        onDoubleClick={e => {
                          e.stopPropagation()
-                         if (readOnly) return
-                         if (t.auto_schedule !== false) {
-                           const inc = deps.filter(d => d.to_task_id === t.id)
-                           const dt = inc.length > 0 ? (inc[0].type ?? 2) : -1
-                           if (dt !== 3 && dt !== 1) return
-                         }
-                         setCellEdit({ taskId: t.id, field: 'start_date', value: (t.start_date ?? '').slice(0, isMinute ? 16 : 10) })
+                         beginCellEditing({ taskId: t.id, col: 'start' })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'start_date'
                       ? <DateCellEditor label={isMinute ? '开始时间' : '开始日期'} includeTime={isMinute} value={cellEdit.value}
@@ -4718,7 +4738,8 @@ export default function GanttChart({
             <Sep />
 
             {/* Group 5: Delete */}
-            <Row icon={IcoTrash} label="删除任务" onClick={() => handleCtxDeleteTask(ctxMenu.taskId)} danger />
+            {isSummary && <Row icon={IcoTrash} label="仅删除父任务（保留子任务）" onClick={() => handleCtxDeleteParentOnly(ctxMenu.taskId)} danger />}
+            <Row icon={IcoTrash} label={isSummary ? "删除任务及子任务" : "删除任务"} onClick={() => handleCtxDeleteTask(ctxMenu.taskId)} danger />
 
             <Sep />
 

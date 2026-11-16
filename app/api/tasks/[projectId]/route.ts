@@ -900,14 +900,14 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     for (const task of deletion.updatedTasks) {
       const previous = byId.get(task.id)!
       if (confirmed) {
-        if (task.parent_id === previous.parent_id) continue
-        await client.query('UPDATE tasks SET parent_id = $1, updated_at = NOW() WHERE id = $2 AND project_id = $3',
-          [task.parent_id, task.id, projectId])
+        if (task.parent_id === previous.parent_id && task.order_index === previous.order_index) continue
+        await client.query('UPDATE tasks SET parent_id = $1, order_index = $2, updated_at = NOW() WHERE id = $3 AND project_id = $4',
+          [task.parent_id, task.order_index, task.id, projectId])
       } else {
         await client.query(`UPDATE tasks SET parent_id = $1, start_date = $2, end_date = $3, duration = $4,
-          percent_done = $5, original_start_date = $6, original_end_date = $7, updated_at = NOW()
-          WHERE id = $8 AND project_id = $9`, [task.parent_id, task.start_date, task.end_date, task.duration,
-          task.percent_done, task.original_start_date, task.original_end_date, task.id, projectId])
+          percent_done = $5, original_start_date = $6, original_end_date = $7, order_index = $8, updated_at = NOW()
+          WHERE id = $9 AND project_id = $10`, [task.parent_id, task.start_date, task.end_date, task.duration,
+          task.percent_done, task.original_start_date, task.original_end_date, task.order_index, task.id, projectId])
         changedTasks.push(task)
       }
       if (task.parent_id !== previous.parent_id) await addLifecycle(client, {

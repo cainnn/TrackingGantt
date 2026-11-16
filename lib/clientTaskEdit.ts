@@ -47,6 +47,12 @@ export function durationInputValue(duration: number | null, isMinute: boolean): 
   return String(isMinute ? duration : Math.round(duration / MIN_PER_DAY))
 }
 
+/** Only active FS/SS predecessors control the start. Unlinked automatic tasks
+ * have an editable start; their scheduling mode does not need to change. */
+export function canEditTaskStart(task: Pick<Task, 'id' | 'auto_schedule'>, deps: Dependency[]): boolean {
+  return task.auto_schedule === false || !deps.some(dep => dep.to_task_id === task.id && dep.active !== false && (dep.type === 2 || dep.type === 0))
+}
+
 /** Inline schedule inputs use project units; task durations always store minutes. */
 export function buildTaskScheduleEdit(
   task: Task,
@@ -55,7 +61,7 @@ export function buildTaskScheduleEdit(
   value: string,
   isMinute: boolean,
 ): Partial<Task> {
-  const depType = deps.find(d => d.to_task_id === task.id)?.type ?? -1
+  const depType = deps.find(d => d.active !== false && d.to_task_id === task.id)?.type ?? -1
   const anchoredToEnd = task.auto_schedule !== false && (depType === 3 || depType === 1)
   const normalizeDate = (date: string | null) => normalizeScheduleDate(date, isMinute)
 
@@ -71,9 +77,10 @@ export function buildTaskScheduleEdit(
     return anchoredToEnd ? { duration, start_date: date } : { duration, end_date: date }
   }
 
-  if (field === 'start_date' && task.auto_schedule !== false && !anchoredToEnd) return {}
+  if (field === 'start_date' && !canEditTaskStart(task, deps)) return {}
   const date = normalizeDate(value)
   if (!date) return {}
+  if (task.is_milestone) return { start_date: date, end_date: date, duration: 0 }
   const start = field === 'start_date' ? date : normalizeDate(task.start_date)
   const end = field === 'end_date' ? date : normalizeDate(task.end_date)
   const duration = scheduleDurationMinutes(start, end, isMinute) ?? task.duration
