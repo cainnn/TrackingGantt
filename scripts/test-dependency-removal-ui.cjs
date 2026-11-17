@@ -1,4 +1,5 @@
 // Real API + browser persistence regression. Only this run's disposable projects are written.
+// Keep deliberate future dates with explicit constraints; ASAP save alignment has its own browser regression.
 const assert = require('node:assert/strict'), { randomUUID } = require('node:crypto');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const puppeteer = require('puppeteer');
@@ -54,7 +55,7 @@ async function main() {
     const display=n=>minute?at(n).slice(11,16):at(n).slice(2,10);
     const project=await api('/projects','POST',{name:`删除关系验收-${precision}-${randomUUID().slice(0,8)}`,time_granularity:precision,planning_status:'draft',status_date:at(0),use_template:false});projects.push(project.id);
     const ids=Object.fromEntries(['a','b','c','p','d','q','e','f','m','n'].map(k=>[k,randomUUID()]));
-    const make=(key,s,e,parent=null,order=0)=>({id:ids[key],name:key.toUpperCase(),parent_id:parent?ids[parent]:null,order_index:order,task_code:key,auto_schedule:key!=='m',constraint_type:'asap',start_date:at(s),end_date:at(e),duration:(e-s)*unit,duration_unit:precision});
+    const make=(key,s,e,parent=null,order=0)=>({id:ids[key],name:key.toUpperCase(),parent_id:parent?ids[parent]:null,order_index:order,task_code:key,auto_schedule:key!=='m',constraint_type:['a','b','c'].includes(key)?'startnoearlierthan':'asap',constraint_date:['a','b','c'].includes(key)?at(0):null,start_date:at(s),end_date:at(e),duration:(e-s)*unit,duration_unit:precision});
     const fixture=[make('a',0,1,null,0),make('b',0,2,null,1),make('c',0,3,null,2),make('p',3,4,null,3),make('d',3,4,'p'),make('q',4,5,null,4),make('e',4,5,'q'),make('f',5,6,null,5),make('m',3,4,null,6),make('n',4,5,null,7)];
     await api(`/tasks/${project.id}`,'POST',fixture.map(t=>({...t,parent_id:null})));
     const links={};for(const [a,b] of [['a','d'],['b','d'],['c','d'],['p','e'],['q','f'],['c','m'],['m','n']]) links[`${a}-${b}`]=(await api(`/dependencies/${project.id}`,'POST',{from_task_id:ids[a],to_task_id:ids[b],type:2,lag:0})).dependency;

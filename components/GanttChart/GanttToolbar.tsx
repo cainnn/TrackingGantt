@@ -22,6 +22,7 @@ import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
 import BulkEditPanel from './BulkEditPanel'
 import TaskRepairPanel from './TaskRepairPanel'
 import SaveConflictDialog from './SaveConflictDialog'
+import SaveStartAlignmentDialog from './SaveStartAlignmentDialog'
 import ScheduleIssuesPanel from './ScheduleIssuesPanel'
 import { baselinesEqual } from '@/lib/planBaseline'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
@@ -40,6 +41,8 @@ import { runFullCascade } from '@/lib/clientScheduling'
 import { buildSaveDiff, type SaveBaseline } from '@/lib/clientSave'
 import { findPlanSaveConflicts, findPlanSaveMismatches } from '@/lib/planSaveVerification'
 import { findPlanScheduleConflicts } from '@/lib/planScheduleValidation'
+import { planUnlinkedTaskStarts } from '@/lib/unlinkedTaskSchedule'
+import { getTodayYmd } from '@/lib/statusDatePolicy'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
 import type { Dependency } from '@/types'
@@ -332,6 +335,9 @@ export default function GanttToolbar({
   const [reconcileBusy, setReconcileBusy] = useState(false)
   const [reconcileError, setReconcileError] = useState('')
   const [continueAfterReview, setContinueAfterReview] = useState(false)
+  const [startAlignment, setStartAlignment] = useState<{
+    source: ReturnType<typeof snapshotDraft>; proposal: ReturnType<typeof planUnlinkedTaskStarts>; error?: string
+  } | null>(null)
 
   // changeDiffs: 当前任务 vs 基线
   const changeDiffs = React.useMemo(() => {
@@ -1617,12 +1623,45 @@ export default function GanttToolbar({
       baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, saveIncomplete, readPersistedState, reduxStore,
       snapshotEndForBaseline, baselineLines, baselineCustomFields, savedPlanBaseline, customFieldsChanged, customFieldsReason, readOnly, history.uncertain])
 
+  const requestSave = useCallback((preserveReasons = false) => {
+    const state = reduxStore.getState()
+    if (readOnly || state.tasks.viewSnapshot || state.draft.saving || statusDateSaving) return
+    if (findPlanScheduleConflicts(state.tasks.tasks, state.tasks.dependencies).length) {
+      setScheduleIssuesOpen(true); return
+    }
+    const source = snapshotDraft(state)
+    const proposal = planUnlinkedTaskStarts(source.tasks, source.dependencies, { isMinute })
+    if (proposal.updatedTasks.length) {
+      if (!preserveReasons) { setReasons({}); setDependencyReasons({}); setCustomFieldsReason('') }
+      setStartAlignment({ source, proposal }); return
+    }
+    if (normalizePlanningStatus(state.project.currentProject?.planning_status) === 'stable') {
+      if (preserveReasons) setReviewOpen(true)
+      else openReview()
+    } else void handleConfirmChanges()
+  }, [reduxStore, readOnly, statusDateSaving, isMinute, openReview, handleConfirmChanges])
+
+  const confirmStartAlignment = useCallback(() => {
+    if (!startAlignment || readOnly || reduxStore.getState().draft.saving) return
+    const current = snapshotDraft(reduxStore.getState())
+    if (!draftsEqual(current, startAlignment.source) || startAlignment.proposal.anchor.slice(0, 10) !== getTodayYmd()) {
+      const proposal = planUnlinkedTaskStarts(current.tasks, current.dependencies, { isMinute })
+      if (proposal.updatedTasks.length) setStartAlignment({ source: current, proposal, error: '草稿或当天日期已变化，已重新计算，请核对新的调整结果。' })
+      else { setStartAlignment(null); setContinueAfterReview(true) }
+      return
+    }
+    dispatch(labelDraftStep({ label: '保存前对齐无前置任务', directTaskIds: startAlignment.proposal.directTaskIds }))
+    dispatch(updateTasks(startAlignment.proposal.updatedTasks))
+    dispatch(markDirty(startAlignment.proposal.directTaskIds))
+    setStartAlignment(null)
+    setContinueAfterReview(true)
+  }, [startAlignment, readOnly, reduxStore, isMinute, dispatch])
+
   useEffect(() => {
     if (!continueAfterReview || statusDateSaving) return
     setContinueAfterReview(false)
-    if (normalizePlanningStatus(currentProject?.planning_status) === 'stable') setReviewOpen(true)
-    else void handleConfirmChanges()
-  }, [continueAfterReview, statusDateSaving, currentProject?.planning_status, handleConfirmChanges])
+    requestSave(true)
+  }, [continueAfterReview, statusDateSaving, requestSave])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -1833,8 +1872,7 @@ export default function GanttToolbar({
                     data-action="save-plan"
                     onClick={() => {
                       if (reasonsRequired && !sd) { alert(`请先设置${sdLabel}`); return }
-                      if (reasonsRequired) openReview()
-                      else void handleConfirmChanges()
+                      requestSave()
                     }}
                     disabled={!canSubmit}
                     title={tip}
@@ -2383,6 +2421,8 @@ export default function GanttToolbar({
         baseline={saveConflict.baseline} persisted={saveConflict.persisted} attempts={saveConflict.attempts}
         current={snapshotDraft(reduxStore.getState())} busy={reconcileBusy} error={reconcileError}
         onClose={() => setSaveConflict(null)} onApply={handleApplyReconciliation} />}
+      {startAlignment && <SaveStartAlignmentDialog before={startAlignment.source.tasks} proposal={startAlignment.proposal}
+        isMinute={isMinute} error={startAlignment.error} onCancel={() => setStartAlignment(null)} onConfirm={confirmStartAlignment} />}
     </>
   )
 }

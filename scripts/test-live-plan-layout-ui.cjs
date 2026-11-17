@@ -1,4 +1,5 @@
 // Real API + browser persistence regression. Only this run's disposable projects are written.
+// Keep deliberate future dates with explicit constraints; ASAP save alignment has its own browser regression.
 const assert = require('node:assert/strict'), { randomUUID } = require('node:crypto');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const puppeteer = require('puppeteer');
@@ -50,7 +51,7 @@ async function main() {
   const unit=precision==='minute'?60:1440, at=n=>new Date(Date.UTC(2030,0,1,precision==='minute'?9:0)+n*unit*60000).toISOString().slice(0,19);
   const project=await api('/projects','POST',{name:`同步布局验收-${precision}-${randomUUID().slice(0,8)}`,time_granularity:precision,status_date:at(0),planning_status:'draft',use_template:false});projects.push(project.id);
   const a=randomUUID(),b=randomUUID();
-  await api(`/tasks/${project.id}`,'POST',[a,b].map((id,i)=>({id,task_code:String(i+1),name:`任务 ${i?'B':'A'}`,order_index:i,start_date:at(0),end_date:at(1),duration:unit,duration_unit:precision,auto_schedule:true,constraint_type:'asap'})));
+  await api(`/tasks/${project.id}`,'POST',[a,b].map((id,i)=>({id,task_code:String(i+1),name:`任务 ${i?'B':'A'}`,order_index:i,start_date:at(0),end_date:at(1),duration:unit,duration_unit:precision,auto_schedule:true,constraint_type:'startnoearlierthan',constraint_date:at(0)})));
   const response=await fetch(`${base}/api/tasks/${project.id}?save_state=1`,{headers:{Authorization:`Bearer ${token}`}}),etag=response.headers.get('etag');assert.match(etag,/^(?:W\/)?"[a-f0-9]{64}"$/);
   const conditional=await fetch(response.url,{headers:{Authorization:`Bearer ${token}`,'If-None-Match':etag}});assert.equal(conditional.status,304);assert.equal(await conditional.text(),'');
   const weakTag=etag.startsWith('W/')?etag:`W/${etag}`;assert.equal((await fetch(response.url,{headers:{Authorization:`Bearer ${token}`,'If-None-Match':weakTag}})).status,304);

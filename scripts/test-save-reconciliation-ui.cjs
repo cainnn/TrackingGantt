@@ -1,4 +1,5 @@
 // Real API + browser persistence regression. Only this run's disposable projects are written.
+// Keep deliberate future dates with explicit constraints; ASAP save alignment has its own browser regression.
 const assert = require('node:assert/strict'), { randomUUID } = require('node:crypto');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const puppeteer = require('puppeteer');
@@ -46,7 +47,7 @@ async function main(){
   const minute=precision==='minute',unit=minute?60:1440,at=n=>new Date(Date.UTC(2030,0,1,minute?9:0)+n*unit*60000).toISOString().slice(0,19);
   const project=await api('/projects','POST',{name:`冲突核对验收-${precision}-${randomUUID().slice(0,8)}`,time_granularity:precision,status_date:at(0),planning_status:'draft',use_template:false});projects.push(project.id);
   const ids={a:randomUUID(),b:randomUUID(),x:randomUUID()};
-  const make=(key,name,order)=>({id:ids[key],task_code:String(order+1),name,parent_id:null,order_index:order,start_date:at(0),end_date:at(1),duration:unit,duration_unit:precision,auto_schedule:true,constraint_type:'asap'});
+  const make=(key,name,order)=>({id:ids[key],task_code:String(order+1),name,parent_id:null,order_index:order,start_date:at(0),end_date:at(1),duration:unit,duration_unit:precision,auto_schedule:true,constraint_type:'startnoearlierthan',constraint_date:at(0)});
   await api(`/tasks/${project.id}`,'POST',[make('a','任务 A',0),make('b','任务 B',1)]);
   await api(`/projects/${project.id}/view-preferences`,'PUT',{revision:0,views:[],currentView:{id:'current',name:'冲突验收',search:'',columns:['assignee','start','end','duration'],colW:minute?480:28,critical:false,indicators:{deadlineDate:true,constraintDate:true},chart:{expanded:{},filters:{},sortCol:null,sortDir:null,widths:{},nameWidth:180,panelWidth:900,panelCollapsed:false,rightCollapsed:false,centerTime:new Date(`${at(0)}+08:00`).getTime(),scrollTop:0}}});
   await open(project);await editName(ids.a,'我的 A');await api(`/tasks/${project.id}`,'PUT',[{id:ids.a,assignee:'后台责任人'},{id:ids.b,name:'后台 B'}]);await api(`/tasks/${project.id}`,'POST',[make('x','后台新增 X',2)]);
