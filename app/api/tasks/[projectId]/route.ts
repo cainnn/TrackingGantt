@@ -111,7 +111,9 @@ export async function GET(req: NextRequest, { params }: Params) {
       const state = await readPlanState(client, projectId)
       await client.query('COMMIT')
       const headers = { 'Cache-Control': 'no-store', ETag: `"${state.revision}"` }
-      if (req.headers.get('if-none-match') === headers.ETag) return new NextResponse(null, { status: 304, headers })
+      // A reverse proxy may weaken an ETag when compressing the response.
+      const unchanged = req.headers.get('if-none-match')?.split(',').some(tag => tag.trim() === '*' || tag.trim().replace(/^W\//, '') === headers.ETag)
+      if (unchanged) return new NextResponse(null, { status: 304, headers })
       return NextResponse.json(success(state), { headers })
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
