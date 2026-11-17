@@ -1,5 +1,6 @@
 import type { Task, Dependency } from '../types'
-import { addMinutesStr, diffMinutesStr, toDateTimeStr } from './clientTime'
+import { addMinutesStr, toDateTimeStr } from './clientTime'
+import { scheduleDurationMinutes } from './clientTaskEdit'
 import { runFullCascade, snapTaskUpdatesToDayLevel } from './clientScheduling'
 import { getNowYmdHm, getTodayYmd } from './statusDatePolicy'
 
@@ -33,7 +34,8 @@ export function planScheduleCollapse(
     ? reason.removedDependencies.filter(effective).map(d => d.to_task_id)
     : [...byId.values()].filter(t => !hasIncoming.has(t.id) && !summaries.has(t.id) && !inactive(t.id) && t.auto_schedule !== false
       && (!t.constraint_type || ['asap', 'none'].includes(t.constraint_type))
-      && t.start_date && t.end_date && toDateTimeStr(t.start_date)! > anchor && diffMinutesStr(t.start_date, t.end_date) >= 0).map(t => t.id))
+      && toDateTimeStr(t.start_date)! > anchor && scheduleDurationMinutes(t.start_date, t.end_date, !!options.isMinute) != null
+      && scheduleDurationMinutes(t.start_date, t.end_date, !!options.isMinute)! >= 0).map(t => t.id))
   const successors = new Map<string, string[]>()
   for (const d of activeDeps) successors.set(d.from_task_id, [...(successors.get(d.from_task_id) ?? []), d.to_task_id])
   const affected = new Set<string>()
@@ -51,7 +53,7 @@ export function planScheduleCollapse(
     if (!affected.has(task.id) || !lostIncoming.has(task.id) || hasIncoming.has(task.id) || summaries.has(task.id)
       || !task.start_date || !task.end_date || toDateTimeStr(task.start_date)! <= anchor) return task
     // Unlinked future work can start at the anchor; never postpone an existing start.
-    const duration = task.is_milestone ? 0 : Math.max(0, diffMinutesStr(task.start_date, task.end_date))
+    const duration = task.is_milestone ? 0 : Math.max(0, scheduleDurationMinutes(task.start_date, task.end_date, !!options.isMinute) ?? 0)
     return { ...task, start_date: anchor, end_date: addMinutesStr(anchor, duration), duration }
   })
   // Summary rollups happen after dependencies. Feed their new dates back into successors,

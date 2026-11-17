@@ -98,28 +98,28 @@ async function main() {
   await loginAndOpen();
   const initial = await state(), line = await page.$eval('[data-status-date-handle="body"]', element => element.getAttribute('aria-valuetext'));
   assert.equal(await page.$eval('[data-action="save-plan"]', button => button.disabled), true);
-  await openCheck(); await previewIds([summary, child, root, successor]);
-  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(today) && element.textContent.includes('发现 2 个待修复任务'), today));
+  await openCheck(); await previewIds([summary, child, root, successor, none, disabledDep]);
+  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(today) && element.textContent.includes('发现 4 个待修复任务'), today));
   await page.screenshot({ path: path.join(output, 'day-preview.png'), fullPage: true });
   await click('取消', dialog); assert.deepEqual(await state(), initial); assert.equal(report.writes.length, 0);
-  pass('全项目检查只命中自动、尽早、无前置且未来开始的任务，预览含摘要/后续联动；取消不修改后台');
+  pass('全项目检查命中自动、尽早或无、无有效前置且未来开始的任务，预览含摘要/后续联动；取消不修改后台');
 
-  await openCheck(); await click('修复 2 个任务', dialog); await page.waitForSelector(dialog, { hidden: true });
+  await openCheck(); await click('修复 4 个任务', dialog); await page.waitForSelector(dialog, { hidden: true });
   await openCheck(); await previewIds([]); assert.ok(await page.$eval(dialog, element => element.textContent.includes('没有需要修复的任务'))); await click('取消', dialog);
-  await page.click('button[title^="撤销"]'); await openCheck(); await previewIds([summary, child, root, successor]); await click('取消', dialog);
+  await page.click('button[title^="撤销"]'); await openCheck(); await previewIds([summary, child, root, successor, none, disabledDep]); await click('取消', dialog);
   await page.click('button[title^="重做"]'); assert.equal(report.writes.length, 0); assert.deepEqual(await state(), initial);
   assert.equal(await page.$eval('[data-status-date-handle="body"]', element => element.getAttribute('aria-valuetext')), line);
   pass('修复含全部联动可一步撤销/重做，修复前后未写库，状态日期线不变，重复检查无待修复项');
 
   await click('保存', '[data-toolbar-row="progress"]'); await saved(); assert.equal(await page.$(review), null);
   const persisted = await state();
-  for (const id of [root, child]) {
+  for (const id of [root, child, none, disabledDep]) {
     const task = persisted.tasks.find(task => task.id === id);
     assert.equal(normalized(task.start_date), `${today}T00:00`); assert.equal(normalized(task.end_date), `${day(2)}T00:00`);
     assert.equal(task.duration, 2880); assert.equal(task.auto_schedule, true);
   }
   assert.equal(normalized(persisted.tasks.find(task => task.id === successor).start_date), `${day(2)}T00:00`);
-  const changedIds = new Set([summary, child, root, successor]);
+  const changedIds = new Set([summary, child, root, successor, none, disabledDep]);
   for (const before of initial.tasks.filter(task => !changedIds.has(task.id))) assert.deepEqual(persisted.tasks.find(task => task.id === before.id), before);
   assert.equal((await versions()).length, 0);
   await reload(); await saved(); await openCheck(); await previewIds([]); await click('取消', dialog);
@@ -129,7 +129,7 @@ async function main() {
   // Restore only the fixture dates to exercise the stable review path.
   await api(`/tasks/${project.id}`, 'PUT', tasks);
   await reload(); await page.select('select[aria-label="计划状态"]', 'stable');
-  await openCheck(); await click('修复 2 个任务', dialog); await click('确认变更'); await page.waitForSelector(review);
+  await openCheck(); await click('修复 4 个任务', dialog); await click('确认变更'); await page.waitForSelector(review);
   assert.equal(await page.$eval(review, element => [...element.querySelectorAll('button')].find(button => button.textContent.trim() === '确认并保存').disabled), true);
   const reasons = await page.$$(`${review} textarea[aria-required=true]`); assert.ok(reasons.length >= 2);
   for (const reason of reasons) await reason.type('检查发现无前置任务，按今天启动计划');
@@ -149,14 +149,15 @@ async function main() {
   clicks += await page.evaluate(() => window.__trustedClicks);
   await page.goto(`${base}/projects/${project.id}`, { waitUntil: 'networkidle2' }); await waitForProject(); await saved();
   await openCheck(); await previewIds([minuteId]);
-  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(`${today} 23:30`) && element.textContent.includes('保留原来的时分'), today));
+  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(today) && element.textContent.includes('分钟级任务对齐到上方时间'), today));
   await page.screenshot({ path: path.join(output, 'minute-preview.png'), fullPage: true });
+  const minuteAnchor = await page.$eval(`${dialog} [data-repair-task] td:nth-child(4)`, element => element.textContent.trim().replace(' ', 'T'));
   await click('修复 1 个任务', dialog); await click('保存', '[data-toolbar-row="progress"]'); await saved();
   const minute = (await state()).tasks[0];
-  assert.equal(normalized(minute.start_date), `${today}T23:30`); assert.equal(normalized(minute.end_date), `${day(1)}T01:05`); assert.equal(minute.duration, 95);
+  assert.equal(normalized(minute.start_date), minuteAnchor); assert.equal((Date.parse(`${normalized(minute.end_date)}Z`) - Date.parse(`${minuteAnchor}Z`)) / 60000, 95); assert.equal(minute.duration, 95);
   await reload(); await saved(); await openCheck(); await previewIds([]); await click('取消', dialog);
-  assert.equal(normalized((await state()).tasks[0].start_date), `${today}T23:30`); assert.equal((await versions()).length, 0);
-  pass('分钟级保留时分和 95 分钟工期；无状态日期、项目开始在未来时，修复保存后刷新仍保持当天');
+  assert.equal(normalized((await state()).tasks[0].start_date), minuteAnchor); assert.equal((await versions()).length, 0);
+  pass('分钟级对齐预览时间并保留 95 分钟工期；无状态日期、项目开始在未来时，修复保存后刷新仍保持当天');
   for (const granularity of ['day', 'minute']) {
     const minuteMode = granularity === 'minute';
     await makeProject(granularity, minuteMode ? null : date(10), day(-10));

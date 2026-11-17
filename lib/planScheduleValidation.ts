@@ -1,10 +1,11 @@
 import type { Task, Dependency } from '../types'
 import { addMinutesStr, toDateTimeStr } from './clientTime'
 import { activeScheduleTasks } from './scheduleAnalysis'
+import { planUnlinkedTaskStarts } from './unlinkedTaskSchedule'
 
 export interface ScheduleIssue {
   id: string
-  kind: 'dependency' | 'constraint' | 'dates' | 'missing' | 'cycle' | 'deadline'
+  kind: 'dependency' | 'constraint' | 'dates' | 'missing' | 'cycle' | 'deadline' | 'unlinked-start'
   severity: 'error' | 'warning'
   taskId: string
   relatedTaskId?: string
@@ -14,7 +15,7 @@ export interface ScheduleIssue {
 }
 
 /** The panel and save gate share exactly the same blocking rules. */
-export function getPlanScheduleIssues(tasks: Task[], dependencies: Dependency[]): ScheduleIssue[] {
+export function getPlanScheduleIssues(tasks: Task[], dependencies: Dependency[], options: { isMinute?: boolean; anchorDate?: string } = {}): ScheduleIssue[] {
   const all = new Map(tasks.filter(t => !t.is_deleted).map(t => [t.id, t]))
   const byId = new Map(activeScheduleTasks(tasks).map(t => [t.id, t]))
   const summaries = new Set([...all.values()].map(t => t.parent_id).filter(Boolean))
@@ -76,6 +77,16 @@ export function getPlanScheduleIssues(tasks: Task[], dependencies: Dependency[])
   for (let i = 0; i < queue.length; i++) for (const to of outgoing.get(queue[i]) ?? []) { degree.set(to, degree.get(to)! - 1); if (!degree.get(to)) queue.push(to) }
   for (const [id, n] of degree) if (n) issues.push({ id: `cycle:${id}`, kind: 'cycle', severity: 'error', taskId: id,
     message: `「${byId.get(id)!.name}」存在循环依赖或受循环阻塞`, detail: '请检查前置链并移除循环关系。' })
+  // Saved dates are not proof of a valid ASAP schedule. Inspect the whole plan,
+  // using the same proposal as save and repair, regardless of draft changes.
+  const alignment = planUnlinkedTaskStarts(tasks, dependencies, options)
+  const format = (value: string | null) => toDateTimeStr(value)?.slice(0, options.isMinute ? 16 : 10).replace('T', ' ') ?? '—'
+  for (const id of alignment.directTaskIds) {
+    const task = byId.get(id)!
+    issues.push({ id: `unlinked-start:${id}`, kind: 'unlinked-start', severity: 'warning', taskId: id,
+      message: `「${task.name}」未按尽早开始规则排程`,
+      detail: `任务为自动排程，限制为“${task.constraint_type === 'asap' ? '尽早' : '无'}”，没有有效前置任务；当前开始 ${format(task.start_date)}，应提前至 ${format(alignment.anchor)}。可预览修复；如需保留未来日期，请设置手动排程或日期限制。` })
+  }
   return issues
 }
 

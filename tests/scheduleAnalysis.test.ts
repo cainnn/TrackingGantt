@@ -32,7 +32,7 @@ test('all four dependency types use the appropriate event endpoints with signed 
     const result = analyzeSchedule(tasks, [dep('a', 'b', type, lag)], date(300))
     assert.equal(result.tasks.get('a')?.totalSlack, Math.min(140, 170 - weight))
     assert.equal(result.tasks.get('b')?.totalSlack, 170 - weight)
-    assert.equal(getPlanScheduleIssues(tasks, [dep('a', 'b', type, lag)]).length, 0)
+    assert.equal(getPlanScheduleIssues(tasks, [dep('a', 'b', type, lag)], { anchorDate: date(100), isMinute: true }).length, 0)
   }
 })
 

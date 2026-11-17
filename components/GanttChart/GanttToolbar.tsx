@@ -1796,6 +1796,9 @@ export default function GanttToolbar({
           <button className="text-blue-600 hover:underline" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>
         </div>}
         <button type="button" onClick={() => setScheduleIssuesOpen(true)} className="h-8 whitespace-nowrap rounded border border-gray-300 bg-white px-2.5 text-[13px] text-gray-700 hover:bg-gray-50">排程检查</button>
+        {!readOnly && !viewSnapshot && <button type="button" data-action="repair-schedule" disabled={history.saving || history.uncertain}
+          title="预览并修复无有效前置任务的尽早排程，保留历史开始日期" onClick={() => setTaskRepairOpen(true)}
+          className="h-8 whitespace-nowrap rounded border border-blue-300 bg-white px-2.5 text-[13px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">修复排程</button>}
         {onToggleImpact && <button type="button" aria-expanded={impactOpen} aria-controls="schedule-impact-panel" onClick={onToggleImpact}
           className={`h-8 whitespace-nowrap rounded border px-2.5 text-[13px] ${impactOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>影响预览</button>}
         {!viewSnapshot && currentProject?.plan_baseline && <button type="button" aria-label="显示固定基线" title={`固定基线：${currentProject.plan_baseline.sourceVersionName}；偏差列始终以此为准`}
@@ -2207,6 +2210,8 @@ export default function GanttToolbar({
       {bulkEditOpen && !readOnly && <BulkEditPanel onClose={() => setBulkEditOpen(false)} />}
       {taskRepairOpen && !readOnly && <TaskRepairPanel tasks={getFlatOrder(tasks.filter(task => !task.is_deleted))} onClose={() => setTaskRepairOpen(false)} />}
       {scheduleIssuesOpen && <ScheduleIssuesPanel tasks={viewSnapshot?.tasks ?? tasks} dependencies={viewSnapshot?.dependencies ?? dependencies} projectFinish={viewSnapshot ? null : currentProject?.end_date}
+        isMinute={isMinute}
+        onRepair={!readOnly && !viewSnapshot && !history.saving && !history.uncertain ? () => { setScheduleIssuesOpen(false); setTaskRepairOpen(true) } : undefined}
         onClose={() => setScheduleIssuesOpen(false)}
         onLocate={id => { dispatch(setSelectedIds([id])); onSearchChange(''); onExpandAll?.(); onFocusTask?.(); setScheduleIssuesOpen(false) }}
         onEdit={!readOnly && !history.saving ? id => { dispatch(setSelectedIds([id])); setScheduleIssuesOpen(false); setEditModalOpen(true) } : undefined}

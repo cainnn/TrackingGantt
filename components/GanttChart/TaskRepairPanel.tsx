@@ -7,8 +7,9 @@ import { labelDraftStep } from '@/store/draftHistory'
 import { markDirty, setEditDescription, updateTasks } from '@/store/slices/tasksSlice'
 import { buildTaskRepair } from '@/lib/clientTaskRepair'
 import { toDateTimeStr } from '@/lib/clientTime'
+import { getNowYmdHm, getTodayYmd } from '@/lib/statusDatePolicy'
 
-const today = () => toDateTimeStr(new Date())!.slice(0, 10)
+const repairAnchor = (isMinute: boolean) => isMinute ? `${getNowYmdHm()}:00` : `${getTodayYmd()}T00:00:00`
 const PAGE_SIZE = 100
 
 export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onClose: () => void }) {
@@ -17,7 +18,7 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
   const project = useAppSelector(state => state.project.currentProject)
   const history = useAppSelector(state => state.draft)
   const isMinute = project?.time_granularity === 'minute'
-  const [date, setDate] = useState(today)
+  const [date, setDate] = useState(() => repairAnchor(isMinute))
   const [page, setPage] = useState(0)
   const [notice, setNotice] = useState('')
   const dialog = useRef<HTMLDivElement>(null)
@@ -36,15 +37,15 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
   }, [])
   const apply = () => {
     if (!project || history.saving || history.uncertain) return
-    const currentDate = today()
-    if (date !== currentDate) {
+    const currentDate = repairAnchor(isMinute)
+    if (date.slice(0, 10) !== currentDate.slice(0, 10)) {
       setDate(currentDate); setPage(0); setNotice('日期已变化，已重新检查，请核对后执行修复。'); return
     }
     if (!plan.repairedIds.length) return
-    dispatch(labelDraftStep('修复自动任务开始日期'))
+    dispatch(labelDraftStep({ label: '修复自动任务开始日期', directTaskIds: plan.repairedIds }))
     dispatch(updateTasks(plan.updates))
     dispatch(markDirty(plan.repairedIds))
-    for (const taskId of plan.repairedIds) dispatch(setEditDescription({ taskId, description: `任务检查：将无前置任务的自动尽早任务提前至 ${date}` }))
+    for (const taskId of plan.repairedIds) dispatch(setEditDescription({ taskId, description: `任务检查：将无有效前置任务的自动尽早任务提前至 ${format(date)}` }))
     onClose()
   }
   return <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/40 p-4">
@@ -64,8 +65,8 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
         <button aria-label="关闭任务检查" onClick={onClose} className="rounded px-2 py-1 text-xl text-gray-500 hover:bg-gray-100">×</button>
       </div>
       <div className="space-y-2 px-6 py-4 text-gray-600">
-        <p>检查整个项目：将<strong className="font-medium text-gray-900">自动排程、限制为“尽早（越早越好）”、没有前置任务</strong>且开始日期晚于今天的任务，提前到 <strong className="text-blue-700">{date}</strong>。</p>
-        <p className="text-xs">工期保持不变{isMinute ? '，分钟级任务保留原来的时分' : ''}。已开始、无效任务不调整；摘要任务随子任务汇总，自动后续任务按依赖和限制联动。</p>
+        <p>检查整个项目，包括已保存的任务：将<strong className="font-medium text-gray-900">自动排程、限制为“尽早”或“无”、没有有效前置任务</strong>且开始时间晚于{isMinute ? '当前时间' : '今天'}的任务，提前到 <strong className="text-blue-700">{format(date)}</strong>。</p>
+        <p className="text-xs">工期保持不变{isMinute ? '，分钟级任务对齐到上方时间' : ''}。开始日期早于今天的任务保留原排程；已开始、无效任务不调整。摘要任务随子任务汇总，自动后续任务按依赖和限制联动。</p>
       </div>
       {rows.length ? <>
         <p className="mx-6 mb-3 rounded-lg bg-blue-50 px-3 py-2 text-blue-800">发现 {plan.repairedIds.length} 个待修复任务，另有 {rows.length - plan.repairedIds.length} 个任务联动调整。</p>
@@ -76,7 +77,7 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
             </tr></thead>
             <tbody>{rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map(({ before, after, number }) => <tr key={before.id} data-repair-task={before.id} className="border-t border-gray-100">
               <td className="max-w-64 px-4 py-3"><span className="mr-2 text-gray-400">#{number}</span>{before.name}</td>
-              <td className="whitespace-nowrap px-4 py-3 text-gray-500">{direct.has(before.id) ? '提前至今天' : '自动联动'}</td>
+              <td className="whitespace-nowrap px-4 py-3 text-gray-500">{direct.has(before.id) ? isMinute ? '提前至当前时间' : '提前至今天' : '自动联动'}</td>
               <td className="whitespace-nowrap px-4 py-3 text-gray-500">{format(before.start_date)}</td>
               <td className="whitespace-nowrap px-4 py-3 text-blue-700">{format(after!.start_date)}</td>
               <td className="whitespace-nowrap px-4 py-3 text-gray-500">{format(before.end_date)}</td>

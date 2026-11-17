@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { configureStore } from '@reduxjs/toolkit'
 import type { Dependency, Task } from '../types'
 import { buildTaskRepair } from '../lib/clientTaskRepair'
+import { getPlanScheduleIssues } from '../lib/planScheduleValidation'
+import { planUnlinkedTaskStarts } from '../lib/unlinkedTaskSchedule'
 import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, snapshotDraft, labelDraftStep, undoDraft, redoDraft, hasDraftChanges } from '../store/draftHistory'
 import { markDirty, setTasks, updateTasks } from '../store/slices/tasksSlice'
@@ -20,7 +22,44 @@ const dep = (from: string, to: string, patch: Partial<Dependency> = {}): Depende
 const apply = (tasks: Task[], updates: Task[]) => tasks.map(task => updates.find(update => update.id === task.id) ?? task)
 const repairDay = '2026-11-08'
 
-test('repair only advances future automatic ASAP leaf tasks without any configured predecessor', () => {
+for (const isMinute of [false, true]) test(`saved plans with no draft changes still expose ASAP problems, preserving historical starts (${isMinute})`, () => {
+  const anchorDate = isMinute ? `${repairDay}T09:17:00` : `${repairDay}T00:00:00`
+  const tasks = [task('parent'), task('future', { parent_id: 'parent' }),
+    task('past', { start_date: '2026-11-07T23:30:00', end_date: '2026-11-21T01:05:00' }),
+    task('none', { constraint_type: 'none' }), task('manual', { auto_schedule: false }),
+    task('fixed', { constraint_type: 'muststarton', constraint_date: '2026-11-20' }),
+    task('inactive', { inactive: true }), task('disabled-link'), task('inactive-source-link'),
+    task('deleted', { is_deleted: true }), task('deleted-source-link'), task('successor'),
+    task('past-successor', { start_date: '2026-11-07T00:00:00', end_date: '2026-11-09T00:00:00' }),
+    task('inactive-child', { parent_id: 'inactive' })].filter(task => !task.is_deleted)
+  const dependencies = [dep('parent', 'future'), dep('manual', 'disabled-link', { active: false }),
+    dep('inactive', 'inactive-source-link'), dep('deleted', 'deleted-source-link'), dep('future', 'successor')]
+  const store = configureStore({ reducer: rootReducer, middleware: get => get().concat(createDraftMiddleware()) })
+  store.dispatch(setCurrentProject({ id: 'p', user_id: 'u', name: 'Saved plan', start_date: '2026-12-01', end_date: null, status_date: '2026-12-01', planning_status: 'stable', created_at: '' }))
+  store.dispatch(setTasks({ tasks, dependencies }))
+  const baseline = snapshotDraft(store.getState())
+  store.dispatch(initializeDraft({ projectId: 'p', baseline }))
+  assert.equal(hasDraftChanges(store.getState()), false)
+  const options = { anchorDate, isMinute }
+  const issues = getPlanScheduleIssues(baseline.tasks, dependencies, options).filter(issue => issue.kind === 'unlinked-start')
+  const expected = ['future', 'none', 'disabled-link', 'inactive-source-link', 'deleted-source-link']
+  assert.deepEqual(issues.map(issue => issue.taskId), expected)
+  assert.ok(issues.every(issue => issue.detail.includes('没有有效前置任务') && issue.detail.includes(repairDay)))
+  const repair = buildTaskRepair(baseline.tasks, dependencies, anchorDate, isMinute)
+  const saving = planUnlinkedTaskStarts(baseline.tasks, dependencies, options)
+  assert.deepEqual(repair.repairedIds, expected)
+  assert.deepEqual(repair.updates, saving.updatedTasks)
+  assert.deepEqual(snapshotDraft(store.getState()), baseline, 'checking never modifies the saved plan')
+  const repaired = apply(baseline.tasks, repair.updates)
+  assert.deepEqual(repaired.find(t => t.id === 'past'), tasks[2], 'a historical start with future finish stays intact')
+  assert.deepEqual(repaired.find(t => t.id === 'past-successor'), tasks.find(t => t.id === 'past-successor'))
+  for (const id of expected) assert.equal(repaired.find(t => t.id === id)?.start_date, anchorDate)
+  const reloaded = JSON.parse(JSON.stringify(repaired)) as Task[]
+  assert.deepEqual(getPlanScheduleIssues(reloaded, dependencies, options).filter(issue => issue.kind === 'unlinked-start'), [])
+  assert.deepEqual(buildTaskRepair(reloaded, dependencies, anchorDate, isMinute).updates, [])
+})
+
+test('repair advances future automatic ASAP or unconstrained leaves without effective predecessors', () => {
   const tasks = [task('repair'), task('manual', { auto_schedule: false }), task('none', { constraint_type: 'none' }),
     task('alap', { constraint_type: 'alap' }), task('fixed', { constraint_type: 'muststarton', constraint_date: '2026-11-20' }),
     task('predecessor'), task('disabled-predecessor'), task('inactive', { inactive: true }), task('deleted', { is_deleted: true }),
@@ -30,8 +69,8 @@ test('repair only advances future automatic ASAP leaf tasks without any configur
   const dependencies = [dep('manual', 'predecessor'), dep('manual', 'disabled-predecessor', { active: false })]
   const copy = structuredClone(tasks)
   const result = buildTaskRepair(tasks, dependencies, repairDay)
-  assert.deepEqual(result.repairedIds, ['repair'])
-  assert.deepEqual(result.updates, [{ ...tasks[0], start_date: '2026-11-08T00:00:00', end_date: '2026-11-10T00:00:00' }])
+  assert.deepEqual(result.repairedIds, ['repair', 'none', 'disabled-predecessor'])
+  assert.deepEqual(result.updates, [tasks[0], tasks[2], tasks[6]].map(task => ({ ...task, start_date: '2026-11-08T00:00:00', end_date: '2026-11-10T00:00:00' })))
   assert.deepEqual(tasks, copy)
 })
 
@@ -53,15 +92,15 @@ test('day repair preserves calendar duration across daylight saving changes', ()
   } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous }
 })
 
-test('minute tasks retain time of day and duration; milestones remain zero length', () => {
+test('minute repairs match save alignment, retain duration and preserve starts before the anchor', () => {
   const result = buildTaskRepair([
     task('minute', { start_date: '2026-11-20T23:30:00', end_date: '2026-11-21T01:05:00', duration: 95, duration_unit: 'minute' }),
     task('milestone', { start_date: '2026-11-20T09:15:00', end_date: '2026-11-20T09:15:00', duration: 0, is_milestone: true }),
-    task('same-day', { start_date: '2026-11-08T23:30:00', end_date: '2026-11-09T01:05:00', duration: 95 }),
-  ], [], repairDay, true)
+    task('same-day', { start_date: '2026-11-08T08:00:00', end_date: '2026-11-08T09:35:00', duration: 95 }),
+  ], [], `${repairDay}T09:17:00`, true)
   assert.deepEqual(result.repairedIds, ['minute', 'milestone'])
-  assert.equal(result.updates[0].start_date, '2026-11-08T23:30:00')
-  assert.equal(result.updates[0].end_date, '2026-11-09T01:05:00')
+  assert.equal(result.updates[0].start_date, '2026-11-08T09:17:00')
+  assert.equal(result.updates[0].end_date, '2026-11-08T10:52:00')
   assert.equal(result.updates[0].duration, 95)
   assert.equal(result.updates[1].start_date, result.updates[1].end_date)
   assert.equal(result.updates[1].duration, 0)
