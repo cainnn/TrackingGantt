@@ -20,8 +20,8 @@ export default function ScheduleIssuesPanel({ tasks, dependencies, onClose, onLo
     <section role="dialog" aria-modal="true" aria-label="排程检查" className="flex h-full w-[480px] max-w-full flex-col bg-white shadow-xl">
       <div className="border-b p-4"><div className="flex items-center justify-between"><h2 className="font-semibold">排程检查</h2><button autoFocus aria-label="关闭排程检查" onClick={onClose}>关闭</button></div>
         <p className="mt-2 text-sm text-gray-600">{errors} 项冲突，{issues.length - errors} 项提醒。修改后自动重新检查。</p>
-        <p className="mt-1 text-xs text-gray-500">已保存的任务也会检查排程规则；历史开始日期保持不变。手动任务不随前置自动调整；截止日期提醒不阻止保存。修复后仍需通过顶部保存。</p>
-        {onRepair && issues.some(issue => issue.kind === 'unlinked-start') && <button onClick={onRepair} className="mt-2 rounded border border-blue-300 px-3 py-1 text-sm text-blue-700">预览修复尽早任务</button>}
+        <p className="mt-1 text-xs text-gray-500">已保存的任务也会检查排程规则。有有效前置时优先按依赖排程，无前置的历史开始日期保持不变。手动任务不随前置自动调整；截止日期提醒不阻止保存。修复后仍需通过顶部保存。</p>
+        {onRepair && issues.some(issue => ['unlinked-start', 'dependency-schedule', 'dependency'].includes(issue.kind)) && <button onClick={onRepair} className="mt-2 rounded border border-blue-300 px-3 py-1 text-sm text-blue-700">预览修复尽早任务</button>}
         {onUndo && <button onClick={onUndo} className="mt-2 rounded border px-3 py-1 text-sm">撤销上一步</button>}
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-4">

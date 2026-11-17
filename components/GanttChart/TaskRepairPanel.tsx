@@ -24,6 +24,7 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
   const dialog = useRef<HTMLDivElement>(null)
   const plan = useMemo(() => buildTaskRepair(tasks, dependencies, date, isMinute), [tasks, dependencies, date, isMinute])
   const direct = new Set(plan.repairedIds)
+  const dependencyRepairs = new Set(plan.dependencyTaskIds)
   const changed = new Map(plan.updates.map(task => [task.id, task]))
   const rows = tasks.map((task, index) => ({ before: task, after: changed.get(task.id), number: index + 1 }))
     .filter(row => row.after)
@@ -45,7 +46,9 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
     dispatch(labelDraftStep({ label: '修复自动任务开始日期', directTaskIds: plan.repairedIds }))
     dispatch(updateTasks(plan.updates))
     dispatch(markDirty(plan.repairedIds))
-    for (const taskId of plan.repairedIds) dispatch(setEditDescription({ taskId, description: `任务检查：将无有效前置任务的自动尽早任务提前至 ${format(date)}` }))
+    for (const taskId of plan.repairedIds) dispatch(setEditDescription({ taskId, description: dependencyRepairs.has(taskId)
+      ? `任务检查：按有效前置依赖与间隔修复排程，开始时间调整为 ${format(changed.get(taskId)!.start_date)}`
+      : `任务检查：将无有效前置任务的自动尽早任务提前至 ${format(date)}` }))
     onClose()
   }
   return <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/40 p-4">
@@ -66,7 +69,8 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
       </div>
       <div className="space-y-2 px-6 py-4 text-gray-600">
         <p>检查整个项目，包括已保存的任务：将<strong className="font-medium text-gray-900">自动排程、限制为“尽早”或“无”、没有有效前置任务</strong>且开始时间晚于{isMinute ? '当前时间' : '今天'}的任务，提前到 <strong className="text-blue-700">{format(date)}</strong>。</p>
-        <p className="text-xs">工期保持不变{isMinute ? '，分钟级任务对齐到上方时间' : ''}。开始日期早于今天的任务保留原排程；已开始、无效任务不调整。摘要任务随子任务汇总，自动后续任务按依赖和限制联动。</p>
+        <p>有有效前置的自动尽早任务，优先按依赖类型和间隔修复；即使开始日期早于今天，也按依赖衔接，不改到今天。</p>
+        <p className="text-xs">工期保持不变{isMinute ? '，无前置的未来任务对齐到上方时间' : ''}。没有有效前置且已开始的任务保留原日期；手动、无效任务不直接调整。摘要任务随子任务汇总，后续任务遵循依赖和日期限制。</p>
       </div>
       {rows.length ? <>
         <p className="mx-6 mb-3 rounded-lg bg-blue-50 px-3 py-2 text-blue-800">发现 {plan.repairedIds.length} 个待修复任务，另有 {rows.length - plan.repairedIds.length} 个任务联动调整。</p>
@@ -77,7 +81,7 @@ export default function TaskRepairPanel({ tasks, onClose }: { tasks: Task[]; onC
             </tr></thead>
             <tbody>{rows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map(({ before, after, number }) => <tr key={before.id} data-repair-task={before.id} className="border-t border-gray-100">
               <td className="max-w-64 px-4 py-3"><span className="mr-2 text-gray-400">#{number}</span>{before.name}</td>
-              <td className="whitespace-nowrap px-4 py-3 text-gray-500">{direct.has(before.id) ? isMinute ? '提前至当前时间' : '提前至今天' : '自动联动'}</td>
+              <td className="whitespace-nowrap px-4 py-3 text-gray-500">{dependencyRepairs.has(before.id) ? '按前置依赖' : direct.has(before.id) ? isMinute ? '提前至当前时间' : '提前至今天' : '自动联动'}</td>
               <td className="whitespace-nowrap px-4 py-3 text-gray-500">{format(before.start_date)}</td>
               <td className="whitespace-nowrap px-4 py-3 text-blue-700">{format(after!.start_date)}</td>
               <td className="whitespace-nowrap px-4 py-3 text-gray-500">{format(before.end_date)}</td>

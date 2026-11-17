@@ -1797,7 +1797,7 @@ export default function GanttToolbar({
         </div>}
         <button type="button" onClick={() => setScheduleIssuesOpen(true)} className="h-8 whitespace-nowrap rounded border border-gray-300 bg-white px-2.5 text-[13px] text-gray-700 hover:bg-gray-50">排程检查</button>
         {!readOnly && !viewSnapshot && <button type="button" data-action="repair-schedule" disabled={history.saving || history.uncertain}
-          title="预览并修复无有效前置任务的尽早排程，保留历史开始日期" onClick={() => setTaskRepairOpen(true)}
+          title="优先按有效前置依赖修复；没有有效前置的历史开始日期保持不变" onClick={() => setTaskRepairOpen(true)}
           className="h-8 whitespace-nowrap rounded border border-blue-300 bg-white px-2.5 text-[13px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">修复排程</button>}
         {onToggleImpact && <button type="button" aria-expanded={impactOpen} aria-controls="schedule-impact-panel" onClick={onToggleImpact}
           className={`h-8 whitespace-nowrap rounded border px-2.5 text-[13px] ${impactOpen ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>影响预览</button>}

@@ -149,7 +149,7 @@ async function main() {
   clicks += await page.evaluate(() => window.__trustedClicks);
   await page.goto(`${base}/projects/${project.id}`, { waitUntil: 'networkidle2' }); await waitForProject(); await saved();
   await openCheck(); await previewIds([minuteId]);
-  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(today) && element.textContent.includes('分钟级任务对齐到上方时间'), today));
+  assert.ok(await page.$eval(dialog, (element, today) => element.textContent.includes(today) && element.textContent.includes('无前置的未来任务对齐到上方时间'), today));
   await page.screenshot({ path: path.join(output, 'minute-preview.png'), fullPage: true });
   const minuteAnchor = await page.$eval(`${dialog} [data-repair-task] td:nth-child(4)`, element => element.textContent.trim().replace(' ', 'T'));
   await click('修复 1 个任务', dialog); await click('保存', '[data-toolbar-row="progress"]'); await saved();

@@ -7,6 +7,7 @@
  */
 import type { Task, Dependency } from '@/types'
 import { toDateTimeStr, addMinutesStr, diffMinutesStr } from './clientTime'
+import { scheduleDurationMinutes } from './clientTaskEdit'
 
 // 调度内部使用分钟级时间戳；保留旧函数名以减少改动面，但语义改为分钟。
 const toTimeStr = toDateTimeStr
@@ -332,7 +333,9 @@ export function runFullCascade(
       if (!to?.start_date || !to?.end_date) continue
       if (to.auto_schedule === false) continue
 
-      const dur = Math.max(0, diffMinutes(to.start_date, to.end_date))
+      // Explicit day projects use calendar duration. Repeated FF/SF passes
+      // across a daylight-saving boundary must not keep growing the duration.
+      const dur = Math.max(0, scheduleDurationMinutes(to.start_date, to.end_date, opts.isMinute !== false) ?? 0)
 
       let maxRequired: string | null = null
       for (const dep of toDepList) {

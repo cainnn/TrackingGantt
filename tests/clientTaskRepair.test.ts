@@ -5,6 +5,7 @@ import type { Dependency, Task } from '../types'
 import { buildTaskRepair } from '../lib/clientTaskRepair'
 import { getPlanScheduleIssues } from '../lib/planScheduleValidation'
 import { planUnlinkedTaskStarts } from '../lib/unlinkedTaskSchedule'
+import { addMinutesStr } from '../lib/clientTime'
 import { buildSaveDiff } from '../lib/clientSave'
 import { createDraftMiddleware, rootReducer, initializeDraft, snapshotDraft, labelDraftStep, undoDraft, redoDraft, hasDraftChanges } from '../store/draftHistory'
 import { markDirty, setTasks, updateTasks } from '../store/slices/tasksSlice'
@@ -21,6 +22,58 @@ const dep = (from: string, to: string, patch: Partial<Dependency> = {}): Depende
 })
 const apply = (tasks: Task[], updates: Task[]) => tasks.map(task => updates.find(update => update.id === task.id) ?? task)
 const repairDay = '2026-11-08'
+
+for (const isMinute of [false, true]) test(`historical automatic successors follow all dependency types and lag, never today's floor (${isMinute})`, () => {
+  const start = isMinute ? '2026-11-01T09:15:00' : '2026-11-01T00:00:00'
+  const end = isMinute ? '2026-11-02T09:15:00' : '2026-11-02T00:00:00'
+  const duration = isMinute ? 95 : 2880
+  const bStart = isMinute ? '2026-11-05T11:00:00' : '2026-11-05T00:00:00'
+  const tasks = [task('A', { start_date: start, end_date: end, duration: 1440 }),
+    task('B', { start_date: bStart, end_date: addMinutesStr(bStart, duration), duration })]
+  for (const type of [0, 1, 2, 3]) for (const lag of [0, 1440]) {
+    const dependencies = [dep('A', 'B', { type, lag })]
+    const expected = addMinutesStr(type & 2 ? end : start, lag - (type & 1 ? duration : 0))
+    const result = buildTaskRepair(tasks, dependencies, '2026-11-15T09:17:00', isMinute)
+    assert.deepEqual(result.repairedIds, ['B'])
+    assert.deepEqual(result.dependencyTaskIds, ['B'])
+    assert.deepEqual(result.unlinkedTaskIds, [])
+    assert.equal(result.updates[0].start_date, expected, `type ${type}, lag ${lag}`)
+    assert.equal(result.updates[0].end_date, addMinutesStr(expected, duration))
+    assert.equal(result.updates[0].duration, duration)
+    const next = apply(tasks, result.updates)
+    assert.deepEqual(next[0], tasks[0])
+    assert.deepEqual(buildTaskRepair(next, dependencies, '2026-11-15T09:17:00', isMinute).updates, [])
+    const issues = getPlanScheduleIssues(tasks, dependencies, { anchorDate: '2026-11-15', isMinute })
+    assert.ok(issues.some(issue => issue.kind === 'dependency-schedule' && issue.taskId === 'B'))
+  }
+})
+
+test('historical dependency repair uses the latest predecessor, rolls up parents, and respects date limits and manual tasks', () => {
+  const tasks = [task('A', { start_date: '2026-11-01', end_date: '2026-11-02', duration: 1440 }),
+    task('other', { start_date: '2026-11-01', end_date: '2026-11-04', duration: 4320 }),
+    task('parent', { start_date: '2026-11-06', end_date: '2026-11-08' }),
+    task('B', { parent_id: 'parent', start_date: '2026-11-06', end_date: '2026-11-08' }),
+    task('C', { start_date: '2026-11-08', end_date: '2026-11-10' }),
+    task('limited', { start_date: '2026-11-07', end_date: '2026-11-09', constraint_type: 'startnoearlierthan', constraint_date: '2026-11-07' }),
+    task('manual', { auto_schedule: false, start_date: '2026-11-05', end_date: '2026-11-07' })]
+  const dependencies = [dep('A', 'B'), dep('other', 'B'), dep('parent', 'C'), dep('B', 'limited'), dep('B', 'manual')]
+  const result = buildTaskRepair(tasks, dependencies, '2026-11-15')
+  const next = apply(tasks, result.updates)
+  assert.equal(next[3].start_date, '2026-11-04T00:00:00')
+  assert.equal(next[2].start_date, '2026-11-04T00:00:00')
+  assert.equal(next[4].start_date, '2026-11-06T00:00:00')
+  assert.equal(next[5].start_date, tasks[5].start_date)
+  assert.deepEqual(next[6], tasks[6])
+  assert.deepEqual(buildTaskRepair(next, dependencies, '2026-11-15').updates, [])
+})
+
+test('disabled or inactive predecessors leave historical roots intact, and cyclic branches are not date-repaired', () => {
+  const tasks = ['A', 'B', 'C', 'D', 'inactive', 'child'].map(id => task(id, { start_date: '2026-11-01', end_date: '2026-11-03',
+    ...(id === 'inactive' ? { inactive: true } : id === 'child' ? { parent_id: 'inactive' } : {}) }))
+  const dependencies = [dep('A', 'B'), dep('B', 'A'), dep('A', 'C'), dep('B', 'D', { active: false }), dep('child', 'D')]
+  assert.deepEqual(buildTaskRepair(tasks, dependencies, '2026-11-15').updates, [])
+  assert.ok(getPlanScheduleIssues(tasks, dependencies, { anchorDate: '2026-11-15' }).some(issue => issue.kind === 'cycle'))
+})
 
 for (const isMinute of [false, true]) test(`saved plans with no draft changes still expose ASAP problems, preserving historical starts (${isMinute})`, () => {
   const anchorDate = isMinute ? `${repairDay}T09:17:00` : `${repairDay}T00:00:00`
@@ -69,8 +122,8 @@ test('repair advances future automatic ASAP or unconstrained leaves without effe
   const dependencies = [dep('manual', 'predecessor'), dep('manual', 'disabled-predecessor', { active: false })]
   const copy = structuredClone(tasks)
   const result = buildTaskRepair(tasks, dependencies, repairDay)
-  assert.deepEqual(result.repairedIds, ['repair', 'none', 'disabled-predecessor'])
-  assert.deepEqual(result.updates, [tasks[0], tasks[2], tasks[6]].map(task => ({ ...task, start_date: '2026-11-08T00:00:00', end_date: '2026-11-10T00:00:00' })))
+  assert.deepEqual(result.repairedIds, ['repair', 'none', 'disabled-predecessor', 'predecessor'])
+  assert.deepEqual(result.updates, [tasks[0], tasks[2], tasks[6]].map(task => ({ ...task, start_date: '2026-11-08T00:00:00', end_date: '2026-11-10T00:00:00' })).concat({ ...tasks[5], start_date: '2026-11-22T00:00:00', end_date: '2026-11-24T00:00:00', original_start_date: null, original_end_date: null }).sort((a, b) => tasks.findIndex(t => t.id === a.id) - tasks.findIndex(t => t.id === b.id)))
   assert.deepEqual(tasks, copy)
 })
 
@@ -112,10 +165,12 @@ test('automatic successors follow dependencies and constraints, while manual and
   const dependencies = [dep('root', 'next', { lag: 1440 }), dep('next', 'fixed'), dep('root', 'manual'), dep('manual', 'after-manual')]
   const result = buildTaskRepair(tasks, dependencies, repairDay)
   const next = apply(tasks, result.updates)
-  assert.deepEqual(result.repairedIds, ['root'])
+  assert.deepEqual(result.repairedIds, ['root', 'after-manual'])
   assert.equal(next[1].start_date, '2026-11-11T00:00:00')
   assert.equal(next[2].start_date, '2026-11-15T00:00:00')
-  assert.deepEqual(next.slice(3), tasks.slice(3))
+  assert.deepEqual(next[3], tasks[3])
+  assert.equal(next[4].start_date, '2026-11-22T00:00:00')
+  assert.deepEqual(next[5], tasks[5])
   assert.ok(result.updates.every(task => task.auto_schedule === true && task.duration === 2880))
 })
 

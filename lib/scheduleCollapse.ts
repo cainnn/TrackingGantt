@@ -7,7 +7,7 @@ import { getNowYmdHm, getTodayYmd } from './statusDatePolicy'
 /** Shared tightening planner for removed links and explicitly confirmed save alignment. */
 export function planScheduleCollapse(
   tasks: Task[], dependencies: Dependency[],
-  reason: { removedDependencies: Dependency[] } | { alignUnlinked: true },
+  reason: { removedDependencies: Dependency[] } | { alignUnlinked: true } | { repairDependencies: true },
   options: { isMinute?: boolean; anchorDate?: string } = {},
 ) {
   const byId = new Map(tasks.filter(t => !t.is_deleted).map(t => [t.id, t]))
@@ -28,23 +28,35 @@ export function planScheduleCollapse(
     && !ancestry.get(d.from_task_id)?.has(d.to_task_id) && !ancestry.get(d.to_task_id)?.has(d.from_task_id)
   const activeDeps = dependencies.filter(effective)
   const hasIncoming = new Set(activeDeps.map(d => d.to_task_id))
+  // Cycles and their downstream tasks require relationship edits, not date repair.
+  const degree = new Map([...byId.keys()].map(id => [id, 0]))
+  const successors = new Map<string, string[]>()
+  for (const d of activeDeps) {
+    degree.set(d.to_task_id, degree.get(d.to_task_id)! + 1)
+    successors.set(d.from_task_id, [...(successors.get(d.from_task_id) ?? []), d.to_task_id])
+  }
+  const ready = [...degree].filter(([, count]) => count === 0).map(([id]) => id)
+  for (let index = 0; index < ready.length; index++) for (const id of successors.get(ready[index]) ?? []) {
+    degree.set(id, degree.get(id)! - 1)
+    if (!degree.get(id)) ready.push(id)
+  }
+  const blocked = new Set([...degree].filter(([, count]) => count > 0).map(([id]) => id))
   const anchor = toDateTimeStr(options.anchorDate ?? (options.isMinute ? `${getNowYmdHm()}:00` : `${getTodayYmd()}T00:00:00`))
   if (!anchor) throw new Error('无效的排程对齐日期')
+  const repairDependencies = 'repairDependencies' in reason
   const lostIncoming = new Set('removedDependencies' in reason
     ? reason.removedDependencies.filter(effective).map(d => d.to_task_id)
-    : [...byId.values()].filter(t => !hasIncoming.has(t.id) && !summaries.has(t.id) && !inactive(t.id) && t.auto_schedule !== false
+    : [...byId.values()].filter(t => hasIncoming.has(t.id) === repairDependencies && !summaries.has(t.id) && !inactive(t.id) && t.auto_schedule !== false
       && (!t.constraint_type || ['asap', 'none'].includes(t.constraint_type))
-      && toDateTimeStr(t.start_date)! > anchor && scheduleDurationMinutes(t.start_date, t.end_date, !!options.isMinute) != null
+      && (repairDependencies || toDateTimeStr(t.start_date)! > anchor) && scheduleDurationMinutes(t.start_date, t.end_date, !!options.isMinute) != null
       && scheduleDurationMinutes(t.start_date, t.end_date, !!options.isMinute)! >= 0).map(t => t.id))
-  const successors = new Map<string, string[]>()
-  for (const d of activeDeps) successors.set(d.from_task_id, [...(successors.get(d.from_task_id) ?? []), d.to_task_id])
   const affected = new Set<string>()
   const queue = [...lostIncoming]
   for (let index = 0; index < queue.length; index++) {
     const id = queue[index]
     const task = byId.get(id)
     // A manual activity does not move, so its downstream branch need not be recalculated.
-    if (!task || affected.has(id) || inactive(id) || task.auto_schedule === false) continue
+    if (!task || affected.has(id) || inactive(id) || blocked.has(id) || task.auto_schedule === false) continue
     affected.add(id)
     if (task.parent_id) queue.push(task.parent_id)
     queue.push(...(successors.get(id) ?? []))
@@ -69,5 +81,5 @@ export function planScheduleCollapse(
   finalTasks = finalTasks.map((task, index) => fields.every(field => (task[field] ?? null) === (tasks[index][field] ?? null)) ? tasks[index] : task)
   const updatedTasks = finalTasks.filter((t, index) => t !== tasks[index])
   return { tasks: finalTasks, updatedTasks, anchor,
-    directTaskIds: updatedTasks.filter(t => lostIncoming.has(t.id) && !hasIncoming.has(t.id) && !summaries.has(t.id)).map(t => t.id) }
+    directTaskIds: updatedTasks.filter(t => lostIncoming.has(t.id) && hasIncoming.has(t.id) === repairDependencies && !summaries.has(t.id)).map(t => t.id) }
 }
