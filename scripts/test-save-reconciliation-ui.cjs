@@ -50,9 +50,10 @@ async function main(){
   await api(`/tasks/${project.id}`,'POST',[make('a','任务 A',0),make('b','任务 B',1)]);
   await api(`/projects/${project.id}/view-preferences`,'PUT',{revision:0,views:[],currentView:{id:'current',name:'冲突验收',search:'',columns:['assignee','start','end','duration'],colW:minute?480:28,critical:false,indicators:{deadlineDate:true,constraintDate:true},chart:{expanded:{},filters:{},sortCol:null,sortDir:null,widths:{},nameWidth:180,panelWidth:900,panelCollapsed:false,rightCollapsed:false,centerTime:new Date(`${at(0)}+08:00`).getTime(),scrollTop:0}}});
   await open(project);await editName(ids.a,'我的 A');await api(`/tasks/${project.id}`,'PUT',[{id:ids.a,assignee:'后台责任人'},{id:ids.b,name:'后台 B'}]);await api(`/tasks/${project.id}`,'POST',[make('x','后台新增 X',2)]);
-  await save();assert.equal(await page.$(review),null,'disjoint changes must save without a conflict dialog');
+  const beforeMerge=await readPlan(project.id);await button('保存');await page.waitForSelector(review);assert.match(await txt(review),/0 项冲突/);assert.match(await txt(review),/后台新增 X/);assert.deepEqual(await readPlan(project.id),beforeMerge,'no write before explicit merge confirmation');
+  await button('应用并继续保存');await page.waitForSelector(review,{hidden:true});await page.waitForFunction(()=>document.querySelector('[data-action=save-plan]')?.disabled&&!document.querySelector('[data-action=save-plan]')?.textContent.includes('保存中'));
   let saved=await readPlan(project.id),remote;assert.equal(saved.tasks.find(t=>t.id===ids.a).name,'我的 A');assert.equal(saved.tasks.find(t=>t.id===ids.a).assignee,'后台责任人');assert.equal(saved.tasks.find(t=>t.id===ids.b).name,'后台 B');assert.equal(saved.tasks.length,3);await open(project);assert.deepEqual(await readPlan(project.id),saved);
-  console.log('PASS',precision,'disjoint changes and unseen additions merge automatically and persist without interrupting submission');
+  console.log('PASS',precision,'disjoint changes and unseen additions require visible merge confirmation before any write');
   await editName(ids.a,'我最终的 A');await editEnd(ids.a,at(2).slice(0,minute?16:10).replace('T',' '));
   await api(`/tasks/${project.id}`,'PUT',[{id:ids.a,name:'他人的 A',start_date:at(3),end_date:at(4),duration:unit}]);remote=await readPlan(project.id);
   await button('保存');await page.waitForSelector(review);assert.match(await txt(review),/2 项冲突，2 项待选择/);

@@ -110,7 +110,9 @@ export async function GET(req: NextRequest, { params }: Params) {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
       const state = await readPlanState(client, projectId)
       await client.query('COMMIT')
-      return NextResponse.json(success(state), { headers: { 'Cache-Control': 'no-store' } })
+      const headers = { 'Cache-Control': 'no-store', ETag: `"${state.revision}"` }
+      if (req.headers.get('if-none-match') === headers.ETag) return new NextResponse(null, { status: 304, headers })
+      return NextResponse.json(success(state), { headers })
     } catch (error) {
       await client.query('ROLLBACK').catch(() => {})
       console.error('Read save verification state failed:', error)

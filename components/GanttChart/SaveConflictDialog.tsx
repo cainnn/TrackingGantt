@@ -10,7 +10,7 @@ export default function SaveConflictDialog({ baseline, persisted, current, attem
   onApply: (plan: SaveBaseline, reviewed: SaveBaseline, continueSaving?: boolean) => void
 }) {
   const [choices, setChoices] = useState<Record<string, SaveChoice>>({})
-  const [showUpdates, setShowUpdates] = useState(false)
+  const [showUpdates, setShowUpdates] = useState(true)
   const result = useMemo(() => reconcilePlanSave(baseline, persisted, current, attempts, choices), [baseline, persisted, current, attempts, choices])
   const hierarchyIssues = reconciliationHierarchyIssues(result.plan)
   const conflicts = result.differences.filter(d => d.conflict)
@@ -20,7 +20,7 @@ export default function SaveConflictDialog({ baseline, persisted, current, attem
     <div className="flex max-h-[90vh] w-full max-w-5xl flex-col rounded-lg bg-white shadow-xl">
       <div className="border-b border-gray-200 px-5 py-4">
         <h2 className="text-lg font-semibold">核对后台变更</h2>
-        <p className="mt-2 text-sm text-gray-600">当前草稿仍保留。未冲突的后台更新会合并；双方都修改过的内容，请选择保留哪一份。</p>
+        <p className="mt-2 text-sm text-gray-600">后台计划已更新，请先核对并合并，再继续提交。当前草稿仍保留；未冲突的后台更新默认保留，双方都修改过的内容需选择保留哪一份。</p>
         <p className="mt-1 text-sm text-gray-600">可先应用到草稿查看，也可应用后继续保存。只有明确选择的冲突内容会覆盖后台。</p>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">

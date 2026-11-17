@@ -4,11 +4,12 @@ import type { SavedGanttView } from '@/lib/clientViewState'
 import type { useProjectViews } from '@/lib/client/useProjectViews'
 import { uuid } from '@/lib/uuid'
 
-export default function SavedViewsMenu({ projectId, capture, apply, layouts }: {
+export default function SavedViewsMenu({ projectId, capture, apply, layouts, saveRequest = 0 }: {
   projectId: string
   capture: () => Omit<SavedGanttView, 'id' | 'name'> | null
   apply: (view: SavedGanttView) => void
   layouts: ReturnType<typeof useProjectViews>
+  saveRequest?: number
 }) {
   const { preferences, loading, saving, readOnly, persist } = layouts
   const views = preferences?.views ?? []
@@ -16,6 +17,7 @@ export default function SavedViewsMenu({ projectId, capture, apply, layouts }: {
   const [error, setError] = useState('')
   const [naming, setNaming] = useState(false)
   const [name, setName] = useState('')
+  useEffect(() => { if (saveRequest > 0) setNaming(true) }, [saveRequest])
   const currentViewId = preferences?.currentView?.id
   useEffect(() => {
     setSelected(currentViewId && views.some(v => v.id === currentViewId) ? currentViewId : '')

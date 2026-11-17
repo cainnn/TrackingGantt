@@ -20,6 +20,7 @@ import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
 import SavedViewsMenu from '@/components/GanttChart/SavedViewsMenu'
 import type { ChartViewState, SavedGanttView } from '@/lib/clientViewState'
 import { useProjectViews } from '@/lib/client/useProjectViews'
+import { useLivePlan } from '@/lib/client/useLivePlan'
 import Link from 'next/link'
 import { authFetch } from '@/lib/client/authFetch'
 import { computeProjectProgressPercent } from '@/lib/projectProgress'
@@ -141,6 +142,15 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
     setViewRestore(prev => ({ state: view.chart, id: (prev?.id ?? 0) + 1 }))
   }, [])
   const layouts = useProjectViews(projectId, loadedBaseline?.projectId === projectId, applyLayout)
+  const livePlan = useLivePlan(projectId, loadedBaseline?.projectId === projectId && !layouts.loading,
+    restoring || showAI || showProjectLines, plan => {
+      const chart = chartCapture.current?.()
+      dispatch(resetDraft({ ...plan, lines: plan.lines ?? [], descriptions: {} }))
+      setLoadedBaseline({ ...plan, projectId })
+      setBaselineRevision(n => n + 1)
+      setPreviewStatusDate(null)
+      if (chart) setViewRestore(prev => ({ state: chart, id: (prev?.id ?? 0) + 1 }))
+    })
 
   const handleRestoreViewedSnapshot = useCallback(async () => {
     if (!viewSnapshot) return
@@ -260,7 +270,13 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
             </span>
           )}
         </h1>
+        {loadedBaseline && <button type="button" aria-label="检查后台更新" disabled={livePlan.checking || draftHistory.saving}
+          title="每 10 秒检查后台更新；切回页面时立即检查。编辑中的内容会保留。" onClick={livePlan.check}
+          className={`ml-auto shrink-0 text-xs ${livePlan.error ? 'text-red-600' : livePlan.pending ? 'text-amber-700' : 'text-gray-500'}`}>
+          {livePlan.checking ? '检查更新中…' : livePlan.error ? '同步中断 · 重试' : livePlan.pending ? '后台有更新' : livePlan.updated ? '已同步 · 检查更新' : '自动同步 · 检查更新'}
+        </button>}
       </header>
+      {livePlan.error && <div role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">{livePlan.error}</div>}
 
       {viewSnapshot && (
         <div className="flex items-center justify-between px-4 py-2 bg-amber-50 border-b border-amber-200 text-[13px] text-amber-800">
@@ -309,6 +325,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
       {loadedBaseline?.projectId === projectId && currentProject?.id === projectId && <GanttToolbar
         key={`${projectId}-${baselineRevision}`}
         initialBaseline={loadedBaseline}
+        remotePlan={livePlan.pending}
         projectId={projectId}
         readOnly={isViewOnly}
         isMinute={isMinute}
@@ -325,7 +342,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
         onFocusTask={() => setFocusSignal(n => n + 1)}
         onTimelineNavigate={kind => setTimelineRequest(prev => ({ kind, id: (prev?.id ?? 0) + 1 }))}
-        viewControls={<SavedViewsMenu projectId={projectId} layouts={layouts} capture={() => {
+        viewControls={saveRequest => <SavedViewsMenu projectId={projectId} layouts={layouts} saveRequest={saveRequest} capture={() => {
           const chart = chartCapture.current?.()
           return chart ? { search: searchQuery, columns: visibleCols, indicators, colW, critical: showCriticalPath, chart } : null
         }} apply={applyLayout} />}

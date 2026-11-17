@@ -10,10 +10,11 @@ export default function GanttDisplaySettings({ visibleCols, onVisibleColsChange,
   onIndicatorsChange?: (value: IndicatorsConfig) => void
   onExpandAll: () => void
   onCollapseAll: () => void
-  viewControls?: ReactNode
+  viewControls?: (saveRequest: number) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<'content' | 'layouts'>('content')
+  const [saveRequest, setSaveRequest] = useState(0)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const [position, setPosition] = useState({ left: 0, top: 0, width: 360 })
@@ -39,7 +40,7 @@ export default function GanttDisplaySettings({ visibleCols, onVisibleColsChange,
     return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape) }
   }, [open])
   return <div ref={root} className="relative">
-    <button ref={trigger} type="button" aria-label="显示设置" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(value => !value)}
+    <button ref={trigger} type="button" aria-label="显示设置" aria-haspopup="dialog" aria-expanded={open} onClick={() => { setSaveRequest(0); setOpen(value => !value) }}
       className={`inline-flex h-8 items-center gap-2 whitespace-nowrap rounded border px-2.5 text-[13px] ${open ? 'border-blue-400 bg-blue-50 text-blue-600' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>
       显示设置<span aria-hidden="true" className="text-gray-400">▾</span>
     </button>
@@ -66,7 +67,7 @@ export default function GanttDisplaySettings({ visibleCols, onVisibleColsChange,
           {label}
         </button>)}
       </div>
-      <div style={{ maxHeight: `min(520px, calc(100dvh - ${position.top + 110}px))` }} className="overflow-y-auto p-4 text-sm">
+      <div style={{ maxHeight: `min(520px, calc(100dvh - ${position.top + (viewControls && tab === 'content' ? 174 : 110)}px))` }} className="overflow-y-auto p-4 text-sm">
         <div role="tabpanel" aria-label="显示内容" hidden={tab !== 'content'} className="space-y-4">
           <div className="flex gap-2">
             <button type="button" title="全部展开" onClick={onExpandAll} className="flex-1 rounded border border-gray-200 px-2 py-1.5 hover:bg-gray-50">展开全部任务</button>
@@ -96,8 +97,13 @@ export default function GanttDisplaySettings({ visibleCols, onVisibleColsChange,
             </label>)}
           </section>}
         </div>
-        <div role="tabpanel" aria-label="常用布局" hidden={tab !== 'layouts'}>{viewControls}</div>
+        <div role="tabpanel" aria-label="常用布局" hidden={tab !== 'layouts'}>{viewControls?.(saveRequest)}</div>
       </div>
+      {viewControls && tab === 'content' && <div className="border-t border-gray-100 px-4 py-3">
+        <button type="button" className="h-9 w-full rounded bg-blue-600 text-sm text-white hover:bg-blue-700" onClick={() => {
+          setTab('layouts'); setSaveRequest(n => n + 1)
+        }}>保存为常用布局</button>
+      </div>}
     </div>}
   </div>
 }

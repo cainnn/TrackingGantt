@@ -39,7 +39,6 @@ import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDi
 import { runFullCascade } from '@/lib/clientScheduling'
 import { buildSaveDiff, type SaveBaseline } from '@/lib/clientSave'
 import { findPlanSaveConflicts, findPlanSaveMismatches } from '@/lib/planSaveVerification'
-import { reconcilePlanSave, reconciliationHierarchyIssues } from '@/lib/planSaveReconciliation'
 import { findPlanScheduleConflicts } from '@/lib/planScheduleValidation'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
@@ -177,7 +176,8 @@ interface GanttToolbarProps {
   onCollapseAll: () => void
   onFocusTask: () => void
   onTimelineNavigate?: (kind: 'all' | 'selection' | 'status') => void
-  viewControls?: React.ReactNode
+  viewControls?: (saveRequest: number) => React.ReactNode
+  remotePlan?: SaveBaseline | null
   searchQuery: string
   onSearchChange: (q: string) => void
   onToggleAI?: () => void
@@ -219,7 +219,7 @@ export default function GanttToolbar({
   indicators,
   onIndicatorsChange,
   onDiscardChanges,
-  onTimelineNavigate, viewControls, impactOpen, onToggleImpact,
+  onTimelineNavigate, viewControls, remotePlan, impactOpen, onToggleImpact,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
   const reduxStore = useStore<RootState>()
@@ -1371,28 +1371,13 @@ export default function GanttToolbar({
         statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields, planBaseline: savedPlanBaseline }
       const conflicts = findPlanSaveConflicts(original, persisted, expectedPlan, saveAttempts.current)
       if (conflicts.length) {
-        // Preserve unrelated remote work and continue this save when the merge is
-        // unambiguous. Competing edits or a changed approval mode require review.
-        const merged = reconcilePlanSave(original, persisted, expectedPlan, saveAttempts.current)
-        const needsReview = merged.unresolved.length || reconciliationHierarchyIssues(merged.plan).length
-          || findPlanScheduleConflicts(merged.plan.tasks, merged.plan.dependencies).length
-          || normalizePlanningStatus(merged.plan.planningStatus) !== submittedPlanningStatus
-        if (needsReview) {
-          dispatch(cancelDraftSave())
-          setReviewOpen(false)
-          setReconcileError('')
-          setSaveConflict({ baseline: original, persisted, attempts: [...saveAttempts.current] })
-          return
-        }
-        Object.assign(expectedPlan, merged.plan)
-        sd = expectedPlan.statusDate
-        finalTasks = versionTasks(expectedPlan.tasks, sd)
-        expectedPlan.tasks = finalTasks
-        submittedDeps = expectedPlan.dependencies
-        submittedLines = expectedPlan.lines ?? []
-        submittedPlanningStatus = normalizePlanningStatus(expectedPlan.planningStatus)
-        submittedCustomFields = expectedPlan.customFields ?? []
-        submittedPlanBaseline = expectedPlan.planBaseline ?? null
+        // Even disjoint remote edits need an explicit merge confirmation before
+        // this attempt writes. Known partial writes from our own retries are allowed.
+        dispatch(cancelDraftSave())
+        setReviewOpen(false)
+        setReconcileError('')
+        setSaveConflict({ baseline: original, persisted, attempts: [...saveAttempts.current] })
+        return
       }
       const scheduleConflicts = findPlanScheduleConflicts(finalTasks, submittedDeps)
       if (scheduleConflicts.length) throw new Error(`排期校验未通过，尚未写入本次修改：\n${scheduleConflicts.slice(0, 8).join('\n')}`)
@@ -1699,7 +1684,16 @@ export default function GanttToolbar({
 
   return (
     <>
-      <div className="relative z-20 border-b border-gray-200 bg-white">
+      {remotePlan && <div role="status" data-remote-plan-notice className="flex items-center gap-3 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+        <span>{viewSnapshot ? '后台计划有更新，退出历史查看后同步。' : '后台计划有更新，当前编辑和草稿已保留。完成编辑后可保存合并，或先核对更新。'}</span>
+        {!readOnly && <button type="button" disabled={history.saving || reconcileBusy} className="shrink-0 text-blue-600 disabled:opacity-40" onClick={() => {
+          setReviewOpen(false); setReconcileError('')
+          setSaveConflict({ baseline: { tasks: baselineTasks, dependencies: baselineDeps, lines: baselineLines,
+            statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields, planBaseline: savedPlanBaseline },
+            persisted: remotePlan, attempts: [...saveAttempts.current] })
+        }}>核对后台更新</button>}
+      </div>}
+      <div data-plan-busy={importing || statusDateSaving || reviewOpen || editModalOpen || bulkEditOpen || !!saveConflict ? 'true' : undefined} className="relative z-20 border-b border-gray-200 bg-white">
       <div data-toolbar-row="tasks" className="flex flex-wrap items-center gap-1.5 px-3 py-2">
 
         {readOnly && (
