@@ -194,44 +194,31 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
     let cancelled = false
     void (async () => {
       try {
-        const [pr, tr, plr] = await Promise.all([
+        const [pr, tr] = await Promise.all([
           authFetch(`/api/projects/${projectId}`).then(r => r.json()),
-          authFetch(`/api/tasks/${projectId}`).then(r => r.json()),
-          authFetch(`/api/project-lines/${projectId}`).then(r => r.json()),
+          authFetch(`/api/tasks/${projectId}?save_state=1`, { cache: 'no-store' }).then(r => r.json()),
         ])
         if (cancelled) return
         if (!pr.ok) {
           router.push('/dashboard')
           return
         }
-        if (!tr.ok || !tr.value || !plr.ok || !Array.isArray(plr.value)) throw new Error(tr.error ?? '加载项目数据失败')
-        dispatch(setCurrentProject(pr.value))
+        if (!tr.ok || !Array.isArray(tr.value?.tasks) || !Array.isArray(tr.value?.dependencies) || !Array.isArray(tr.value?.lines)) {
+          throw new Error(tr.error ?? '加载项目数据失败')
+        }
+        // Tasks, links and save metadata must describe one database snapshot.
+        // Separate requests could otherwise initialize a baseline mid-save.
+        const saved = tr.value
+        const baseline = { tasks: saved.tasks, dependencies: saved.dependencies, lines: saved.lines,
+          statusDate: saved.statusDate, planningStatus: normalizePlanningStatus(saved.planningStatus),
+          customFields: saved.customFields ?? [], planBaseline: saved.planBaseline ?? null }
+        dispatch(setCurrentProject({ ...pr.value, status_date: baseline.statusDate, planning_status: baseline.planningStatus,
+          custom_fields: baseline.customFields, plan_baseline: baseline.planBaseline }))
         setColW(pr.value.time_granularity === 'minute' ? 1440 : 28)
-        if (tr.ok && tr.value) {
-          const loadedTasks: Task[] = Array.isArray(tr.value.tasks) ? tr.value.tasks : []
-          const loadedDeps = Array.isArray(tr.value.dependencies) ? tr.value.dependencies : []
-          // Loading must preserve the confirmed plan, including an explicit
-          // repair to today before the project start or without a status date.
-          // Date adjustments now require a user operation (检查与修复 / edit).
-          dispatch(setTasks({ tasks: loadedTasks, dependencies: loadedDeps }))
-          setLoadedBaseline({
-            projectId,
-            tasks: tr.value.tasks,
-            dependencies: loadedDeps,
-            planningStatus: normalizePlanningStatus(pr.value.planning_status),
-            customFields: pr.value.custom_fields ?? [], planBaseline: pr.value.plan_baseline ?? null,
-            statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value,
-          })
-        }
-        if (plr.ok && Array.isArray(plr.value)) {
-          dispatch(setProjectLines(plr.value))
-          dispatch(initializeDraft({ projectId, baseline: {
-            tasks: tr.value.tasks, dependencies: tr.value.dependencies,
-            planningStatus: normalizePlanningStatus(pr.value.planning_status),
-            customFields: pr.value.custom_fields ?? [], planBaseline: pr.value.plan_baseline ?? null,
-            statusDate: toDateTimeStr(pr.value.status_date ?? null), lines: plr.value, descriptions: {},
-          } }))
-        }
+        dispatch(setTasks({ tasks: baseline.tasks, dependencies: baseline.dependencies }))
+        dispatch(setProjectLines(baseline.lines))
+        setLoadedBaseline({ ...baseline, projectId })
+        dispatch(initializeDraft({ projectId, baseline: { ...baseline, descriptions: {} } }))
       } catch {
         if (!cancelled) router.push('/dashboard')
       }

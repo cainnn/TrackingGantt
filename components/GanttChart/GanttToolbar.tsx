@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { useStore } from 'react-redux'
 import type { RootState } from '@/store'
-import { undoDraft, redoDraft, beginDraftSave, finishDraftSave, failDraftSave, resetDraft, labelDraftStep, linesEqual, hasDraftChanges } from '@/store/draftHistory'
+import { undoDraft, redoDraft, beginDraftSave, finishDraftSave, failDraftSave, cancelDraftSave, reconcileDraft, snapshotDraft, draftsEqual, resetDraft, labelDraftStep, linesEqual, hasDraftChanges } from '@/store/draftHistory'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
 import {
   copyTasks, addTasks, deleteTasks, updateTasks, addDependency, removeDependency,
@@ -21,6 +21,7 @@ import EditTaskModal from './EditTaskModal'
 import TaskCustomFieldsPanel from './TaskCustomFieldsPanel'
 import BulkEditPanel from './BulkEditPanel'
 import TaskRepairPanel from './TaskRepairPanel'
+import SaveConflictDialog from './SaveConflictDialog'
 import ScheduleIssuesPanel from './ScheduleIssuesPanel'
 import { baselinesEqual } from '@/lib/planBaseline'
 import { authFetch, authFetchHeaders } from '@/lib/client/authFetch'
@@ -36,8 +37,9 @@ import VersionPanel from './VersionPanel'
 import RetroLogPanel from './RetroLogPanel'
 import { diffSnapshots, type SnapshotTask, type DiffItem } from '@/lib/versionDiff'
 import { runFullCascade } from '@/lib/clientScheduling'
-import { buildSaveDiff, recoverSaveRecords, type SaveBaseline } from '@/lib/clientSave'
+import { buildSaveDiff, type SaveBaseline } from '@/lib/clientSave'
 import { findPlanSaveConflicts, findPlanSaveMismatches } from '@/lib/planSaveVerification'
+import { reconcilePlanSave, reconciliationHierarchyIssues } from '@/lib/planSaveReconciliation'
 import { findPlanScheduleConflicts } from '@/lib/planScheduleValidation'
 import { uuid } from '@/lib/uuid'
 import { buildTaskCopies } from '@/lib/clientTaskCopy'
@@ -326,6 +328,10 @@ export default function GanttToolbar({
   const [saveIncomplete, setSaveIncomplete] = useState(false)
   const attemptedSaveIds = useRef({ taskIds: new Set<string>(), dependencyIds: new Set<string>() })
   const saveAttempts = useRef<SaveBaseline[]>([])
+  const [saveConflict, setSaveConflict] = useState<{ baseline: SaveBaseline; persisted: SaveBaseline; attempts: SaveBaseline[] } | null>(null)
+  const [reconcileBusy, setReconcileBusy] = useState(false)
+  const [reconcileError, setReconcileError] = useState('')
+  const [continueAfterReview, setContinueAfterReview] = useState(false)
 
   // changeDiffs: 当前任务 vs 基线
   const changeDiffs = React.useMemo(() => {
@@ -1237,6 +1243,45 @@ export default function GanttToolbar({
     return data.value
   }, [projectId])
 
+  const handleApplyReconciliation = useCallback(async (plan: SaveBaseline, reviewed: SaveBaseline, continueSaving = false) => {
+    if (!saveConflict || reconcileBusy || readOnly || viewSnapshot) return
+    setReconcileBusy(true)
+    setReconcileError('')
+    try {
+      const latest = await readPersistedState()
+      if (latest.revision !== saveConflict.persisted.revision) {
+        setSaveConflict({ ...saveConflict, persisted: latest })
+        setReconcileError('核对期间后台再次更新，已重新加载差异，请重新确认选择。')
+        return
+      }
+      const current = snapshotDraft(reduxStore.getState())
+      if (!draftsEqual(current, { ...reviewed, lines: reviewed.lines ?? [], descriptions: current.descriptions })) {
+        setReconcileError('核对期间本地草稿发生变化，请查看更新后的差异再应用。')
+        return
+      }
+      dispatch(reconcileDraft({ baseline: { ...latest, lines: latest.lines ?? [], descriptions: {} },
+        current: { ...plan, lines: plan.lines ?? [], descriptions: current.descriptions } }))
+      setBaseline(latest.tasks.map(t => ({ ...t })))
+      setBaselineTasks(latest.tasks)
+      setBaselineDeps(latest.dependencies)
+      setBaselineStatusDate(latest.statusDate)
+      setBaselinePlanningStatus(normalizePlanningStatus(latest.planningStatus))
+      setBaselineCustomFields(latest.customFields ?? [])
+      setSavedPlanBaseline(latest.planBaseline ?? null)
+      setBaselineLines(latest.lines ?? [])
+      attemptedSaveIds.current = { taskIds: new Set(), dependencyIds: new Set() }
+      attemptedLineIds.current.clear()
+      saveAttempts.current = []
+      setSaveIncomplete(false)
+      setSaveConflict(null)
+      setReviewOpen(false)
+      if (findPlanScheduleConflicts(plan.tasks, plan.dependencies).length) setScheduleIssuesOpen(true)
+      else if (continueSaving) setContinueAfterReview(true)
+    } catch (error) {
+      setReconcileError(error instanceof Error ? error.message : '无法核对最新后台内容，请重试；当前草稿仍保留。')
+    } finally { setReconcileBusy(false) }
+  }, [saveConflict, reconcileBusy, readOnly, viewSnapshot, readPersistedState, reduxStore, dispatch])
+
   // 状态日期仅改 Redux，用户通过顶部工具栏保存时才入库。
   // 允许任意日期时间以便预览进展；稳定态审核保存时创建版本快照，
   // 点"放弃更改"则回到基线值。这样状态日期与任务/依赖一致，都受 dirty 状态约束。
@@ -1248,7 +1293,7 @@ export default function GanttToolbar({
 
   // 草稿态直接保存；稳定态经审核后保存，并创建版本快照。
   const handleConfirmChanges = useCallback(async () => {
-    const sd = toDateTimeStr(currentProject?.status_date ?? null)
+    let sd = toDateTimeStr(currentProject?.status_date ?? null)
     const createVersion = normalizePlanningStatus(currentProject?.planning_status) === 'stable'
     if (readOnly || (createVersion && !sd) || statusDateSaving || !allReasonsFilled) return
 
@@ -1257,23 +1302,25 @@ export default function GanttToolbar({
     }
     setStatusDateSaving(true)
     dispatch(beginDraftSave())
-    const submittedLines = reduxStore.getState().projectLines.lines
+    let submittedLines = reduxStore.getState().projectLines.lines
     // Freeze this attempt before the first await. Later edits stay in Redux.
     const submitted = reduxStore.getState().tasks
     const submittedTasks = submitted.tasks
-    const submittedDeps = submitted.dependencies
-    const submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
-    const submittedCustomFields = reduxStore.getState().project.currentProject?.custom_fields ?? []
-    const submittedPlanBaseline = reduxStore.getState().project.currentProject?.plan_baseline ?? null
+    let submittedDeps = submitted.dependencies
+    let submittedPlanningStatus = normalizePlanningStatus(reduxStore.getState().project.currentProject?.planning_status)
+    let submittedCustomFields = reduxStore.getState().project.currentProject?.custom_fields ?? []
+    let submittedPlanBaseline = reduxStore.getState().project.currentProject?.plan_baseline ?? null
     // Direct draft saves must not reuse reasons from an earlier stable review.
     const submittedDependencyReasons = createVersion ? dependencyReasons : {}
     const saveHeaders = authFetchHeaders(true)
     saveHeaders.set('x-gantt-confirmed-save', '1')
     let revision: string | undefined
+    let writesStarted = false
     const saveFetch = async (input: string, init: RequestInit = {}) => {
       const headers = new Headers(saveHeaders)
       if (!revision) throw new Error('保存缺少后台版本校验信息，请重试')
       headers.set('x-gantt-plan-revision', revision)
+      writesStarted = true
       const response = await authFetch(input, { ...init, headers })
       if (response.status === 409) {
         const data = await response.clone().json().catch(() => null)
@@ -1293,18 +1340,14 @@ export default function GanttToolbar({
       // unseen additions into deletions.
       const persisted = await readPersistedState()
       revision = persisted.revision
-      const saveBaseTasks = recoverSaveRecords(baselineTasks, persisted.tasks,
-        [...attemptedSaveIds.current.taskIds, ...submittedTasks.map(t => t.id)])
-      const saveBaseDeps = recoverSaveRecords(baselineDeps, persisted.dependencies,
-        [...attemptedSaveIds.current.dependencyIds, ...submittedDeps.map(d => d.id)])
+      const saveBaseTasks = persisted.tasks
+      const saveBaseDeps = persisted.dependencies
       const saveBaseStatusDate = persisted.statusDate
       const saveBasePlanningStatus = normalizePlanningStatus(persisted.planningStatus)
       const saveBaseCustomFields = persisted.customFields ?? []
-      const saveBaseLines = recoverSaveRecords(baselineLines, persisted.lines ?? [],
-        [...attemptedLineIds.current, ...submittedLines.map(l => l.id)])
+      const saveBaseLines = persisted.lines ?? []
 
       // 1. 重算 percent_done + baseline_end_date（基于上一版本快照）
-      const sdDate = sd ? new Date(sd) : null
       const prevEndByTaskId = new Map<string, string | null>()
       const prevVersion = versions[0]
       if (createVersion && prevVersion) {
@@ -1318,23 +1361,39 @@ export default function GanttToolbar({
           }
         } catch { /* ignore, 退化为当前 end */ }
       }
-      const recomputed = createVersion && sdDate ? submittedTasks
-        .filter(t => t.start_date && t.end_date)
-        .map(t => {
-          const prevEnd = prevEndByTaskId.get(t.id) ?? null
-          const baselineEnd = prevEnd ?? snapshotEndForBaseline(t.end_date)
-          return {
-            ...t,
-            percent_done: calcPercent(t, sdDate),
-            baseline_end_date: baselineEnd,
-          }
-        }) : []
-      const finalTasks = submittedTasks.map(t => recomputed.find(u => u.id === t.id) ?? t)
+      const versionTasks = (list: Task[], statusDate: string | null) => createVersion && statusDate ? list.map(t =>
+        t.start_date && t.end_date ? { ...t, percent_done: calcPercent(t, new Date(statusDate)),
+          baseline_end_date: prevEndByTaskId.get(t.id) ?? snapshotEndForBaseline(t.end_date) } : t) : list
+      let finalTasks = versionTasks(submittedTasks, sd)
       const expectedPlan: SaveBaseline = { tasks: finalTasks, dependencies: submittedDeps, lines: submittedLines,
         statusDate: sd, planningStatus: submittedPlanningStatus, customFields: submittedCustomFields, planBaseline: submittedPlanBaseline }
-      const conflicts = findPlanSaveConflicts({ tasks: baselineTasks, dependencies: baselineDeps, lines: baselineLines,
-        statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields, planBaseline: savedPlanBaseline }, persisted, expectedPlan, saveAttempts.current)
-      if (conflicts.length) throw new Error(`后台计划存在冲突，尚未写入本次修改：\n${conflicts.slice(0, 8).join('\n')}`)
+      const original: SaveBaseline = { tasks: baselineTasks, dependencies: baselineDeps, lines: baselineLines,
+        statusDate: baselineStatusDate, planningStatus: baselinePlanningStatus, customFields: baselineCustomFields, planBaseline: savedPlanBaseline }
+      const conflicts = findPlanSaveConflicts(original, persisted, expectedPlan, saveAttempts.current)
+      if (conflicts.length) {
+        // Preserve unrelated remote work and continue this save when the merge is
+        // unambiguous. Competing edits or a changed approval mode require review.
+        const merged = reconcilePlanSave(original, persisted, expectedPlan, saveAttempts.current)
+        const needsReview = merged.unresolved.length || reconciliationHierarchyIssues(merged.plan).length
+          || findPlanScheduleConflicts(merged.plan.tasks, merged.plan.dependencies).length
+          || normalizePlanningStatus(merged.plan.planningStatus) !== submittedPlanningStatus
+        if (needsReview) {
+          dispatch(cancelDraftSave())
+          setReviewOpen(false)
+          setReconcileError('')
+          setSaveConflict({ baseline: original, persisted, attempts: [...saveAttempts.current] })
+          return
+        }
+        Object.assign(expectedPlan, merged.plan)
+        sd = expectedPlan.statusDate
+        finalTasks = versionTasks(expectedPlan.tasks, sd)
+        expectedPlan.tasks = finalTasks
+        submittedDeps = expectedPlan.dependencies
+        submittedLines = expectedPlan.lines ?? []
+        submittedPlanningStatus = normalizePlanningStatus(expectedPlan.planningStatus)
+        submittedCustomFields = expectedPlan.customFields ?? []
+        submittedPlanBaseline = expectedPlan.planBaseline ?? null
+      }
       const scheduleConflicts = findPlanScheduleConflicts(finalTasks, submittedDeps)
       if (scheduleConflicts.length) throw new Error(`排期校验未通过，尚未写入本次修改：\n${scheduleConflicts.slice(0, 8).join('\n')}`)
       saveAttempts.current.push(expectedPlan)
@@ -1561,8 +1620,8 @@ export default function GanttToolbar({
         .then(d => { if (d.ok && Array.isArray(d.value)) dispatch(setVersions(d.value)) })
         .catch(() => {})
     } catch (err) {
-      dispatch(failDraftSave())
-      setSaveIncomplete(true)
+      dispatch(writesStarted ? failDraftSave() : cancelDraftSave())
+      setSaveIncomplete(writesStarted || history.uncertain)
       console.error('计划保存失败:', err)
       alert(`保存失败：${err instanceof Error ? err.message : String(err)}。请重试，系统会核对已保存的内容。`)
     } finally {
@@ -1571,7 +1630,14 @@ export default function GanttToolbar({
   }, [currentProject, statusDateSaving, dispatch, projectId, tasks, dependencies,
       changeDiffs, versions, reasons, dependencyReasons, allReasonsFilled, requiredReasonCodes, passiveReasonMap,
       baselineTasks, baselineDeps, baselineStatusDate, baselinePlanningStatus, saveIncomplete, readPersistedState, reduxStore,
-      snapshotEndForBaseline, baselineLines, baselineCustomFields, savedPlanBaseline, customFieldsChanged, customFieldsReason, readOnly])
+      snapshotEndForBaseline, baselineLines, baselineCustomFields, savedPlanBaseline, customFieldsChanged, customFieldsReason, readOnly, history.uncertain])
+
+  useEffect(() => {
+    if (!continueAfterReview || statusDateSaving) return
+    setContinueAfterReview(false)
+    if (normalizePlanningStatus(currentProject?.planning_status) === 'stable') setReviewOpen(true)
+    else void handleConfirmChanges()
+  }, [continueAfterReview, statusDateSaving, currentProject?.planning_status, handleConfirmChanges])
 
   // ── 放弃更改：恢复到进入页面后捕获的基线，所有未确认编辑都丢弃 ──
   const handleRefresh = useCallback(async () => {
@@ -2319,6 +2385,10 @@ export default function GanttToolbar({
           </div>
         </div>
       )}
+      {saveConflict && <SaveConflictDialog key={saveConflict.persisted.revision}
+        baseline={saveConflict.baseline} persisted={saveConflict.persisted} attempts={saveConflict.attempts}
+        current={snapshotDraft(reduxStore.getState())} busy={reconcileBusy} error={reconcileError}
+        onClose={() => setSaveConflict(null)} onApply={handleApplyReconciliation} />}
     </>
   )
 }

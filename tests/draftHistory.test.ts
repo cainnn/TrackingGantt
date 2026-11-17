@@ -157,3 +157,31 @@ test('a labeled no-op cannot attribute the next event to an unrelated task', asy
   assert.equal(store.getState().draft.past[0].directTaskIds, undefined)
   assert.equal(store.getState().draft.past[0].label, '编辑任务')
 })
+
+test('a preflight rejection preserves edits and undo; earlier uncertain writes remain protected', async () => {
+  const { cancelDraftSave } = await import('../store/draftHistory.js')
+  const store = setup(), before = snapshotDraft(store.getState())
+  store.dispatch(updateTasks([{ ...task, name: 'Unsaved' }]))
+  store.dispatch(beginDraftSave()); store.dispatch(cancelDraftSave())
+  assert.equal(store.getState().draft.uncertain, false)
+  store.dispatch(undoDraft()); assert.deepEqual(snapshotDraft(store.getState()), before)
+  store.dispatch(redoDraft()); store.dispatch(beginDraftSave()); store.dispatch(failDraftSave())
+  store.dispatch(beginDraftSave()); store.dispatch(cancelDraftSave()); store.dispatch(undoDraft())
+  assert.equal(store.getState().draft.uncertain, true)
+  assert.equal(store.getState().tasks.tasks[0].name, 'Unsaved')
+})
+
+test('reviewed reconciliation updates the save baseline while retaining a single undoable unsaved draft', async () => {
+  const { reconcileDraft } = await import('../store/draftHistory.js')
+  const store = setup(), baseline = snapshotDraft(store.getState())
+  const remote = { ...baseline, tasks: baseline.tasks.map(t => ({ ...t, assignee: '后台责任人' })) }
+  const current = { ...remote, tasks: remote.tasks.map(t => t.id === 'a' ? { ...t, name: '我的修改' } : t) }
+  store.dispatch(reconcileDraft({ baseline: remote, current }))
+  assert.deepEqual(store.getState().draft.baseline, remote)
+  assert.equal(hasDraftChanges(store.getState()), true)
+  assert.equal(store.getState().draft.past.length, 1)
+  store.dispatch(undoDraft()); assert.deepEqual(snapshotDraft(store.getState()), remote)
+  store.dispatch(redoDraft()); assert.deepEqual(snapshotDraft(store.getState()), current)
+  store.dispatch(beginDraftSave()); store.dispatch(finishDraftSave(current))
+  assert.equal(hasDraftChanges(store.getState()), false)
+})

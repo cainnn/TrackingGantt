@@ -158,12 +158,14 @@ async function main() {
 
   const conflict = await fixture('day', 'conflict');
   await open(conflict); await removeC(conflict);
-  await api(`/tasks/${conflict.project.id}`, 'PUT', [{ id: conflict.ids.d, name: '另一个人保存的新名称' }]);
+  await api(`/tasks/${conflict.project.id}`, 'PUT', [{ id: conflict.ids.c, name: '另一个人保存的新名称' }]);
   const remote = await state(conflict.project.id), count = dialogs.length;
   await click('保存');
-  await waitUntil(() => dialogs.length > count, 'conflict notification');
+  await page.waitForSelector('[role=dialog][aria-label="核对后台变更"]');
   await page.waitForFunction(() => !document.querySelector('[data-action=save-plan]').disabled && !document.querySelector('[data-action=save-plan]').textContent.includes('保存中'));
-  assert.ok(dialogs.slice(count).some(message => message.includes('后台计划存在冲突')));
+  assert.equal(dialogs.length, count, 'preflight conflict opens review instead of a blocking alert');
+  await click('返回草稿');
+  assert.equal(await page.$eval('button[title^="撤销"]', el => el.disabled), false, 'a preflight conflict must not lock undo');
   assert.equal((await state(conflict.project.id)).revision, remote.revision);
   assert.equal(await page.$(cell(conflict.ids.c, 'name')), null);
   console.log('PASS browser: a stale local deletion stops before writes, preserves the remote edit and keeps the local draft');

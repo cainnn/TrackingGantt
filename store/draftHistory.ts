@@ -42,6 +42,8 @@ export const undoDraft = createAction('draft/undo')
 export const redoDraft = createAction('draft/redo')
 export const beginDraftSave = createAction('draft/beginSave')
 export const failDraftSave = createAction('draft/failSave')
+export const cancelDraftSave = createAction('draft/cancelSave')
+export const reconcileDraft = createAction<{ baseline: DraftSnapshot; current: DraftSnapshot }>('draft/reconcile')
 export const finishDraftSave = createAction<DraftSnapshot>('draft/finishSave')
 export const resetDraft = createAction<DraftSnapshot>('draft/reset')
 export const labelDraftStep = createAction<string | { label: string; directTaskIds: string[] }>('draft/label')
@@ -141,6 +143,16 @@ function reduceDraftState(state: DraftRootState | undefined, action: UnknownActi
     saving: true, submitted: snapshotDraft(next), duringSave: [], future: [],
   } }
   if (failDraftSave.match(action)) return { ...next, draft: { ...history, saving: false, uncertain: true } }
+  // A preflight rejection has issued no writes. Keep any earlier uncertainty,
+  // but do not disable undo just because the current validation failed.
+  if (cancelDraftSave.match(action)) return { ...next, draft: { ...history, saving: false, submitted: null, duringSave: [] } }
+  if (reconcileDraft.match(action)) {
+    if (history.saving || next.tasks.viewSnapshot || next.auth.user?.role === 'view') return next
+    const { baseline, current } = action.payload
+    const past = draftsEqual(baseline, current) ? [] : [{ before: baseline, after: current, label: '核对后台变更' }]
+    next = { ...next, draft: { ...empty, projectId: history.projectId, baseline, past } }
+    return restore(next, current)
+  }
   if (finishDraftSave.match(action)) {
     const saved = action.payload
     const submitted = history.submitted ?? snapshotDraft(next)

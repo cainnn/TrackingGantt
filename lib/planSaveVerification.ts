@@ -37,7 +37,7 @@ function stable(value: unknown): unknown {
   return value
 }
 const equal = (a: unknown, b: unknown) => JSON.stringify(stable(a)) === JSON.stringify(stable(b))
-const FIELD_LABELS: Record<string, string> = {
+export const FIELD_LABELS: Record<string, string> = {
   name: '名称', parent_id: '父任务', task_code: '任务编码', assignee: '责任人',
   start_date: '开始日期', end_date: '完成日期', duration: '工期', duration_unit: '工期单位',
   percent_done: '完成度', is_milestone: '里程碑', note: '备注', order_index: '顺序',
