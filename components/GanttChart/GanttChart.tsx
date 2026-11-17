@@ -3291,13 +3291,22 @@ export default function GanttChart({
                        title={readOnly ? undefined : sortCol && sortDir ? '请先取消列排序，再拖动任务' : '按住任务名称上下拖动；双击编辑名称'}
                        onDoubleClick={() => { if (!readOnly) { setEditId(t.id); setEditName(t.name) } }}>
                     {row.hasChildren
-                      ? <button onClick={e => { e.stopPropagation(); toggle(t.id) }}
-                                className="w-5 h-5 flex-none flex items-center justify-center rounded
+                      ? <button type="button" data-task-toggle={t.id} aria-expanded={row.expanded}
+                                aria-label={`${row.expanded ? '收起' : '展开'}「${t.name}」的子任务`}
+                                title={row.expanded ? '收起子任务' : '展开子任务'}
+                                onMouseDown={e => e.stopPropagation()}
+                                onDoubleClick={e => e.stopPropagation()}
+                                onKeyDown={e => e.stopPropagation()}
+                                onClick={e => { e.stopPropagation(); toggle(t.id) }}
+                                className="w-7 h-7 mr-1 flex-none flex items-center justify-center rounded
                                            bg-blue-50 hover:bg-blue-200 text-blue-600 hover:text-blue-800
-                                           text-sm font-bold transition-colors">
-                          {row.expanded ? '▾' : '▸'}
+                                           focus-visible:outline-2 focus-visible:outline-blue-500 transition-colors">
+                          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                               strokeLinecap="round" strokeLinejoin="round" className={row.expanded ? 'rotate-90' : ''}>
+                            <path d="m9 5 7 7-7 7" />
+                          </svg>
                         </button>
-                      : <span className="w-5 h-5 flex-none flex items-center justify-center text-gray-300">·</span>
+                      : <span className="w-7 h-7 mr-1 flex-none flex items-center justify-center text-gray-300">·</span>
                     }
                     {isEditing
                       ? <input ref={nameInputRef}

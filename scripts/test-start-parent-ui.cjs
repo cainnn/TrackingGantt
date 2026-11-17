@@ -53,6 +53,16 @@ async function main() {
   token = (await api('/auth/login','POST',{login:process.env.SAVE_TEST_ROOT || 'root',password:process.env.SAVE_TEST_PASSWORD || 'root123'})).token;
   browser = await puppeteer.launch({headless:true,args:['--no-sandbox']}); page = await browser.newPage(); await page.setViewport({width:1800,height:1080}); await page.emulateTimezone('Asia/Shanghai');
   page.setDefaultTimeout(30000); page.setDefaultNavigationTimeout(90000);
+  // All fixture roots already started, even though their finish may be in the
+  // future. Editing an automatic root must not require a mode change or repair.
+  await page.evaluateOnNewDocument(() => {
+    const NativeDate = Date;
+    const now = NativeDate.parse('2030-01-03T01:17:00Z');
+    window.Date = class extends NativeDate {
+      constructor(...args) { super(...(args.length ? args : [now])); }
+      static now() { return now; }
+    };
+  });
   page.on('pageerror',e=>errors.push(e.message)); page.on('dialog',async d=>{if(/失败|冲突/.test(d.message()))errors.push(d.message());await d.accept();});
   for(const precision of ['day','minute']) {
     const minute=precision==='minute',unit=minute?60:1440;
@@ -69,6 +79,23 @@ async function main() {
     await api(`/dependencies/${project.id}`,'POST',{from_task_id:ids.c,to_task_id:ids.inactive,type:2,lag:0,active:false});
     await api(`/projects/${project.id}/view-preferences`,'PUT',{revision:0,views:[],currentView:{id:'current',name:'编辑验收布局',search:'',columns:['start','end','duration','pred'],colW:minute?480:28,critical:false,indicators:{deadlineDate:true,constraintDate:true},chart:{expanded:{[ids.g]:true,[ids.p]:true,[ids.n]:true},filters:{},sortCol:null,sortDir:null,widths:{},nameWidth:200,panelWidth:850,panelCollapsed:false,rightCollapsed:false,centerTime:new Date(`${at(0)}+08:00`).getTime(),scrollTop:0}}});
     const before=await readPlan(project.id);await open(project);
+    const toggle = `[data-task-toggle="${ids.p}"]`;
+    const box = await page.$eval(toggle, el => { const r=el.getBoundingClientRect(); return {width:r.width,height:r.height}; });
+    assert.ok(box.width >= 28 && box.height >= 28);
+    // Real mouse events include mousedown: toggling must not start a row drag.
+    await page.click(toggle);await page.waitForFunction(selector=>document.querySelector(selector)?.getAttribute('aria-expanded')==='false',{},toggle);
+    assert.equal(await page.$(cell(ids.c)),null);
+    await page.click(toggle);await page.waitForSelector(cell(ids.c));
+    await page.click(toggle,{count:2,delay:30});await frame();
+    assert.equal(await page.$(`${cell(ids.p)} input`),null,'double clicking the toggle does not rename its task');
+    assert.equal(await page.$eval(toggle,el=>el.getAttribute('aria-expanded')),'true');
+    await page.focus(toggle);await page.keyboard.press('Space');await frame();
+    assert.equal(await page.$(cell(ids.c)),null);
+    await page.keyboard.press('Enter');await page.waitForSelector(cell(ids.c));
+    assert.equal(await page.$eval('[data-action=save-plan]',b=>b.disabled),true,'expansion never edits the saved plan');
+    assert.deepEqual(await readPlan(project.id),before);
+    await button('修复排程');assert.equal(await page.$$eval('[data-repair-task]',els=>els.length),0);await button('取消');
+    console.log('PASS',precision,'larger parent toggle supports mouse and keyboard without rename, drag or unsaved edits; historical auto roots need no repair');
     await inlineStart(ids.c,input(-1));assert.match(await txt(cell(ids.c,'start')),minute?/08:00/:/29-12-31/);
     await button('撤销');await inlineStart(ids.c,input(-2),true);
     assert.deepEqual(await readPlan(project.id),before,'inline edits remain local');
@@ -82,6 +109,8 @@ async function main() {
     const c=saved.tasks.find(t=>t.id===ids.c),d=saved.tasks.find(t=>t.id===ids.d);
     assert.equal(c.start_date.slice(0,16),at(-3).slice(0,16));assert.equal(c.end_date.slice(0,16),at(14).slice(0,16));assert.equal(c.duration,17*unit);assert.equal(c.auto_schedule,true);
     assert.equal(d.start_date.slice(0,16),at(14).slice(0,16));assert.equal(d.duration,unit);
+    await button('修复排程');assert.equal(await page.$$eval('[data-repair-task]',els=>els.length),0);await button('取消');
+    assert.deepEqual(await readPlan(project.id),saved,'editing a historical auto start does not schedule it to today');
     await inlineStart(ids.c,input(20));assert.match(await txt('body'),/本次日期修改未应用/);
     assert.deepEqual(await readPlan(project.id),saved);
     await click(cell(ids.d,'start'));await page.$eval(cell(ids.d,'start'),el=>el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true})));await frame();
