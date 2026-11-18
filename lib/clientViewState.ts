@@ -1,3 +1,5 @@
+import { normalizeTaskDateFilter, type TaskDateFilter } from './taskDateFilter'
+
 // This schema deliberately contains only presentation preferences, never tasks,
 // dependency records, project lines, drafts or undo history.
 export interface ChartViewState {
@@ -17,6 +19,7 @@ export interface SavedGanttView {
   id: string
   name: string
   search: string
+  dateFilter?: TaskDateFilter | null
   columns: string[]
   indicators: { deadlineDate: boolean; constraintDate: boolean }
   colW: number
@@ -49,6 +52,8 @@ export function normalizeSavedView(value: unknown): SavedGanttView | null {
     || !record(value.indicators) || typeof value.indicators.deadlineDate !== 'boolean' || typeof value.indicators.constraintDate !== 'boolean'
     || !record(value.chart)) return null
   const chart = value.chart
+  const dateFilter = normalizeTaskDateFilter(value.dateFilter)
+  if (dateFilter === undefined) return null
   if (!finite(chart.centerTime, -8640000000000000, 8640000000000000) || !finite(chart.scrollTop, 0, 100000000)
     || !finite(chart.nameWidth, 1, 20000) || !finite(chart.panelWidth, 1, 20000)
     || typeof chart.panelCollapsed !== 'boolean' || typeof chart.rightCollapsed !== 'boolean'
@@ -59,6 +64,7 @@ export function normalizeSavedView(value: unknown): SavedGanttView | null {
     || !record(chart.filters) || Object.keys(chart.filters).length > 100 || !Object.values(chart.filters).every(v => strings(v))) return null
   return {
     id: value.id, name: value.name.trim(), search: value.search, columns: [...new Set(value.columns)],
+    ...(value.dateFilter !== undefined ? { dateFilter } : {}),
     indicators: { deadlineDate: value.indicators.deadlineDate, constraintDate: value.indicators.constraintDate },
     colW: value.colW, critical: value.critical,
     chart: {

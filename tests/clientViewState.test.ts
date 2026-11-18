@@ -55,3 +55,15 @@ test('browser layout migration retains valid entries when malformed or duplicate
   assert.deepEqual(readSavedViews(JSON.stringify([null, {}, original, original, { ...original, id: 'second' }])), [original, { ...original, id: 'second' }])
   for (const raw of [null, 'broken', '{}', 'null']) assert.deepEqual(readSavedViews(raw), [])
 })
+
+test('layouts retain relative week and custom date filters while older layouts remain valid', () => {
+  for (const dateFilter of [null, { kind: 'week' }, { kind: 'custom', field: 'start', from: '2026-11-18', to: '2026-11-24' },
+    { kind: 'custom', field: 'either', from: '2026-11-18', to: '2026-11-18' }]) {
+    const current = { ...view(), dateFilter }
+    assert.deepEqual(normalizeSavedView(JSON.parse(JSON.stringify(current))), current)
+  }
+  assert.deepEqual(normalizeSavedView(view()), view())
+  for (const dateFilter of [{ kind: 'custom', field: 'end', from: '2026-11-24', to: '2026-11-18' }, { kind: 'week-ish' }, 'week']) {
+    assert.equal(normalizeSavedView({ ...view(), dateFilter }), null)
+  }
+})

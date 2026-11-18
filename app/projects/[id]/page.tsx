@@ -19,6 +19,8 @@ import AIChatPanel from '@/components/GanttChart/AIChatPanel'
 import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
 import SavedViewsMenu from '@/components/GanttChart/SavedViewsMenu'
 import type { ChartViewState, SavedGanttView } from '@/lib/clientViewState'
+import { getTodayYmd } from '@/lib/statusDatePolicy'
+import { resolveTaskDateFilter, type TaskDateFilter } from '@/lib/taskDateFilter'
 import { useProjectViews } from '@/lib/client/useProjectViews'
 import { useLivePlan } from '@/lib/client/useLivePlan'
 import Link from 'next/link'
@@ -78,6 +80,17 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
   // ── Gantt UI state ─────────────────────────────────────────────────────
   const [colW,              setColW]              = useState(28)
   const [searchQuery,       setSearchQuery]       = useState('')
+  const [dateFilter, setDateFilter] = useState<TaskDateFilter | null>(null)
+  const [today, setToday] = useState(() => getTodayYmd())
+  const dateRange = useMemo(() => resolveTaskDateFilter(dateFilter, today), [dateFilter, today])
+  useEffect(() => {
+    const refresh = () => setToday(getTodayYmd())
+    const timer = window.setInterval(refresh, 60_000)
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
+  }, [])
+  useEffect(() => { setDateFilter(null) }, [projectId])
   const [expandAllSignal,   setExpandAllSignal]   = useState(0)
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
   const chartCapture = useRef<(() => ChartViewState) | null>(null)
@@ -135,6 +148,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
 
   const applyLayout = useCallback((view: SavedGanttView) => {
     setSearchQuery(view.search)
+    setDateFilter(view.dateFilter ?? null)
     setVisibleCols(view.columns.filter(c => OPTIONAL_COL_META.some(m => m.key === c)) as OptionalCol[])
     setIndicators(view.indicators)
     setColW(view.colW)
@@ -340,14 +354,21 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         })}
         onExpandAll={() => setExpandAllSignal(n => n + 1)}
         onCollapseAll={() => setCollapseAllSignal(n => n + 1)}
-        onFocusTask={() => setFocusSignal(n => n + 1)}
+        onFocusTask={() => { setDateFilter(null); setSearchQuery(''); setFocusSignal(n => n + 1) }}
         onTimelineNavigate={kind => setTimelineRequest(prev => ({ kind, id: (prev?.id ?? 0) + 1 }))}
         viewControls={saveRequest => <SavedViewsMenu projectId={projectId} layouts={layouts} saveRequest={saveRequest} capture={() => {
           const chart = chartCapture.current?.()
-          return chart ? { search: searchQuery, columns: visibleCols, indicators, colW, critical: showCriticalPath, chart } : null
+          return chart ? { search: searchQuery, dateFilter, columns: visibleCols, indicators, colW, critical: showCriticalPath, chart } : null
         }} apply={applyLayout} />}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
+        dateFilter={dateFilter}
+        today={today}
+        onDateFilterChange={value => {
+          setDateFilter(value)
+          // Reveal matching descendants even if the user previously collapsed their parent.
+          if (value) setExpandAllSignal(n => n + 1)
+        }}
         onToggleAI={() => setShowAI(v => !v)}
         onAutoAI={(msg: string) => { setShowAI(true); setPendingAIMessage(msg) }}
         impactOpen={impactOpen}
@@ -380,6 +401,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
             statusDate={effectiveStatusDate}
             colW={colW}
             searchQuery={searchQuery}
+            dateRange={dateRange}
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             focusSignal={focusSignal}
@@ -400,6 +422,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         {impactOpen && <ScheduleImpactPanel readOnly={isViewOnly} isMinute={isMinute}
           onClose={() => setImpactOpen(false)} onLocate={id => {
             setSearchQuery('')
+            setDateFilter(null)
             dispatch(setSelectedIds([id]))
             setFocusSignal(n => n + 1)
           }} />}

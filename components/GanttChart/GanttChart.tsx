@@ -38,6 +38,7 @@ import { applyGridFillDown, applyGridPaste, gridCellEditable, gridSelectionRect,
 import { analyzeSchedule } from '@/lib/scheduleAnalysis'
 import { baselineVariance } from '@/lib/planBaseline'
 import type { ChartViewState } from '@/lib/clientViewState'
+import { taskMatchesDateRange, type TaskDateRange } from '@/lib/taskDateFilter'
 import { dependencyRoute, downstreamLookup, rangeIndices, routeIntersects, viewportRange } from '@/lib/ganttViewport'
 import { useGanttViewport } from './useGanttViewport'
 
@@ -384,6 +385,7 @@ interface Props {
   statusDate?: string | null
   colW?: number
   searchQuery?: string
+  dateRange?: TaskDateRange | null
   expandAllSignal?: number
   collapseAllSignal?: number
   focusSignal?: number
@@ -407,6 +409,7 @@ export default function GanttChart({
   statusDate,
   colW: colWProp,
   searchQuery = '',
+  dateRange = null,
   expandAllSignal = 0,
   collapseAllSignal = 0,
   focusSignal = 0,
@@ -1041,10 +1044,14 @@ export default function GanttChart({
       rows = rows.filter(row => matched.has(row.task.id)).map(row => ({ ...row, contextOnly: row.contextOnly || !direct.has(row.task.id) }))
     }
 
+    // Combine predicates before adding ancestors so different children cannot satisfy different filters.
+    const predicates: ((task: Task) => boolean)[] = []
+    if (dateRange) predicates.push(task => taskMatchesDateRange(task, dateRange))
+
     // 搜索过滤
     if (searchQuery) {
       const q = searchQuery.toLowerCase()
-      filterRows(task => task.name.toLowerCase().includes(q))
+      predicates.push(task => task.name.toLowerCase().includes(q))
     }
 
     // 列筛选（多列并列）
@@ -1079,14 +1086,15 @@ export default function GanttChart({
           case 'inactive':   return t.inactive ? '是' : '否'
         }
       }
-      filterRows(task => activeFilterEntries.every(([key, values]) => values.has(colVal(task, key))))
+      predicates.push(task => activeFilterEntries.every(([key, values]) => values.has(colVal(task, key))))
     }
 
     // 差异筛选：只显示版本对比中变更的任务
     if (diffFilter?.taskCodes?.length) {
       const codes = new Set(diffFilter.taskCodes)
-      filterRows(task => codes.has(task.task_code))
+      predicates.push(task => codes.has(task.task_code))
     }
+    if (predicates.length) filterRows(task => predicates.every(matches => matches(task)))
 
     // 排序（保持树形结构：仅对同层级兄弟排序）
     if (sortCol && sortDir) {
@@ -1136,7 +1144,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex])
+  }, [flatRows, previewMap, searchQuery, dateRange, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex])
 
   const rowDropTarget = useCallback((index: number | null) => {
     if (index === null || !displayRows.length) return null
@@ -3194,6 +3202,7 @@ export default function GanttChart({
              className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
              style={{ cursor: rowDrag?.dragging ? 'grabbing' : undefined }}>
+          {dateRange && displayRows.length === 0 && <p role="status" className="px-4 py-8 text-center text-sm text-gray-500">没有符合当前筛选条件的任务</p>}
           <div style={{ position: 'relative', height: totalH + 8 }}>
           {renderedRows.map(({ row, index: i }) => {
             const t = row.task

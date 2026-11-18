@@ -13,6 +13,8 @@ import {
 import { setStatusDate, setPlanningStatus } from '@/store/slices/projectSlice'
 import { customFieldsEqual, CUSTOM_FIELD_TYPES, mergeTaskAttributes, taskCustomFields } from '@/lib/taskCustomFields'
 import GanttDisplaySettings from './GanttDisplaySettings'
+import TaskDateFilterControls from './TaskDateFilterControls'
+import type { TaskDateFilter } from '@/lib/taskDateFilter'
 import ToolbarActionMenu from './ToolbarActionMenu'
 import { normalizePlanningStatus, planningStatusLabel, changeReasonsComplete } from '@/lib/planningStatus'
 import { setVersions } from '@/store/slices/versionsSlice'
@@ -183,6 +185,9 @@ interface GanttToolbarProps {
   remotePlan?: SaveBaseline | null
   searchQuery: string
   onSearchChange: (q: string) => void
+  dateFilter: TaskDateFilter | null
+  today: string
+  onDateFilterChange: (value: TaskDateFilter | null) => void
   onToggleAI?: () => void
   onAutoAI?: (msg: string) => void
   showCriticalPath?: boolean
@@ -209,6 +214,7 @@ export default function GanttToolbar({
   onExpandAll, onCollapseAll,
   onFocusTask,
   searchQuery, onSearchChange,
+  dateFilter, today, onDateFilterChange,
   onToggleAI,
   onAutoAI,
   showCriticalPath,
@@ -1821,6 +1827,8 @@ export default function GanttToolbar({
             <button onClick={() => onSearchChange('')} className="text-gray-400 hover:text-gray-600 text-sm">×</button>
           )}
         </div>
+
+        <TaskDateFilterControls value={dateFilter} today={today} onChange={onDateFilterChange} />
 
         <GanttDisplaySettings visibleCols={visibleCols} onVisibleColsChange={onVisibleColsChange}
           indicators={indicators} onIndicatorsChange={onIndicatorsChange}
