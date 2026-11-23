@@ -86,6 +86,20 @@ async function fixture(minute) {
     await page.waitForSelector(cell('free', 'end')); await page.waitForNetworkIdle({ idleTime: 150 }); await frame();
   };
   await open();
+  // Duration and finish form a two-way edit: keep the start and scheduling mode, update the other value and the chain.
+  for (const keyboard of [false, true]) {
+    await click(cell('fs', 'duration'));
+    if (keyboard) { await page.focus('[data-gantt-grid]'); await key('F2'); }
+    else await click(cell('fs', 'duration'), 'dblclick');
+    await page.waitForSelector(`${cell('fs', 'duration')} input`);
+    await fill(`${cell('fs', 'duration')} input`, minute ? '255' : '4');
+    await key('Enter'); await page.waitForSelector(`${cell('fs', 'duration')} input`, { hidden: true });
+    const end = minute ? 5.25 : 5;
+    await expectCell('fs', 'duration', minute ? '255分钟' : '4天');
+    await expectCell('fs', 'start', display(1)); await expectCell('fs', 'end', display(end)); await expectCell('fs', 'taskType', '自动');
+    await expectCell('next', 'start', display(end)); await expectCell('parent', 'end', display(end + 1));
+    await button('撤销'); await expectCell('fs', 'end', display(3)); await expectCell('next', 'start', display(3));
+  }
   for (const [keyboard, commit, end] of [[false, 'Enter', 5], [true, 'Tab', 4], [false, 'blur', minute ? 4.25 : 5]]) {
     await editEnd('fs', input(end), keyboard, commit);
     await expectCell('fs', 'start', display(1)); await expectCell('fs', 'end', display(end));
@@ -111,7 +125,7 @@ async function fixture(minute) {
   await button('撤销');
   role = 'view'; await open();
   for (const keyboard of [false, true]) { await openEnd('fs', keyboard); assert.equal(await page.$(`${cell('fs', 'end')} input`), null); }
-  console.log(`PASS ${minute ? 'minute' : 'day'}: finish editing, preserved starts, durations, cascade, repeated edits, Enter/Tab/blur, undo, invalid dates, dependency/summary/read-only restrictions`);
+  console.log(`PASS ${minute ? 'minute' : 'day'}: duration/finish two-way editing, preserved starts, cascade, repeated edits, Enter/Tab/blur, undo, invalid dates, dependency/summary/read-only restrictions`);
   await page.close();
 }
 (async () => {
