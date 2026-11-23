@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canEditTaskStart, buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
+import { canEditTaskStart, canEditTaskEnd, buildTaskScheduleEdit, defaultTaskSchedule, durationInputValue, hasPastStartDate, resizeTaskSchedule, scheduleDurationMinutes } from '../lib/clientTaskEdit'
 import { gridCellEditable } from '../lib/clientGridEdit'
 import { buildSaveDiff } from '../lib/clientSave'
 import { runFullCascade } from '../lib/clientScheduling'
@@ -215,4 +215,46 @@ test('editing an unlinked milestone start moves its finish and preserves zero du
   assert.deepEqual(buildTaskScheduleEdit(original, [], 'start_date', '2026-06-02', false), {
     start_date: '2026-06-02T00:00:00', end_date: '2026-06-02T00:00:00', duration: 0,
   })
+})
+
+test('automatic FS/SS finish edits preserve the start, recalculate duration and cascade successors in both precisions', () => {
+  for (const isMinute of [false, true]) for (const type of [0, 2]) {
+    const at = (day: number) => `2026-06-0${day}T${isMinute ? '09:15' : '00:00'}:00`
+    const predecessor = task({ id: 'predecessor', start_date: at(1), end_date: at(2), duration: 1440 })
+    const original = task({ auto_schedule: true, start_date: at(type === 0 ? 1 : 2), end_date: at(4), duration: (type === 0 ? 3 : 2) * 1440 })
+    const successor = task({ id: 'successor', auto_schedule: true, start_date: at(4), end_date: at(5), duration: 1440 })
+    const deps = [dependency(type), { ...dependency(2), id: 'downstream', from_task_id: original.id, to_task_id: successor.id }]
+    const tasks = [predecessor, original, successor]
+    assert.equal(canEditTaskEnd(original, deps), true)
+    assert.equal(gridCellEditable(original, 'end', tasks, deps), true)
+    const edited = { ...original, ...buildTaskScheduleEdit(original, deps, 'end_date', at(6), isMinute) }
+    assert.equal(edited.start_date, original.start_date)
+    assert.equal(edited.end_date, at(6))
+    assert.equal(edited.duration, (type === 0 ? 5 : 4) * 1440)
+    assert.equal(edited.auto_schedule, true)
+    const updates = runFullCascade([predecessor, edited, successor], deps, { isMinute })
+    assert.equal(updates.find(t => t.id === successor.id)?.start_date, at(6))
+    assert.equal(updates.find(t => t.id === successor.id)?.end_date, at(7))
+    assert.equal(buildSaveDiff(tasks, deps, [predecessor, edited, ...updates.filter(t => t.id === successor.id)], deps).tasksToUpdate.find(t => t.id === original.id)?.end_date, at(6))
+  }
+})
+
+test('finish editability considers all active FF/SF dependencies regardless of order and keeps manual dates editable', () => {
+  const original = task({ auto_schedule: true })
+  for (const dependencies of [[dependency(1)], [dependency(3)], [dependency(2), dependency(3)], [dependency(3), dependency(2)]]) {
+    assert.equal(canEditTaskEnd(original, dependencies), false)
+    assert.equal(gridCellEditable(original, 'end', [original], dependencies), false)
+    assert.deepEqual(buildTaskScheduleEdit(original, dependencies, 'end_date', '2026-06-06', false), {})
+    const manual = { ...original, auto_schedule: false }
+    assert.equal(gridCellEditable(manual, 'end', [manual], dependencies), true)
+    assert.equal(buildTaskScheduleEdit(manual, dependencies, 'end_date', '2026-06-06', false).end_date, '2026-06-06T00:00:00')
+  }
+  for (const dependencies of [[], [{ ...dependency(3), active: false }], [{ ...dependency(2), active: false }], [dependency(0), dependency(2)]]) {
+    assert.equal(canEditTaskEnd(original, dependencies), true)
+    assert.equal(gridCellEditable(original, 'end', [original], dependencies), true)
+    assert.equal(buildTaskScheduleEdit(original, dependencies, 'end_date', '2026-06-06', false).duration, 7200)
+  }
+  const child = task({ id: 'child', parent_id: original.id })
+  assert.equal(gridCellEditable(original, 'end', [original, child], []), false)
+  assert.equal(gridCellEditable(original, 'end', [original, { ...child, is_deleted: true }], []), true)
 })

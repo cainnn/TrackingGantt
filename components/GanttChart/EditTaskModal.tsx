@@ -18,7 +18,7 @@ import { uuid } from '@/lib/uuid'
 import { planDependencyRemoval } from '@/lib/dependencyRemoval'
 import YmdDateInput from '@/components/YmdDateInput'
 import { addMinutesStr, parseLocal } from '@/lib/clientTime'
-import { canEditTaskStart, defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
+import { canEditTaskStart, canEditTaskEnd, defaultTaskSchedule, hasPastStartDate, normalizeScheduleDate, scheduleDurationMinutes } from '@/lib/clientTaskEdit'
 import { describeLifecycleChange } from '@/lib/taskLifecycleDisplay'
 
 interface Props {
@@ -390,9 +390,8 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
 
   // Determine date editability based on dep types
   const activeIncoming = incomingDeps.map(d => ({ ...d, active: activeEdits[d.id] ?? d.active ?? true })).filter(d => d.active)
-  const hasFF_SF = activeIncoming.some(d => d.type === 3 || d.type === 1)
   const startReadonly = isSummary || !canEditTaskStart({ ...task, auto_schedule: !manualSchedule }, activeIncoming)
-  const endReadonly = !manualSchedule && hasFF_SF
+  const endReadonly = isSummary || !canEditTaskEnd({ ...task, auto_schedule: !manualSchedule }, activeIncoming)
 
   const handleDateChange = (field: 'start' | 'end', value: string) => {
     setFormError('')
@@ -744,6 +743,7 @@ export default function EditTaskModal({ taskId, projectId, onClose }: Props) {
                   {endReadonly ? (
                     <div className="border border-gray-200 bg-gray-50 rounded px-3 py-1.5 text-sm text-gray-400">
                       {endDate ? (isMinute ? endDate.replace('T', ' ') : endDate) : '—'}
+                      <p className="mt-1 text-[11px]">{isSummary ? '日期由子任务汇总' : '完成日期由前置依赖决定，可在“前置”页调整'}</p>
                     </div>
                   ) : (
                     <YmdDateInput

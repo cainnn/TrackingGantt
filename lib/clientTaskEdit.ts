@@ -53,6 +53,12 @@ export function canEditTaskStart(task: Pick<Task, 'id' | 'auto_schedule'>, deps:
   return task.auto_schedule === false || !deps.some(dep => dep.to_task_id === task.id && dep.active !== false && (dep.type === 2 || dep.type === 0))
 }
 
+/** Only active FF/SF predecessors control the finish. FS/SS tasks may change
+ * their finish while preserving the dependency-controlled start and recomputing duration. */
+export function canEditTaskEnd(task: Pick<Task, 'id' | 'auto_schedule'>, deps: Dependency[]): boolean {
+  return task.auto_schedule === false || !deps.some(dep => dep.to_task_id === task.id && dep.active !== false && (dep.type === 3 || dep.type === 1))
+}
+
 /** Inline schedule inputs use project units; task durations always store minutes. */
 export function buildTaskScheduleEdit(
   task: Task,
@@ -78,6 +84,7 @@ export function buildTaskScheduleEdit(
   }
 
   if (field === 'start_date' && !canEditTaskStart(task, deps)) return {}
+  if (field === 'end_date' && !canEditTaskEnd(task, deps)) return {}
   const date = normalizeDate(value)
   if (!date) return {}
   if (task.is_milestone) return { start_date: date, end_date: date, duration: 0 }

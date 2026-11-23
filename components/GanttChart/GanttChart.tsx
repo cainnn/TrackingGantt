@@ -2849,9 +2849,9 @@ export default function GanttChart({
     const task = tasks.find(t => t.id === cell.taskId)
     if (!task) return
     if (!gridCellEditable(task, cell.col, tasks, deps)) {
-      if (cell.col === 'start') setGridNotice(tasks.some(t => !t.is_deleted && t.parent_id === task.id)
+      if (cell.col === 'start' || cell.col === 'end') setGridNotice(tasks.some(t => !t.is_deleted && t.parent_id === task.id)
         ? '摘要任务的日期由子任务汇总，请修改子任务日期。'
-        : '开始日期由前置依赖决定，可调整前置关系或切换为手动排程后修改。')
+        : `${cell.col === 'start' ? '开始' : '完成'}日期由前置依赖决定，可调整前置关系或切换为手动排程后修改。`)
       return
     }
     setGridNotice('')
@@ -3502,14 +3502,7 @@ export default function GanttChart({
                        data-col="end" onClick={pickCell('end')}
                        onDoubleClick={e => {
                          e.stopPropagation()
-                         if (readOnly) return
-                         if (t.auto_schedule !== false) {
-                           const inc = deps.filter(d => d.to_task_id === t.id)
-                           const dt = inc.length > 0 ? (inc[0].type ?? 2) : -1
-                           // FS/SS: 结束日期由工期推导，不可编辑；FF/SF: 结束日期可编辑
-                           if (dt !== 3 && dt !== 1 && dt !== -1) return
-                         }
-                         setCellEdit({ taskId: t.id, field: 'end_date', value: (t.end_date ?? '').slice(0, isMinute ? 16 : 10) })
+                         beginCellEditing({ taskId: t.id, col: 'end' })
                        }}>
                     {cellEdit?.taskId === t.id && cellEdit.field === 'end_date'
                       ? <DateCellEditor label={isMinute ? '完成时间' : '完成日期'} includeTime={isMinute} value={cellEdit.value}
