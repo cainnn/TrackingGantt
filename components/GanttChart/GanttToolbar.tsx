@@ -194,6 +194,10 @@ interface GanttToolbarProps {
   onToggleCriticalPath?: () => void
   impactOpen?: boolean
   onToggleImpact?: () => void
+  traceOpen?: boolean
+  onToggleTrace?: () => void
+  onDrivingPath?: () => void
+  onAllPredecessors?: () => void
   onToggleProjectLines?: () => void
   showComparison?: boolean
   onToggleComparison?: () => void
@@ -228,7 +232,7 @@ export default function GanttToolbar({
   indicators,
   onIndicatorsChange,
   onDiscardChanges,
-  onTimelineNavigate, viewControls, remotePlan, impactOpen, onToggleImpact,
+  onTimelineNavigate, viewControls, remotePlan, impactOpen, onToggleImpact, traceOpen, onToggleTrace, onDrivingPath, onAllPredecessors,
 }: GanttToolbarProps) {
   const dispatch = useAppDispatch()
   const reduxStore = useStore<RootState>()
@@ -1802,6 +1806,13 @@ export default function GanttToolbar({
           <button className="text-blue-600 hover:underline" onClick={() => dispatch(setSelectedIds([]))}>清除选择</button>
         </div>}
         <button type="button" onClick={() => setScheduleIssuesOpen(true)} className="h-8 whitespace-nowrap rounded border border-gray-300 bg-white px-2.5 text-[13px] text-gray-700 hover:bg-gray-50">排程检查</button>
+        {onToggleTrace && <button type="button" aria-expanded={traceOpen} aria-controls="dependency-trace-panel" onClick={onToggleTrace}
+          title="Dependency Tracer：查看并逐级跟踪当前任务的前置与后续依赖"
+          className={`h-8 whitespace-nowrap rounded border px-2.5 text-[13px] ${traceOpen ? 'border-violet-300 bg-violet-50 text-violet-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`}>依赖跟踪</button>}
+        {onAllPredecessors && <button type="button" title="查看所有层级的有效前置任务，包括直接和间接前置" disabled={selectedIds.length !== 1} onClick={onAllPredecessors}
+          className="h-8 whitespace-nowrap rounded border border-violet-300 bg-white px-2.5 text-[13px] text-violet-700 hover:bg-violet-50 disabled:opacity-40">所有前置任务</button>}
+        {onDrivingPath && <button type="button" title="Get Driving Path：追溯驱动选中任务日期的前置链" disabled={selectedIds.length !== 1} onClick={onDrivingPath}
+          className="h-8 whitespace-nowrap rounded border border-violet-300 bg-white px-2.5 text-[13px] text-violet-700 hover:bg-violet-50 disabled:opacity-40">驱动路径</button>}
         {!readOnly && !viewSnapshot && <button type="button" data-action="repair-schedule" disabled={history.saving || history.uncertain}
           title="优先按有效前置依赖修复；没有有效前置的历史开始日期保持不变" onClick={() => setTaskRepairOpen(true)}
           className="h-8 whitespace-nowrap rounded border border-blue-300 bg-white px-2.5 text-[13px] text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">修复排程</button>}

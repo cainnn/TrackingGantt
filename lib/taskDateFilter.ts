@@ -36,9 +36,9 @@ export function resolveTaskDateFilter(filter: TaskDateFilter | null, today: stri
   if (!filter) return null
   if (filter.kind === 'custom') return { field: filter.field, from: filter.from, to: filter.to }
   // Calendar arithmetic avoids daylight-saving offsets. Today is supplied by the app's date policy.
-  const end = new Date(`${today}T00:00:00Z`)
-  end.setUTCDate(end.getUTCDate() + 6)
-  return { field: 'end', from: today, to: end.toISOString().slice(0, 10) }
+  const start = new Date(`${today}T00:00:00Z`)
+  start.setUTCDate(start.getUTCDate() - 7)
+  return { field: 'end', from: start.toISOString().slice(0, 10), to: today }
 }
 
 export function taskMatchesDateRange(task: { start_date?: string | null; end_date?: string | null }, range: TaskDateRange): boolean {

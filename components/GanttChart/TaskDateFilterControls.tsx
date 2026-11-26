@@ -44,7 +44,7 @@ export default function TaskDateFilterControls({ value, today, onChange }: {
 
   const buttonClass = (active: boolean) => `h-8 whitespace-nowrap rounded border px-2.5 text-[13px] ${active ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'}`
   return <div ref={root} role="group" aria-label="任务日期筛选" className="flex flex-wrap items-center gap-1.5">
-    <button type="button" aria-pressed={value?.kind === 'week'} title="筛选从今天起 7 天内结束的任务（含今天）"
+    <button type="button" aria-pressed={value?.kind === 'week'} title="筛选今天往前一周至今天结束的任务（含首尾日期）"
       className={buttonClass(value?.kind === 'week')} onClick={() => { setOpen(false); onChange(value?.kind === 'week' ? null : { kind: 'week' }) }}>近一周</button>
     <button ref={trigger} type="button" aria-haspopup="dialog" aria-expanded={open}
       className={buttonClass(open || value?.kind === 'custom')} onClick={() => {

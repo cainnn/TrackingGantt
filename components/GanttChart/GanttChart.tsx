@@ -39,6 +39,7 @@ import { analyzeSchedule } from '@/lib/scheduleAnalysis'
 import { baselineVariance } from '@/lib/planBaseline'
 import type { ChartViewState } from '@/lib/clientViewState'
 import { taskMatchesDateRange, type TaskDateRange } from '@/lib/taskDateFilter'
+import type { TraceHighlight } from '@/lib/dependencyTrace'
 import { dependencyRoute, downstreamLookup, rangeIndices, routeIntersects, viewportRange } from '@/lib/ganttViewport'
 import { useGanttViewport } from './useGanttViewport'
 
@@ -386,6 +387,7 @@ interface Props {
   colW?: number
   searchQuery?: string
   dateRange?: TaskDateRange | null
+  traceHighlight?: TraceHighlight | null
   expandAllSignal?: number
   collapseAllSignal?: number
   focusSignal?: number
@@ -397,7 +399,7 @@ interface Props {
   showComparison?: boolean
   onStatusDatePreviewChange?: (statusDate: string | null) => void
   discardSignal?: number
-  timelineRequest?: { kind: 'all' | 'selection' | 'status'; id: number }
+  timelineRequest?: { kind: 'all' | 'selection' | 'status' | 'tasks'; taskIds?: string[]; id: number }
   onColWChange?: (width: number) => void
   viewRestore?: { state: ChartViewState; id: number }
   onCaptureReady?: (capture: (() => ChartViewState) | null) => void
@@ -410,6 +412,7 @@ export default function GanttChart({
   colW: colWProp,
   searchQuery = '',
   dateRange = null,
+  traceHighlight = null,
   expandAllSignal = 0,
   collapseAllSignal = 0,
   focusSignal = 0,
@@ -861,6 +864,16 @@ export default function GanttChart({
   }, [measureViewport])
 
   // ── Flat row list ───────────────────────────────────────────────────────
+  const traceExpanded = useMemo(() => {
+    const result = new Set<string>()
+    if (!traceHighlight) return result
+    const byId = new Map(tasks.map(t => [t.id, t]))
+    for (const id of traceHighlight.taskIds) {
+      let parent = byId.get(id)?.parent_id
+      while (parent && !result.has(parent)) { result.add(parent); parent = byId.get(parent)?.parent_id }
+    }
+    return result
+  }, [traceHighlight, tasks])
   const flatRows = useMemo((): FlatRow[] => {
     const kids: Record<string,Task[]> = {}
     tasks.forEach(t => {
@@ -878,13 +891,14 @@ export default function GanttChart({
         if (visited.has(t.id)) return // 防止循环引用
         visited.add(t.id)
         const has = !!(kids[t.id]?.length)
-        rows.push({ task:t, level:lvl, hasChildren:has, expanded:expanded[t.id]??true })
-        if (has && (expanded[t.id]??true)) walk(t.id, lvl+1)
+        const isExpanded = traceExpanded.has(t.id) || (expanded[t.id] ?? true)
+        rows.push({ task:t, level:lvl, hasChildren:has, expanded:isExpanded })
+        if (has && isExpanded) walk(t.id, lvl+1)
       })
     }
     walk(null,0)
     return rows
-  }, [tasks, expanded])
+  }, [tasks, expanded, traceExpanded])
 
   // ── WBS numbering + sequential index ─────────────────────────────────────
   const { wbsMap, seqMap } = useMemo(() => {
@@ -1094,7 +1108,8 @@ export default function GanttChart({
       const codes = new Set(diffFilter.taskCodes)
       predicates.push(task => codes.has(task.task_code))
     }
-    if (predicates.length) filterRows(task => predicates.every(matches => matches(task)))
+    if (traceHighlight?.onlyPath) filterRows(task => traceHighlight.taskIds.has(task.id))
+    else if (predicates.length) filterRows(task => predicates.every(matches => matches(task)))
 
     // 排序（保持树形结构：仅对同层级兄弟排序）
     if (sortCol && sortDir) {
@@ -1144,7 +1159,7 @@ export default function GanttChart({
     }
 
     return rows
-  }, [flatRows, previewMap, searchQuery, dateRange, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex])
+  }, [flatRows, previewMap, searchQuery, dateRange, traceHighlight, tasks, deps, colFilters, diffFilter, sortCol, sortDir, effectiveChartStatusDate, tasksWithSnapshotBaseline, prevSnapshotTaskIds, latestSnapshotEnds, isMinute, metricText, metricValue, taskById, dependencyIndex])
 
   const rowDropTarget = useCallback((index: number | null) => {
     if (index === null || !displayRows.length) return null
@@ -3029,7 +3044,7 @@ export default function GanttChart({
       syncTimelineScrollLeft(Math.max(0, dateToX(target) - rightRef.current.clientWidth / 2))
       return
     }
-    const candidates = tasks.filter(t => !t.is_deleted && (kind === 'all' || selectedIds.includes(t.id)))
+    const candidates = tasks.filter(t => !t.is_deleted && (kind === 'all' || (kind === 'tasks' ? timelineRequest.taskIds?.includes(t.id) : selectedIds.includes(t.id))))
     const starts = candidates.flatMap(t => t.start_date ? [new Date(t.start_date).getTime()] : []).filter(Number.isFinite)
     const ends = candidates.flatMap(t => t.end_date ? [new Date(t.end_date).getTime()] : []).filter(Number.isFinite)
     if (!starts.length || !ends.length) return
@@ -3202,7 +3217,7 @@ export default function GanttChart({
              className="relative overflow-y-scroll flex-1 scrollbar-hide outline-none"
              onScroll={onLeftBodyScroll}
              style={{ cursor: rowDrag?.dragging ? 'grabbing' : undefined }}>
-          {dateRange && displayRows.length === 0 && <p role="status" className="px-4 py-8 text-center text-sm text-gray-500">没有符合当前筛选条件的任务</p>}
+          {(dateRange || traceHighlight?.onlyPath) && displayRows.length === 0 && <p role="status" className="px-4 py-8 text-center text-sm text-gray-500">没有符合当前筛选条件的任务</p>}
           <div style={{ position: 'relative', height: totalH + 8 }}>
           {renderedRows.map(({ row, index: i }) => {
             const t = row.task
@@ -3233,9 +3248,10 @@ export default function GanttChart({
               <React.Fragment key={t.id}>
                 <div
                   className={`flex border-b border-gray-100 cursor-pointer
-                    ${sel ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                    ${traceHighlight?.taskIds.has(t.id) ? t.id === traceHighlight.focusId ? 'bg-violet-100' : 'bg-violet-50' : sel ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                   style={{ position: 'absolute', top: i * ROW_H, left: 0, right: 0, height: ROW_H, opacity: isDraggingThis ? 0.35 : 1 }}
                   data-task-row={t.id}
+                  data-trace-task={traceHighlight?.taskIds.has(t.id) ? t.id === traceHighlight.focusId ? 'focus' : 'path' : undefined}
                   onMouseDownCapture={() => { rowDragJustEnded.current = false }}
                   onClickCapture={e => {
                     if (rowDragJustEnded.current) { rowDragJustEnded.current = false; e.preventDefault(); e.stopPropagation(); return }
@@ -4118,6 +4134,9 @@ export default function GanttChart({
                     markerWidth="5" markerHeight="5" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" fill="#ef4444" />
             </marker>
+            <marker id="dep-arrow-trace" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+              <path d="M0,0 L8,4 L0,8 Z" fill="#7c3aed" />
+            </marker>
             <marker id="connect-arrow" viewBox="0 0 8 8" refX="7" refY="4"
                     markerWidth="5" markerHeight="5" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" fill="#3b82f6" />
@@ -4245,11 +4264,12 @@ export default function GanttChart({
           {/* Dependency arrows — 渲染在 bar 之前，避免 10px 命中带覆盖任务条阻挡拖拽 */}
           {visibleDependencies.map(({ dep, x1, x2, y1, y2, path: d }) => {
             const isSel = selectedDep === dep.id
+            const traced = traceHighlight?.dependencyIds.has(dep.id)
             const midPtX = (x1+x2)/2
             const midPtY = (y1+y2)/2
             const isDragTarget = depDrag?.depId === dep.id && depDrag.dragging
             return (
-              <g key={dep.id} data-dependency-id={dep.id}>
+              <g key={dep.id} data-dependency-id={dep.id} data-trace-edge={traced ? 'true' : undefined}>
                 <path d={d} stroke="transparent" strokeWidth={10} fill="none"
                       style={{ cursor: readOnly ? 'pointer' : 'ew-resize' }}
                       onClick={e=>{
@@ -4263,10 +4283,10 @@ export default function GanttChart({
                       }}
                       onMouseDown={e=>onDepLineMouseDown(e, dep, midPtX, midPtY)} />
                 <path d={d}
-                      stroke={isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '#ef4444' : '#9ca3af'}
-                      strokeWidth={isDragTarget ? 2.5 : isSel ? 2 : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? 2 : 1.5}
+                      stroke={traced ? '#7c3aed' : isDragTarget ? '#3b82f6' : isSel ? '#ef4444' : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '#ef4444' : '#9ca3af'}
+                      strokeWidth={traced ? 2.5 : isDragTarget ? 2.5 : isSel ? 2 : (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? 2 : 1.5}
                       strokeDasharray={isDragTarget ? '5 3' : undefined}
-                      fill="none" markerEnd={`url(#dep-arrow${isDragTarget || isSel || (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '-sel' : ''})`}
+                      fill="none" markerEnd={`url(#dep-arrow${traced ? '-trace' : isDragTarget || isSel || (showCriticalPath && scheduleAnalysis.criticalDependencies.has(dep.id)) ? '-sel' : ''})`}
                       style={{ pointerEvents:'none' }} />
                 {isSel && (() => {
                   const mx = (x1+x2)/2, my = (y1+y2)/2
@@ -4381,7 +4401,7 @@ export default function GanttChart({
                    onMouseDown={e => onBarMouseDown(e, t)}>
                   <text x={cx-r-4} y={cy+4} fontSize={11} textAnchor="end" fill="#6b7280" style={{ pointerEvents:'none' }}>{t.name}</text>
                   <polygon points={`${cx},${cy-r} ${cx+r},${cy} ${cx},${cy+r} ${cx-r},${cy}`}
-                           fill="#fbbf24" stroke="#f59e0b" strokeWidth={1} />
+                           fill={traceHighlight?.taskIds.has(t.id) ? '#a78bfa' : '#fbbf24'} stroke={traceHighlight?.taskIds.has(t.id) ? '#6d28d9' : '#f59e0b'} strokeWidth={1} />
                   {/* Connect circle for creating dependencies */}
                   {hovered && (
                     <circle cx={cx+r+6} cy={cy} r={6}
@@ -4411,9 +4431,9 @@ export default function GanttChart({
                    onMouseDown={e=>{ if(e.button!==0)return; onBarMouseDown(e,t) }}
                    style={{ cursor:'grab', opacity: (isDragging?0.7:1) * inactiveDim }}>
                   <text x={x-4} y={y+BAR_H/2+4} fontSize={11} textAnchor="end" fill="#6b7280" fontWeight="600" style={{ pointerEvents:'none' }}>{t.name}</text>
-                  <rect x={x} y={y} width={w} height={BAR_H} fill="#93c5fd" rx={3} opacity={0.9}/>
+                  <rect x={x} y={y} width={w} height={BAR_H} fill={traceHighlight?.taskIds.has(t.id) ? '#c4b5fd' : '#93c5fd'} rx={3} opacity={0.9}/>
                   {sDoneW > 0.5 && (
-                    <rect x={x} y={y} width={sDoneW} height={BAR_H} fill="#3b82f6" rx={3} opacity={0.9}/>
+                    <rect x={x} y={y} width={sDoneW} height={BAR_H} fill={traceHighlight?.taskIds.has(t.id) ? '#8b5cf6' : '#3b82f6'} rx={3} opacity={0.9}/>
                   )}
                   <polygon points={`${x},${y+BAR_H} ${x+capW},${y+BAR_H} ${x},${y+BAR_H+capH}`} fill="#60a5fa"/>
                   <polygon points={`${x+w},${y+BAR_H} ${x+w-capW},${y+BAR_H} ${x+w},${y+BAR_H+capH}`} fill="#60a5fa"/>
@@ -4426,10 +4446,11 @@ export default function GanttChart({
             const doneW = w * pct
             const hovered = hoveredBar === t.id
             const isCritical = criticalSet.has(t.id)
+            const traced = traceHighlight?.taskIds.has(t.id)
             // 关键路径：红色调；普通：绿色调
-            const barBg   = isCritical ? '#fca5a5' : '#86efac'
-            const barDone = isCritical ? '#f87171' : '#4ade80'
-            const barText = isCritical ? '#7f1d1d' : '#14532d'
+            const barBg   = traced ? t.id === traceHighlight?.focusId ? '#a78bfa' : '#ddd6fe' : isCritical ? '#fca5a5' : '#86efac'
+            const barDone = traced ? '#8b5cf6' : isCritical ? '#f87171' : '#4ade80'
+            const barText = traced ? '#4c1d95' : isCritical ? '#7f1d1d' : '#14532d'
 
             return (
               <g key={t.id} style={{ opacity: (isDragging?0.65:1) * inactiveDim }}

@@ -14,6 +14,8 @@ import { setCurrentProject } from '@/store/slices/projectSlice'
 import { setVersions } from '@/store/slices/versionsSlice'
 import { setProjectLines, clearProjectLines } from '@/store/slices/projectLinesSlice'
 import ScheduleImpactPanel from '@/components/GanttChart/ScheduleImpactPanel'
+import DependencyTracePanel from '@/components/GanttChart/DependencyTracePanel'
+import { buildDependencyGraph, traceDependencyPath, type TraceMode } from '@/lib/dependencyTrace'
 import GanttToolbar from '@/components/GanttChart/GanttToolbar'
 import AIChatPanel from '@/components/GanttChart/AIChatPanel'
 import ProjectLinesPanel from '@/components/GanttChart/ProjectLinesPanel'
@@ -59,7 +61,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
   const [restoreReview, setRestoreReview] = useState(false)
   const [restoring, setRestoring] = useState(false)
   const [baselineRevision, setBaselineRevision] = useState(0)
-  const { tasks, viewSnapshot } = useAppSelector(s => s.tasks)
+  const { tasks, dependencies, selectedIds, viewSnapshot } = useAppSelector(s => s.tasks)
   // 浏览历史版本时强制只读，防止误操作
   const isViewOnly = user?.role === 'view' || !!viewSnapshot
   // 浏览历史版本时，状态日期跟随被浏览版本（影响延期检测、当前线、进度计算）
@@ -95,9 +97,22 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
   const [collapseAllSignal, setCollapseAllSignal] = useState(0)
   const chartCapture = useRef<(() => ChartViewState) | null>(null)
   const [viewRestore, setViewRestore] = useState<{ state: ChartViewState; id: number } | undefined>()
-  const [timelineRequest, setTimelineRequest] = useState<{ kind: 'all' | 'selection' | 'status'; id: number } | undefined>()
+  const [timelineRequest, setTimelineRequest] = useState<{ kind: 'all' | 'selection' | 'status' | 'tasks'; taskIds?: string[]; id: number } | undefined>()
   const [focusSignal,       setFocusSignal]       = useState(0)
   const [impactOpen, setImpactOpen] = useState(false)
+  const [traceOpen, setTraceOpen] = useState(false)
+  const [traceMode, setTraceMode] = useState<TraceMode | 'direct'>('direct')
+  const [traceTarget, setTraceTarget] = useState('')
+  const [traceTolerance, setTraceTolerance] = useState(0)
+  const [traceOnly, setTraceOnly] = useState(false)
+  const traceFocus = selectedIds.length === 1 ? selectedIds[0] : ''
+  const traceGraph = useMemo(() => traceOpen ? buildDependencyGraph(viewSnapshot?.tasks ?? tasks, viewSnapshot?.dependencies ?? dependencies) : null,
+    [traceOpen, viewSnapshot, tasks, dependencies])
+  const tracePath = useMemo(() => traceGraph && traceFocus && traceMode !== 'direct'
+    ? traceDependencyPath(traceGraph, traceFocus, traceMode, traceTolerance * (isMinute ? 1 : 1440), traceTarget) : null,
+  [traceGraph, traceFocus, traceMode, traceTolerance, isMinute, traceTarget])
+  const traceHighlight = useMemo(() => tracePath ? { ...tracePath, focusId: traceFocus, onlyPath: traceOnly } : null, [tracePath, traceFocus, traceOnly])
+  useEffect(() => { setTraceMode('direct'); setTraceTarget(''); setTraceOnly(false) }, [viewSnapshot?.versionId])
   const [showAI,            setShowAI]            = useState(false)
   const [showCriticalPath,  setShowCriticalPath]  = useState(false)
   const [showProjectLines,  setShowProjectLines]  = useState(false)
@@ -373,6 +388,16 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
         onAutoAI={(msg: string) => { setShowAI(true); setPendingAIMessage(msg) }}
         impactOpen={impactOpen}
         onToggleImpact={() => setImpactOpen(v => !v)}
+        traceOpen={traceOpen}
+        onToggleTrace={() => setTraceOpen(v => !v)}
+        onDrivingPath={() => { setTraceOpen(true); setTraceMode('driving'); setTraceTolerance(0) }}
+        onAllPredecessors={() => {
+          if (!traceFocus) return
+          const graph = traceGraph ?? buildDependencyGraph(viewSnapshot?.tasks ?? tasks, viewSnapshot?.dependencies ?? dependencies)
+          const path = traceDependencyPath(graph, traceFocus, 'upstream')
+          setTraceOpen(true); setTraceMode('upstream'); setTraceOnly(true)
+          setTimelineRequest(prev => ({ kind: 'tasks', taskIds: [...path.taskIds], id: (prev?.id ?? 0) + 1 }))
+        }}
         showCriticalPath={showCriticalPath}
         onToggleCriticalPath={() => setShowCriticalPath(v => !v)}
         onToggleProjectLines={() => setShowProjectLines(v => !v)}
@@ -402,6 +427,7 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
             colW={colW}
             searchQuery={searchQuery}
             dateRange={dateRange}
+            traceHighlight={traceHighlight}
             expandAllSignal={expandAllSignal}
             collapseAllSignal={collapseAllSignal}
             focusSignal={focusSignal}
@@ -435,6 +461,14 @@ function ProjectWorkspace({ projectId }: { projectId: string }) {
           />
         )}
       </div>
+      {traceOpen && traceGraph && <DependencyTracePanel key={viewSnapshot?.versionId ?? 'current'} graph={traceGraph}
+        focusId={traceFocus} mode={traceMode} path={tracePath} targetId={traceTarget} tolerance={traceTolerance}
+        onlyPath={traceOnly} isMinute={!!isMinute} sourceLabel={viewSnapshot ? `历史版本：${viewSnapshot.versionName}` : draftChanged ? '当前计划（含未保存修改）' : '当前计划'}
+        onModeChange={setTraceMode} onTargetChange={setTraceTarget} onToleranceChange={setTraceTolerance}
+        onOnlyPathChange={setTraceOnly} onClose={() => setTraceOpen(false)}
+        onClear={() => { setTraceMode('direct'); setTraceOnly(false) }}
+        onFit={() => setTimelineRequest(prev => ({ kind: 'tasks', taskIds: [...(tracePath?.taskIds ?? [])], id: (prev?.id ?? 0) + 1 }))}
+        onLocate={id => { dispatch(setSelectedIds([id])); setSearchQuery(''); setDateFilter(null); setFocusSignal(n => n + 1) }} />}
     </div>
   )
 }

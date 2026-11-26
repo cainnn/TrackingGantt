@@ -75,6 +75,8 @@ async function fixture(minute) {
     ['today', '今日完成', '2026-11-16', '2026-11-18', 'parent'],
     ['last', '第七日完成', '2026-11-20', '2026-11-24', 'parent'],
     ['outside', '范围外完成', '2026-11-16', '2026-11-25', 'parent'],
+    ['weekAgo', '一周前完成', '2026-11-09', '2026-11-11', 'parent'],
+    ['before', '八天前完成', '2026-11-09', '2026-11-10', 'parent'],
     ['past', '昨日完成', '2026-11-16', '2026-11-17', null],
     ['start', '区间内开始', '2026-11-18', '2026-11-26', null],
     ['span', '跨越整个区间', '2026-11-01', '2026-11-30', null],
@@ -117,8 +119,13 @@ async function fixture(minute) {
   };
   await open();
   await expectRows(['parent', 'past', 'start', 'span', 'missing']);
-  await button('近一周'); await expectRows(['parent', 'today', 'last']);
-  assert.match(await page.$eval('[data-date-filter-summary]', el => el.textContent), /结束日期：2026-11-18 至 2026-11-24/);
+  await button('自定义日期'); await page.waitForSelector(dialog);
+  assert.equal(await page.$eval(`${dialog} select`, el => el.value), 'end');
+  assert.equal(await page.$eval(`${dialog} input[aria-label="筛选起始日期"]`, el => el.value), '2026-11-11');
+  assert.equal(await page.$eval(`${dialog} input[aria-label="筛选截止日期"]`, el => el.value), '2026-11-18');
+  await button('取消');
+  await button('近一周'); await expectRows(['parent', 'today', 'weekAgo', 'past']);
+  assert.match(await page.$eval('[data-date-filter-summary]', el => el.textContent), /结束日期：2026-11-11 至 2026-11-18/);
   assert.equal(await page.$eval('[data-task-toggle=parent]', el => el.getAttribute('aria-expanded')), 'true');
   // Both predicates must be satisfied by the same child; an otherwise matching ancestor is not enough.
   await fill('input[placeholder="搜索任务..."]', '范围外'); await expectRows([]);
@@ -157,13 +164,15 @@ async function fixture(minute) {
   assert.deepEqual(preferences.currentView.dateFilter, { kind: 'custom', field: 'either', from: '2026-11-18', to: '2026-11-24' });
   await open(); await expectRows(['parent', 'today', 'last', 'start']);
   await button('近一周'); await saveLayout(); assert.deepEqual(preferences.currentView.dateFilter, { kind: 'week' });
-  await open(); await expectRows(['parent', 'today', 'last']);
+  await open(); await expectRows(['parent', 'today', 'weekAgo', 'past']);
   // Relative presets refresh when the app regains focus on the next calendar day.
   await page.evaluate(() => { window.__dateFilterNow = Date.parse('2026-11-19T00:30:00Z'); window.dispatchEvent(new Event('focus')); });
-  await expectRows(['parent', 'last', 'outside']);
-  assert.match(await page.$eval('[data-date-filter-summary]', el => el.textContent), /2026-11-19 至 2026-11-25/);
+  await expectRows(['parent', 'today', 'past']);
+  assert.match(await page.$eval('[data-date-filter-summary]', el => el.textContent), /2026-11-12 至 2026-11-19/);
   await button('近一周'); await expectRows(dates.map(row => row[0]));
   await button('自定义日期');
+  assert.equal(await page.$eval(`${dialog} input[aria-label="筛选起始日期"]`, el => el.value), '2026-11-12');
+  assert.equal(await page.$eval(`${dialog} input[aria-label="筛选截止日期"]`, el => el.value), '2026-11-19');
   await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
   await page.waitForSelector(dialog, { hidden: true });
   assert.equal(await page.evaluate(() => document.activeElement.textContent), '自定义日期');

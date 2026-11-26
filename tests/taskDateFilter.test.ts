@@ -2,18 +2,20 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { normalizeTaskDateFilter, resolveTaskDateFilter, taskMatchesDateRange, type TaskDateRange } from '../lib/taskDateFilter'
 
-test('near-week means seven calendar dates starting today, including across month, year and DST boundaries', () => {
-  for (const [today, end] of [['2026-11-18', '2026-11-24'], ['2026-12-29', '2027-01-04'], ['2028-02-26', '2028-03-03'], ['2026-03-06', '2026-03-12']]) {
+test('near-week runs from one week before today through today, including across month, year and DST boundaries', () => {
+  for (const [today, start] of [['2026-11-18', '2026-11-11'], ['2026-11-26', '2026-11-19'], ['2027-01-04', '2026-12-28'],
+    ['2028-03-03', '2028-02-25'], ['2026-03-10', '2026-03-03'], ['2026-11-03', '2026-10-27']]) {
     const range = resolveTaskDateFilter({ kind: 'week' }, today)!
-    assert.deepEqual(range, { field: 'end', from: today, to: end })
-    assert.equal(taskMatchesDateRange({ end_date: `${today}T00:00:00` }, range), true)
-    assert.equal(taskMatchesDateRange({ end_date: `${end}T23:59:59` }, range), true)
+    assert.deepEqual(range, { field: 'end', from: start, to: today })
+    assert.equal(taskMatchesDateRange({ end_date: `${start}T00:00:00` }, range), true)
+    assert.equal(taskMatchesDateRange({ end_date: `${today}T23:59:59` }, range), true)
   }
   const range = resolveTaskDateFilter({ kind: 'week' }, '2026-11-18')!
-  for (const end_date of ['2026-11-17T23:59:59', '2026-11-25T00:00:00', null, '', 'broken']) {
-    assert.equal(taskMatchesDateRange({ start_date: '2026-11-20', end_date }, range), false)
+  for (const end_date of ['2026-11-10T23:59:59', '2026-11-19T00:00:00', '2026-11-24', null, '', 'broken']) {
+    assert.equal(taskMatchesDateRange({ start_date: '2026-11-17', end_date }, range), false)
   }
-  assert.deepEqual(resolveTaskDateFilter({ kind: 'week' }, '2026-11-19'), { field: 'end', from: '2026-11-19', to: '2026-11-25' })
+  assert.equal(taskMatchesDateRange({ end_date: '2026-11-17T23:59:59' }, range), true)
+  assert.deepEqual(resolveTaskDateFilter({ kind: 'week' }, '2026-11-19'), { field: 'end', from: '2026-11-12', to: '2026-11-19' })
   assert.equal(resolveTaskDateFilter(null, '2026-11-18'), null)
 })
 
